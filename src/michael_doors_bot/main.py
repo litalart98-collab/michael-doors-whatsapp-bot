@@ -239,10 +239,20 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/debug-test", response_class=JSONResponse)
 async def debug_test():
-    """Run a quick test message and return the result — remove before production."""
+    """Full synchronous test — processes message and returns result."""
     try:
-        result = await get_reply("test@c.us", "שלום", config.ANTHROPIC_API_KEY)
-        return {"ok": True, "reply": result["reply_text"], "green_api_url": config.GREEN_API_URL}
+        sender = "972500000000@c.us"
+        text = "שלום"
+        result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
+        _record_lead(sender, text, result, False)
+        leads = _load_leads(False)
+        return {
+            "ok": True,
+            "reply": result["reply_text"],
+            "green_api_url": config.GREEN_API_URL,
+            "leads_path": str(_LEADS_FILE),
+            "leads_count": len(leads),
+        }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
