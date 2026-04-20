@@ -188,10 +188,10 @@ _SCENARIOS: dict[str, dict] = {
     },
     "detailed_inquiry_interior": {
         "handoff_to_human": False, "needs_frame_removal": False,
-        "summary": "Customer specified interior door with clear intent — asking for project context",
+        "summary": "Customer specified interior door with clear intent — asking for project status",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אשמח שתכתבו אם מדובר בדלת פנים לבית, דירה או פרויקט, כדי שנוכל לכוון אתכם נכון."
+            "כדי שנוכל להכין עבורכם הצעת מחיר מדויקת — האם מדובר בהחלפה של דלתות פנים קיימות, בית בשיפוץ, או שמדובר בבית חדש ללא דלתות פנים כרגע?"
         ),
     },
     "entrance_doors": {
@@ -205,11 +205,11 @@ _SCENARIOS: dict[str, dict] = {
     },
     "interior_doors": {
         "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer browsing interior doors — guiding toward project context",
+        "summary": "Customer browsing interior doors — asking for project status",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "כן, בהחלט, יש אצלנו גם דלתות פנים במגוון סגנונות.\n"
-            "אשמח שתכתבו אם מדובר בדלת פנים לבית, דירה או פרויקט אחר, כדי שנוכל לכוון אתכם נכון."
+            "כן, בהחלט, יש אצלנו דלתות פנים במגוון סגנונות וצבעים.\n"
+            "כדי שנוכל להכין עבורכם הצעת מחיר מדויקת — האם מדובר בהחלפה של דלתות פנים קיימות, בית בשיפוץ, או שמדובר בבית חדש ללא דלתות פנים כרגע?"
         ),
     },
     "vague_inquiry": {
