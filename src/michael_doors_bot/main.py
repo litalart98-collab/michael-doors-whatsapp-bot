@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ROOT            = Path(__file__).parent.parent.parent.parent
+_ROOT            = Path(__file__).parent.parent.parent
 _LEADS_FILE      = _ROOT / "leads.json"
 _TEST_LEADS_FILE = _ROOT / "leads_test.json"
 _SESSIONS_FILE   = _ROOT / "sessions.json"
