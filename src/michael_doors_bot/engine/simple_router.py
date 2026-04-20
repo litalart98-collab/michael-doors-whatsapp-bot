@@ -353,6 +353,38 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     return structured
 
 
+async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
+    history = _conversations.get(sender, [])
+    if len(history) < 2:
+        return (
+            "שלום, רצינו לוודא שהמידע שמסרנו היה ברור. "
+            "האם תרצו להמשיך את הפנייה, או שנסגור אותה בינתיים?"
+        )
+    client = _get_claude(anthropic_api_key)
+    system = (
+        "אתה נציג מכירות של דלתות מיכאל. "
+        "כתוב הודעת המשך קצרה ומקצועית (עד 3 שורות) ללקוח שלא ענה 15 דקות. "
+        "ההודעה צריכה: לציין שהפנייה עדיין פתוחה, לחדש בקצרה את הנושא שנדון, "
+        "ולשאול אם הלקוח רוצה להמשיך את השיחה או לסגור את הפנייה. "
+        "בעברית בלבד. ללא JSON. ללא אימוג'ים. שפה חמה ומקצועית."
+    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            system=system,
+            messages=history[-6:],
+            timeout=15.0,
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        logger.error("get_followup_message error | sender=%s | %s", sender, exc)
+        return (
+            "שלום, רצינו לוודא שהמידע שמסרנו היה ברור. "
+            "האם תרצו להמשיך את הפנייה, או שנסגור אותה בינתיים?"
+        )
+
+
 def clear_conversation(sender: str) -> None:
     if sender in _conversations:
         del _conversations[sender]

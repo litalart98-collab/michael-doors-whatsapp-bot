@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
-from .engine.simple_router import clear_conversation, get_reply
+from .engine.simple_router import clear_conversation, get_followup_message, get_reply
 from .providers.greenapi import GreenAPIClient
 
 logging.basicConfig(
@@ -27,7 +27,9 @@ _LEADS_FILE      = _ROOT / "leads.json"
 _TEST_LEADS_FILE = _ROOT / "leads_test.json"
 _SESSIONS_FILE   = _ROOT / "sessions.json"
 
-SESSION_TIMEOUT  = 30 * 60  # seconds
+SESSION_TIMEOUT       = 30 * 60  # seconds
+FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
+CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 
 green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
 
@@ -82,6 +84,70 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
         lead["messages"].append({"from": "bot", "text": result["reply_text"], "time": datetime.utcnow().isoformat()})
 
     _save_leads(leads, is_test)
+
+
+# ── Follow-up tracker ─────────────────────────────────────────────────────────
+# {sender: {"last_bot_time": float, "followup_sent": bool, "followup_time": float, "closed": bool}}
+_followup: dict[str, dict] = {}
+
+_CLOSE_MSG = (
+    "מכיוון שלא קיבלנו תגובה, הפנייה נסגרת בינתיים. "
+    "אם תרצו לחזור אלינו בכל עת — נשמח לעזור. שיהיה יום טוב!"
+)
+
+
+def _followup_reset(sender: str) -> None:
+    import time
+    state = _followup.get(sender)
+    if state and state.get("closed"):
+        _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
+    elif state:
+        state["last_bot_time"] = time.time()
+        state["followup_sent"] = False
+        state["followup_time"] = 0.0
+    else:
+        _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
+
+
+def _followup_mark_bot_replied(sender: str) -> None:
+    import time
+    if sender not in _followup:
+        _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
+    else:
+        _followup[sender]["last_bot_time"] = time.time()
+        _followup[sender]["closed"] = False
+
+
+async def _followup_loop() -> None:
+    import time
+    logger.info("Follow-up loop started")
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        for sender, state in list(_followup.items()):
+            if state.get("closed"):
+                continue
+            last_bot = state.get("last_bot_time", 0.0)
+            followup_sent = state.get("followup_sent", False)
+            followup_time = state.get("followup_time", 0.0)
+
+            if not followup_sent and now - last_bot >= FOLLOWUP_DELAY:
+                try:
+                    msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)
+                    await green.send_message(sender, msg)
+                    state["followup_sent"] = True
+                    state["followup_time"] = time.time()
+                    logger.info("Follow-up sent | sender=%s", sender)
+                except Exception as exc:
+                    logger.error("Follow-up error | sender=%s | %s", sender, exc)
+
+            elif followup_sent and now - followup_time >= CLOSE_AFTER_FOLLOWUP:
+                try:
+                    await green.send_message(sender, _CLOSE_MSG)
+                    state["closed"] = True
+                    logger.info("Inquiry closed | sender=%s", sender)
+                except Exception as exc:
+                    logger.error("Close message error | sender=%s | %s", sender, exc)
 
 
 # ── Session helpers (test mode) ───────────────────────────────────────────────
@@ -149,11 +215,15 @@ async def _process_message(sender: str, text: str) -> None:
                 return
             _touch_session(sender)
 
+        # Customer replied — reset follow-up timer
+        _followup_reset(sender)
+
         result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
         logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
         _record_lead(sender, text, result, config.TEST_MODE)
         try:
             await green.send_message(sender, result["reply_text"])
+            _followup_mark_bot_replied(sender)
             logger.info("Message sent to %s", sender)
         except Exception as send_err:
             logger.error("Send failed | sender=%s | %s", sender, send_err)
@@ -197,9 +267,11 @@ async def _poll_loop() -> None:
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    task = asyncio.create_task(_poll_loop())
+    poll_task    = asyncio.create_task(_poll_loop())
+    followup_task = asyncio.create_task(_followup_loop())
     yield
-    task.cancel()
+    poll_task.cancel()
+    followup_task.cancel()
 
 
 app = FastAPI(lifespan=_lifespan)
