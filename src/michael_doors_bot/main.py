@@ -1,6 +1,6 @@
 """
-FastAPI server + Green API polling loop.
-Polling is preferred over webhooks on Render free tier (avoids cold-start missed messages).
+FastAPI server — webhook mode (Green API sends POST on each incoming message).
+Polling loop runs as fallback if webhook is not configured.
 """
 import asyncio
 import json
@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
@@ -45,7 +45,10 @@ def _load_leads(is_test: bool) -> dict:
 
 
 def _save_leads(leads: dict, is_test: bool) -> None:
-    _leads_path(is_test).write_text(json.dumps(leads, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        _leads_path(is_test).write_text(json.dumps(leads, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.error("Failed to save leads: %s", e)
 
 
 def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> None:
@@ -130,34 +133,38 @@ def _close_session(sender: str) -> None:
 
 # ── Message processor ─────────────────────────────────────────────────────────
 async def _process_message(sender: str, text: str) -> None:
-    if config.TEST_MODE:
-        if sender != config.TEST_PHONE:
-            return
-        if text.strip() == "#test":
-            _open_session(sender)
-            await green.send_message(sender, "מצב טסט הופעל. שלח הודעה כלשהי להתחיל.")
-            return
-        if text.strip() == "#endtest":
-            _close_session(sender)
-            await green.send_message(sender, "מצב טסט הסתיים.")
-            return
-        if not _has_active_session(sender):
-            return
-        _touch_session(sender)
+    try:
+        if config.TEST_MODE:
+            if sender != config.TEST_PHONE:
+                return
+            if text.strip() == "#test":
+                _open_session(sender)
+                await green.send_message(sender, "מצב טסט הופעל. שלח הודעה כלשהי להתחיל.")
+                return
+            if text.strip() == "#endtest":
+                _close_session(sender)
+                await green.send_message(sender, "מצב טסט הסתיים.")
+                return
+            if not _has_active_session(sender):
+                return
+            _touch_session(sender)
 
-    result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
-    await green.send_message(sender, result["reply_text"])
-    _record_lead(sender, text, result, config.TEST_MODE)
+        result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
+        logger.info("Sending reply to %s: %s", sender, result["reply_text"][:60])
+        await green.send_message(sender, result["reply_text"])
+        _record_lead(sender, text, result, config.TEST_MODE)
+    except Exception as exc:
+        logger.error("_process_message error | sender=%s | %s", sender, exc)
 
 
-# ── Polling loop ──────────────────────────────────────────────────────────────
+# ── Polling loop (fallback when no webhook configured) ────────────────────────
 async def _poll_loop() -> None:
-    logger.info("Polling loop started")
+    logger.info("Polling loop started (fallback mode)")
     while True:
         try:
             notification = await green.receive_notification()
             if not notification:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 continue
 
             receipt_id = notification.get("receiptId")
@@ -172,8 +179,8 @@ async def _poll_loop() -> None:
                     or ""
                 )
                 if sender and text:
-                    logger.info("Incoming | sender=%s | text=%s", sender, text[:60])
-                    asyncio.create_task(_process_message(sender, text))
+                    logger.info("Poll incoming | sender=%s | text=%s", sender, text[:60])
+                    await _process_message(sender, text)
 
             if receipt_id:
                 await green.delete_notification(receipt_id)
@@ -196,15 +203,17 @@ app = FastAPI(lifespan=_lifespan)
 
 @app.get("/", response_class=JSONResponse)
 async def health():
-    return {"status": "Bot is running"}
+    return {"status": "Bot is running", "mode": "webhook+polling"}
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False}, status_code=400)
+
+    logger.info("Webhook received: typeWebhook=%s", body.get("typeWebhook"))
 
     if body.get("typeWebhook") != "incomingMessageReceived":
         return JSONResponse({"ok": True})
@@ -219,14 +228,14 @@ async def webhook(request: Request):
 
     if sender and text:
         logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
-        asyncio.create_task(_process_message(sender, text))
+        background_tasks.add_task(_process_message, sender, text)
 
     return JSONResponse({"ok": True})
 
 
 @app.get("/conversations", response_class=HTMLResponse)
-async def conversations(test: str = "true", format: str = "html"):
-    is_test = test.lower() != "false"
+async def conversations(test: str = "false", format: str = "html"):
+    is_test = test.lower() == "true"
     leads = _load_leads(is_test)
     entries = list(leads.values())
 
@@ -239,9 +248,9 @@ async def conversations(test: str = "true", format: str = "html"):
             is_bot = m["from"] == "bot"
             css = "bot" if is_bot else "customer"
             sender_label = "🤖 בוט" if is_bot else "👤 לקוח"
-            text = m["text"].replace("<", "&lt;")
+            text_safe = m["text"].replace("<", "&lt;")
             time_str = datetime.fromisoformat(m["time"]).strftime("%d/%m/%Y %H:%M")
-            rows += f'<tr class="{css}"><td>{lead["phone"]}</td><td>{sender_label}</td><td style="white-space:pre-wrap">{text}</td><td>{time_str}</td></tr>'
+            rows += f'<tr class="{css}"><td>{lead["phone"]}</td><td>{sender_label}</td><td style="white-space:pre-wrap">{text_safe}</td><td>{time_str}</td></tr>'
 
     total_msgs = sum(len(l.get("messages", [])) for l in entries)
 

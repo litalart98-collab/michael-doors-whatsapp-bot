@@ -7,6 +7,6 @@ RUN pip install --no-cache-dir "fastapi>=0.111.0" "uvicorn[standard]>=0.29.0" "a
 
 COPY . .
 
-EXPOSE 3000
+EXPOSE 10000
 
-CMD ["uvicorn", "src.michael_doors_bot.main:app", "--host", "0.0.0.0", "--port", "3000"]
+CMD sh -c "uvicorn src.michael_doors_bot.main:app --host 0.0.0.0 --port ${PORT:-10000}"
