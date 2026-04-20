@@ -211,7 +211,7 @@ async def health():
 
 
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request):
     try:
         body = await request.json()
     except Exception:
@@ -232,7 +232,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     if sender and text:
         logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
-        background_tasks.add_task(_process_message, sender, text)
+        asyncio.ensure_future(_process_message(sender, text))
 
     return JSONResponse({"ok": True})
 
