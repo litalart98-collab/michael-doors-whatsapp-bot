@@ -251,7 +251,7 @@ def _detect_scenario(msg: str) -> dict | None:
         if _has_style(msg):
             return {**_SCENARIOS["detailed_inquiry"],
                     "summary": "Customer specified entrance door + style — asking about frame removal",
-                    "response": "היי, תודה שפניתם לדלתות מיכאל.\nהאם יש צורך בפירוק משקוף קיים?"}
+                    "response": "היי, תודה שפניתם לדלתות מיכאל.\nהאם יש צורך בהחלפת משקוף קיים?"}
         return _SCENARIOS["detailed_inquiry"]
     if _has_interior(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
         return _SCENARIOS["detailed_inquiry_interior"]

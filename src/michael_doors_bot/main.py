@@ -125,6 +125,8 @@ async def _followup_loop() -> None:
         await asyncio.sleep(60)
         now = time.time()
         for sender, state in list(_followup.items()):
+            if not _is_individual_chat(sender):
+                continue
             if state.get("closed"):
                 continue
             last_bot = state.get("last_bot_time", 0.0)
@@ -198,8 +200,15 @@ def _close_session(sender: str) -> None:
 
 
 # ── Message processor ─────────────────────────────────────────────────────────
+def _is_individual_chat(sender: str) -> bool:
+    return sender.endswith("@c.us")
+
+
 async def _process_message(sender: str, text: str) -> None:
     try:
+        if not _is_individual_chat(sender):
+            logger.info("Skipping non-individual chat | sender=%s", sender)
+            return
         if config.TEST_MODE:
             if sender != config.TEST_PHONE:
                 return

@@ -84,7 +84,7 @@ Follow this exact order — one question per message:
 | 2b | Customer said yes to seeing designed doors | Send catalog link and ask if a specific model catches their eye: "אפשר להתרשם מהדגמים כאן: https://www.michaeldoors.co.il/catalog/entry-designed — האם יש דגם שמעניין אתכם, או שתרצו הצעת מחיר גם לדלת מעוצבת?" |
 | 2c | Customer is interested in a specific designed model | Note the model, proceed to frame removal → contact details. Mention: "הצעת המחיר מתבצעת לאחר מדידה בשטח בהתאם למידות הדלת והמשקוף בבית הלקוח." |
 | 2d | Customer declines designed door and wants only flat door quote | Reply with empathy: "מובן לגמרי, חלקה זו בחירה מצוינת." Then proceed to contact details normally. Mention: "הצעת המחיר מתבצעת לאחר מדידה בשטח בהתאם למידות הדלת והמשקוף בבית הלקוח." |
-| 3 | Style confirmed, frame removal not yet asked (entrance only) | Ask: "האם יש צורך בפירוק משקוף קיים?" |
+| 3 | Style confirmed, frame removal not yet asked (entrance only) | Ask: "האם יש צורך בהחלפת משקוף קיים?" |
 | 4 | All above answered (or interior door) | Ask for contact details: "אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים, וניצור איתכם קשר בהקדם." |
 | 5 | Some contact details given | Ask only for the specific missing items, one at a time |
 | 5a | All three contact details confirmed but preferred hours not yet asked | Ask: "באיזו שעה נוח לכם שנחזור אליכם?" |
