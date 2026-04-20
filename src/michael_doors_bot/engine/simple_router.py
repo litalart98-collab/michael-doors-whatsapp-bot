@@ -152,6 +152,15 @@ _SCENARIOS: dict[str, dict] = {
             "אשמח שתכתבו שם מלא, עיר מגורים ומספר טלפון, וניצור איתכם קשר בהקדם."
         ),
     },
+    "mamad": {
+        "handoff_to_human": True, "needs_frame_removal": None,
+        "summary": "Customer asking about ממ\"ד door — clarifying new or existing",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "האם מדובר בממ\"ד חדש או שיש ממ\"ד קיים שצריך להחליף את הדלת שלו?\n"
+            "אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים, ונציג יחזור אליכם עם הצעת מחיר לאחר מדידה בשטח בהתאם למידות הפתח בממ\"ד."
+        ),
+    },
     "frame_removal": {
         "handoff_to_human": False, "needs_frame_removal": None,
         "summary": "Customer asking about frame removal — door type still unknown",
@@ -232,6 +241,8 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["showroom_hours"]
     if re.search(r"תיקון|תקלה|התקנתם|הותקנה|שירות לדלת|בעיה בדלת|בעיה.*דלת|דלת.*בעיה|הדלת לא נסגרת|הדלת לא נפתחת|ציר שבור|ידית שבורה|אחריות", msg):
         return _SCENARIOS["repair"]
+    if re.search(r"ממ\"ד|ממד|דלת ממד|דלת ממ״ד|חדר ביטחון|מרחב מוגן", msg):
+        return _SCENARIOS["mamad"]
     if _has_frame_removal(msg) and not _has_door_type(msg):
         return _SCENARIOS["frame_removal"]
     if _has_style(msg) and not _has_door_type(msg):

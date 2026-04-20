@@ -128,6 +128,11 @@ Reply:
 Reply: "אשמח שתכתבו שם מלא, עיר מגורים ומספר טלפון, וניצור איתכם קשר בהקדם."
 Set handoff_to_human: true.
 
+### Customer asks about ממ"ד door (safe room door)
+Ask: "האם מדובר בממ"ד חדש או שיש ממ"ד קיים שצריך להחליף את הדלת שלו?"
+Then collect contact details. Mention: "הצעת המחיר מתבצעת לאחר מדידה בשטח בהתאם למידות הפתח בממ"ד."
+Set handoff_to_human: true once contact details are collected.
+
 ### Customer asks about windows or shutters
 Ask: "אשמח להבין מה בדיוק מעניין אתכם — חלון, תריס, או שניהם?"
 Then collect contact details.
