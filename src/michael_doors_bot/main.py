@@ -150,9 +150,13 @@ async def _process_message(sender: str, text: str) -> None:
             _touch_session(sender)
 
         result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
-        logger.info("Sending reply to %s: %s", sender, result["reply_text"][:60])
-        await green.send_message(sender, result["reply_text"])
+        logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
         _record_lead(sender, text, result, config.TEST_MODE)
+        try:
+            await green.send_message(sender, result["reply_text"])
+            logger.info("Message sent to %s", sender)
+        except Exception as send_err:
+            logger.error("Send failed | sender=%s | %s", sender, send_err)
     except Exception as exc:
         logger.error("_process_message error | sender=%s | %s", sender, exc)
 
@@ -231,6 +235,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(_process_message, sender, text)
 
     return JSONResponse({"ok": True})
+
+
+@app.get("/debug-test", response_class=JSONResponse)
+async def debug_test():
+    """Run a quick test message and return the result — remove before production."""
+    try:
+        result = await get_reply("test@c.us", "שלום", config.ANTHROPIC_API_KEY)
+        return {"ok": True, "reply": result["reply_text"], "green_api_url": config.GREEN_API_URL}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.get("/conversations", response_class=HTMLResponse)
