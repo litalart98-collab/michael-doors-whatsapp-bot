@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
@@ -197,6 +197,31 @@ app = FastAPI(lifespan=_lifespan)
 @app.get("/", response_class=JSONResponse)
 async def health():
     return {"status": "Bot is running"}
+
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=400)
+
+    if body.get("typeWebhook") != "incomingMessageReceived":
+        return JSONResponse({"ok": True})
+
+    sender = body.get("senderData", {}).get("chatId", "")
+    msg_data = body.get("messageData", {})
+    text = (
+        msg_data.get("textMessageData", {}).get("textMessage")
+        or msg_data.get("extendedTextMessageData", {}).get("text")
+        or ""
+    )
+
+    if sender and text:
+        logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
+        asyncio.create_task(_process_message(sender, text))
+
+    return JSONResponse({"ok": True})
 
 
 @app.get("/conversations", response_class=HTMLResponse)
