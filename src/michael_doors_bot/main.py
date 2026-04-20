@@ -233,7 +233,9 @@ async def webhook(request: Request):
     if sender and text:
         logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
         try:
-            await asyncio.wait_for(_process_message(sender, text), timeout=25.0)
+            await asyncio.wait_for(_process_message(sender, text), timeout=60.0)
+            leads = _load_leads(config.TEST_MODE)
+            logger.info("After processing — leads count: %d", len(leads))
         except asyncio.TimeoutError:
             logger.error("Webhook timeout for sender=%s", sender)
         except Exception as exc:

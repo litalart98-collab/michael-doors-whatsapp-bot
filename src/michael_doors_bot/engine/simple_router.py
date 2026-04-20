@@ -315,7 +315,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
             max_tokens=600,
             system=_build_system(user_message),
             messages=_conversations[sender],
-            timeout=55.0,
+            timeout=50.0,
         )
         raw_text = response.content[0].text
     except Exception as exc:
