@@ -29,7 +29,7 @@ _SESSIONS_FILE   = _ROOT / "sessions.json"
 
 SESSION_TIMEOUT  = 30 * 60  # seconds
 
-green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN)
+green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
 
 # ── Leads helpers ─────────────────────────────────────────────────────────────
 def _leads_path(is_test: bool) -> Path:

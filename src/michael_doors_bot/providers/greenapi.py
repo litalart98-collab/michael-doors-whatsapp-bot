@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class GreenAPIClient:
-    def __init__(self, instance_id: str, token: str):
-        self._base = f"https://api.green-api.com/waInstance{instance_id}"
+    def __init__(self, instance_id: str, token: str, api_url: str = "https://api.green-api.com"):
+        self._base = f"{api_url.rstrip('/')}/waInstance{instance_id}"
         self._token = token
 
     async def send_message(self, chat_id: str, message: str) -> dict:
