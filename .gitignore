@@ -1,14 +1,24 @@
-# Dependencies
-node_modules/
-
 # Environment variables (sensitive keys)
 .env
 .env.local
 .env.*.local
 
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node.js (legacy)
+node_modules/
+
 # Runtime data files
 conversations.json
 sessions.json
+leads.json
 leads_test.json
 
 # macOS
@@ -16,7 +26,6 @@ leads_test.json
 
 # Logs
 *.log
-npm-debug.log*
 
 # Claude Code
 .claude/
