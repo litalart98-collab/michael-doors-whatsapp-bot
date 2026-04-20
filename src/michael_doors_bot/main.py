@@ -232,7 +232,12 @@ async def webhook(request: Request):
 
     if sender and text:
         logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
-        asyncio.ensure_future(_process_message(sender, text))
+        try:
+            await asyncio.wait_for(_process_message(sender, text), timeout=25.0)
+        except asyncio.TimeoutError:
+            logger.error("Webhook timeout for sender=%s", sender)
+        except Exception as exc:
+            logger.error("Webhook processing error: %s", exc)
 
     return JSONResponse({"ok": True})
 
