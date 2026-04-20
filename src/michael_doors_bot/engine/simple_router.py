@@ -40,10 +40,13 @@ def _save_conversations() -> None:
 # ── Business context ──────────────────────────────────────────────────────────
 _BUSINESS = {
     "name":    "Michael Doors",
-    "phone":   "052-000-0000",
+    "phone":   "054-2787578",
     "products": [
-        "Interior doors", "Exterior doors", "Security doors",
-        "Sliding doors", "Aluminum windows", "PVC windows", "Shutters",
+        "Entrance doors (smooth & designed): Nefachim, Panoramic, Greek, Mercury, Eden, Eden Brass series",
+        "Interior doors: smooth, grooves, squares, arc, cross styles",
+        "Hardware & handles: 15+ models, classic/hi-tech/synagogue styles",
+        "Institutional & warehouse doors",
+        "Synagogue doors (custom)",
     ],
     "hours": {"start": 8, "end": 20, "tz": "Asia/Jerusalem"},
 }
