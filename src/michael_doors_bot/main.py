@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import config
 from .engine.simple_router import clear_conversation, get_followup_message, get_reply
 from .providers.greenapi import GreenAPIClient
+from .providers.google_sheets import append_lead
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +74,10 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
         lead["needs_frame_removal"] = result["needs_frame_removal"]
     if result.get("needs_installation") is not None:
         lead["needs_installation"] = result["needs_installation"]
+    if result.get("full_name"):
+        lead["full_name"] = result["full_name"]
+    if result.get("service_type"):
+        lead["service_type"] = result["service_type"]
     if result.get("handoff_to_human"):
         lead["handoff_to_human"] = True
         lead["handoff_time"] = datetime.utcnow().isoformat()
@@ -84,6 +89,25 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
         lead["messages"].append({"from": "bot", "text": result["reply_text"], "time": datetime.utcnow().isoformat()})
 
     _save_leads(leads, is_test)
+    return lead
+
+
+async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
+    if not config.GOOGLE_SHEETS_WEBHOOK_URL:
+        return
+    if not result.get("handoff_to_human"):
+        return
+    if lead.get("sheets_sent"):
+        return
+    row = {
+        "full_name":               lead.get("full_name", ""),
+        "service_type":            lead.get("service_type", ""),
+        "datetime":                lead.get("firstContact", ""),
+        "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
+        "phone":                   lead.get("phone", ""),
+    }
+    await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
+    lead["sheets_sent"] = True
 
 
 # ── Follow-up tracker ─────────────────────────────────────────────────────────
@@ -229,7 +253,8 @@ async def _process_message(sender: str, text: str) -> None:
 
         result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
         logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
-        _record_lead(sender, text, result, config.TEST_MODE)
+        lead = _record_lead(sender, text, result, config.TEST_MODE)
+        await _maybe_send_to_sheets(lead, result)
         try:
             await green.send_message(sender, result["reply_text"])
             _followup_mark_bot_replied(sender)

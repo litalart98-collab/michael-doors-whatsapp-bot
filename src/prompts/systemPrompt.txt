@@ -237,7 +237,9 @@ Always respond with valid JSON only. No text outside the JSON object.
   "summary": "One-line internal note in English",
   "preferred_contact_hours": null,
   "needs_frame_removal": null,
-  "needs_installation": null
+  "needs_installation": null,
+  "full_name": null,
+  "service_type": null
 }
 
 Field rules:
@@ -247,3 +249,5 @@ Field rules:
 - preferred_contact_hours: null, or a string like "בוקר", "אחר הצהריים", "18:00–20:00" once the customer specifies
 - needs_frame_removal: true / false / null
 - needs_installation: true / false / null
+- full_name: the customer's full name once provided, otherwise null. Hebrew string.
+- service_type: one of: "דלת כניסה חלקה" / "דלת כניסה מעוצבת" / "דלתות פנים" / "ממ\"ד" / "דלת מוסדית" / "תיקון/אחריות" / "פרזול וידיות" / "תיאום ביקור אולם" / "אחר" — fill in as soon as the service type is clear, otherwise null.

@@ -13,3 +13,4 @@ ANTHROPIC_API_KEY: str     = os.environ["ANTHROPIC_API_KEY"]
 PORT: int                  = int(os.getenv("PORT", "3000"))
 TEST_MODE: bool            = os.getenv("TEST_MODE", "false").lower() == "true"
 TEST_PHONE: str            = os.getenv("TEST_PHONE", "").strip()
+GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
