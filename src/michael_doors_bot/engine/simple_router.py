@@ -105,7 +105,7 @@ def _build_system(user_msg: str) -> str:
     parts = [
         _PROMPT_PATH.read_text(encoding="utf-8"),
         f"## Business context\n{_context_block()}",
-        f"## Current time context\nCurrent Israeli greeting: {_israel_greeting()}. Use this greeting naturally when appropriate (e.g. in the opening message or when it fits the context). Do not force it into every message.",
+        f"## Current time context\nGreeting to use: «{_israel_greeting()}»\nCRITICAL: If there is NO prior assistant message in the conversation history — this is the first reply. You MUST embed the greeting inside the opening line, like this: 'היי, תודה שפניתם לדלתות מיכאל, {_israel_greeting()} 😊'. Never skip this on a first reply. Never repeat it after the first reply.",
     ]
     faqs = _find_faqs(user_msg)
     block = _faq_block(faqs)
@@ -262,6 +262,9 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["frame_removal"]
     if _has_style(msg) and not _has_door_type(msg):
         return _SCENARIOS["designed_doors"]
+    # Both door types in same message → Claude handles (greeting + proper dual response)
+    if _has_entrance(msg) and _has_interior(msg):
+        return None
     if _has_entrance(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
         if _has_style(msg):
             return {**_SCENARIOS["detailed_inquiry"],
