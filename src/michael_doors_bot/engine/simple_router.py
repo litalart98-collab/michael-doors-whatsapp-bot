@@ -87,10 +87,25 @@ def _faq_block(faqs: list[dict]) -> str | None:
     return "## מידע רלוונטי מבסיס הידע (לשימוש כהפניה בלבד — אל תעתיק את הניסוח)\n" + "\n".join(lines)
 
 
+def _israel_greeting() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    hour = datetime.now(ZoneInfo("Asia/Jerusalem")).hour
+    if 6 <= hour < 12:
+        return "בוקר טוב"
+    elif 12 <= hour < 17:
+        return "צהריים טובים"
+    elif 17 <= hour < 21:
+        return "ערב טוב"
+    else:
+        return "לילה טוב"
+
+
 def _build_system(user_msg: str) -> str:
     parts = [
         _PROMPT_PATH.read_text(encoding="utf-8"),
         f"## Business context\n{_context_block()}",
+        f"## Current time context\nCurrent Israeli greeting: {_israel_greeting()}. Use this greeting naturally when appropriate (e.g. in the opening message or when it fits the context). Do not force it into every message.",
     ]
     faqs = _find_faqs(user_msg)
     block = _faq_block(faqs)
