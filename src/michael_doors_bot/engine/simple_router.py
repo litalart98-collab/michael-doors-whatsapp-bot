@@ -154,8 +154,12 @@ def _is_greeting_only(m: str) -> bool:
 _SCENARIOS: dict[str, dict] = {
     "greeting": {
         "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Greeting only — asking how to help",
-        "response": "היי, תודה שפניתם לדלתות מיכאל, איך אפשר לעזור?",
+        "summary": "Greeting only — pitch + asking how to help",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — מגוון רחב של דגמים ועיצובים בהתאמה אישית, אחריות מקיפה של מעל שנתיים, ואולם תצוגה מרשים בנתיבות שבו תוכלו להתרשם ולמצוא בדיוק את מה שמתאים לבית שלכם. 🚪✨\n"
+            "במה אפשר לעזור?"
+        ),
     },
     "showroom_address": {
         "handoff_to_human": False, "needs_frame_removal": None,
