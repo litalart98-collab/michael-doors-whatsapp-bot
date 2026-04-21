@@ -374,24 +374,26 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
 
 
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
+    """15-min silence → personalized reminder that references the conversation topic."""
     history = _conversations.get(sender, [])
     if len(history) < 2:
         return (
-            "שלום, רצינו לוודא שהמידע שמסרנו היה ברור. "
-            "האם תרצו להמשיך את הפנייה, או שנסגור אותה בינתיים?"
+            "היי, רק רצינו לוודא שקיבלת את כל המידע שצריך 😊\n"
+            "הפנייה עדיין פתוחה — אם יש שאלה נוספת או רוצה להמשיך, נשמח לעזור!"
         )
     client = _get_claude(anthropic_api_key)
     system = (
-        "אתה נציג מכירות של דלתות מיכאל. "
-        "כתוב הודעת המשך קצרה ומקצועית (עד 3 שורות) ללקוח שלא ענה 15 דקות. "
-        "ההודעה צריכה: לציין שהפנייה עדיין פתוחה, לחדש בקצרה את הנושא שנדון, "
-        "ולשאול אם הלקוח רוצה להמשיך את השיחה או לסגור את הפנייה. "
-        "בעברית בלבד. ללא JSON. ללא אימוג'ים. שפה חמה ומקצועית."
+        "אתה נציג מכירות חם ומקצועי של דלתות מיכאל. "
+        "הלקוח לא ענה 15 דקות. כתוב הודעת תזכורת קצרה (2-3 שורות) שתכלול: "
+        "1. אזכור ספציפי של נושא השיחה (איזה דלת/שירות הלקוח שאל עליו) "
+        "2. הצעה להמשיך — שאלה קצרה שתעודד תגובה "
+        "3. אימוג'י אחד בלבד שמתאים להקשר "
+        "שפה אנושית וחמה, לא רובוטית. בעברית בלבד. ללא JSON."
     )
     try:
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=120,
             system=system,
             messages=history[-6:],
             timeout=15.0,
@@ -400,9 +402,55 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     except Exception as exc:
         logger.error("get_followup_message error | sender=%s | %s", sender, exc)
         return (
-            "שלום, רצינו לוודא שהמידע שמסרנו היה ברור. "
-            "האם תרצו להמשיך את הפנייה, או שנסגור אותה בינתיים?"
+            "היי, רק רצינו לוודא שקיבלת את כל המידע שצריך 😊\n"
+            "הפנייה עדיין פתוחה — אם יש שאלה נוספת או רוצה להמשיך, נשמח לעזור!"
         )
+
+
+async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
+    """Generate a warm, personalized closing when customer says goodbye/thanks."""
+    history = _conversations.get(sender, [])
+    client = _get_claude(anthropic_api_key)
+    system = (
+        "אתה נציג מכירות חם של דלתות מיכאל. "
+        "הלקוח סיים את השיחה (אמר תודה / להתראות / הביע הסכמה). "
+        "כתוב הודעת סגירה חמה וקצרה (2-3 שורות) שתכלול: "
+        "1. תודה חמה על הפנייה עם אימוג'י אחד חיובי "
+        "2. תזכורת שאפשר לחזור אלינו בכל עת "
+        "3. פרטי יצירת קשר: 054-2787578 "
+        "שפה אנושית, חמה, מכירתית. בעברית בלבד. ללא JSON."
+    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            system=system,
+            messages=(history[-4:] if len(history) >= 4 else history),
+            timeout=15.0,
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        logger.error("get_closing_message error | sender=%s | %s", sender, exc)
+        return (
+            "תודה רבה על הפנייה! 🙏\n"
+            "אנחנו כאן בכל עת שתצטרכו — שיהיה לכם יום נהדר!\n"
+            "דלתות מיכאל | 054-2787578"
+        )
+
+
+def is_closing_intent(message: str, conversation_turns: int) -> bool:
+    """Return True if message looks like a farewell/thank-you and conversation is underway."""
+    if conversation_turns < 2:
+        return False
+    m = message.strip()
+    return bool(re.match(
+        r"^(תודה רבה|תודה|תנקס|תנקיו|אחלה תודה|נשמע תודה|בסדר תודה|"
+        r"אוקי תודה|אוקיי תודה|הבנתי תודה|קיבלתי תודה|"
+        r"להתראות|ביי|שלום ולהתראות|יום טוב|שיהיה טוב|שיהיה יום טוב|"
+        r"הכל ברור|הכל טוב|קיבלתי את המידע|הכל מובן|"
+        r"אצור קשר|אחזור אליך|נחזור|נצור קשר|אעלה בקשר)[.!,\s]*$",
+        m, re.IGNORECASE,
+    ))
 
 
 def clear_conversation(sender: str) -> None:

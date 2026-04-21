@@ -5,6 +5,7 @@ Polling loop runs as fallback if webhook is not configured.
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,14 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
-from .engine.simple_router import clear_conversation, get_followup_message, get_reply
+from .engine.simple_router import (
+    _conversations as _conv_history,
+    clear_conversation,
+    get_closing_message,
+    get_followup_message,
+    get_reply,
+    is_closing_intent,
+)
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
 
@@ -118,13 +126,13 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
 _followup: dict[str, dict] = {}
 
 _CLOSE_MSG = (
-    "מכיוון שלא קיבלנו תגובה, הפנייה נסגרת בינתיים. "
-    "אם תרצו לחזור אלינו בכל עת — נשמח לעזור. שיהיה יום טוב!"
+    "מכיוון שלא קיבלנו תגובה, נסגור את הפנייה לעת עתה 🙂\n"
+    "אם תרצו לחזור אלינו בכל עת — אנחנו כאן!\n"
+    "דלתות מיכאל | 054-2787578"
 )
 
 
 def _followup_reset(sender: str) -> None:
-    import time
     state = _followup.get(sender)
     if state and state.get("closed"):
         _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
@@ -137,7 +145,6 @@ def _followup_reset(sender: str) -> None:
 
 
 def _followup_mark_bot_replied(sender: str) -> None:
-    import time
     if sender not in _followup:
         _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
     else:
@@ -146,7 +153,6 @@ def _followup_mark_bot_replied(sender: str) -> None:
 
 
 async def _followup_loop() -> None:
-    import time
     logger.info("Follow-up loop started")
     while True:
         await asyncio.sleep(60)
@@ -195,7 +201,6 @@ def _save_sessions() -> None:
 
 
 def _has_active_session(sender: str) -> bool:
-    import time
     ts = _sessions.get(sender)
     if ts is None:
         return False
@@ -207,7 +212,6 @@ def _has_active_session(sender: str) -> bool:
 
 
 def _open_session(sender: str) -> None:
-    import time
     _sessions[sender] = time.time()
     _save_sessions()
     clear_conversation(sender)
@@ -215,7 +219,6 @@ def _open_session(sender: str) -> None:
 
 
 def _touch_session(sender: str) -> None:
-    import time
     _sessions[sender] = time.time()
     _save_sessions()
 
@@ -253,6 +256,24 @@ async def _process_message(sender: str, text: str) -> None:
 
         # Customer replied — reset follow-up timer
         _followup_reset(sender)
+
+        # Smart closing: if customer says goodbye/thanks mid-conversation, close gracefully
+        conv_turns = len(_conv_history.get(sender, []))
+        if is_closing_intent(text, conv_turns):
+            logger.info("Closing intent detected | sender=%s", sender)
+            closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
+            try:
+                await green.send_message(sender, closing_msg)
+                _followup[sender] = {
+                    "last_bot_time": time.time(),
+                    "followup_sent": True,
+                    "followup_time": time.time(),
+                    "closed": True,
+                }
+                logger.info("Conversation closed gracefully | sender=%s", sender)
+            except Exception as send_err:
+                logger.error("Closing send failed | sender=%s | %s", sender, send_err)
+            return
 
         result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
         logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
