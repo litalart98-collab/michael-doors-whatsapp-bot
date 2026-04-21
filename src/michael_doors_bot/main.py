@@ -339,6 +339,9 @@ async def _poll_loop() -> None:
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    logger.info("=== BOT STARTING ===")
+    logger.info("TEST_MODE=%s | TEST_PHONE=%s", config.TEST_MODE, config.TEST_PHONE or "(not set)")
+    logger.info("GREEN_API_INSTANCE=%s", config.GREEN_API_INSTANCE_ID)
     poll_task    = asyncio.create_task(_poll_loop())
     followup_task = asyncio.create_task(_followup_loop())
     yield
