@@ -219,6 +219,7 @@ Accept immediately. Move to next step. Never repeat the question.
 - NEVER close without all 3 contact fields.
 - NEVER say "לא מכירה את הדגם" — always infer from product knowledge.
 - Do NOT summarize what the customer said. Respond and move forward.
+- NEVER ask "יש עיצוב שמושך אותך?" — instead ask: "יש דגם מסוים שאתה מעוניין לקבל עליו הצעת מחיר?"
 
 ---
 
