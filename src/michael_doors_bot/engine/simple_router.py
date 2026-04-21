@@ -391,14 +391,17 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     try:
         logger.info("Claude request | sender=%s | turns=%d", sender, len(_conversations[sender]))
         client = _get_claude(anthropic_api_key)
+        # Prefill assistant turn with "{" — forces Claude to output valid JSON
+        # and makes it impossible for any label/code-fence to appear before the object.
+        prefilled_messages = _conversations[sender] + [{"role": "assistant", "content": "{"}]
         response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=600,
             system=_build_system(user_message),
-            messages=_conversations[sender],
+            messages=prefilled_messages,
             timeout=50.0,
         )
-        raw_text = response.content[0].text
+        raw_text = "{" + response.content[0].text
     except Exception as exc:
         logger.error("Claude API error | sender=%s | %s", sender, exc)
         fallback = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע."
