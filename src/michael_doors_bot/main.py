@@ -258,18 +258,12 @@ async def _process_message(sender: str, text: str) -> None:
             return
         if config.TEST_MODE:
             if sender != config.TEST_PHONE:
+                return  # silently ignore all other numbers
+            if text.strip() == "#reset":
+                clear_conversation(sender)
+                _followup.pop(sender, None)
+                await green.send_message(sender, "שיחה אופסה ✓")
                 return
-            if text.strip() == "#test":
-                _open_session(sender)
-                await green.send_message(sender, "מצב טסט הופעל. שלח הודעה כלשהי להתחיל.")
-                return
-            if text.strip() == "#endtest":
-                _close_session(sender)
-                await green.send_message(sender, "מצב טסט הסתיים.")
-                return
-            if not _has_active_session(sender):
-                return
-            _touch_session(sender)
 
         # Customer replied — reset follow-up timer
         _followup_reset(sender)

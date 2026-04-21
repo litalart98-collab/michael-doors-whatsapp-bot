@@ -12,5 +12,9 @@ GREEN_API_URL: str         = os.getenv("GREEN_API_URL", f"https://{_instance_pre
 ANTHROPIC_API_KEY: str     = os.environ["ANTHROPIC_API_KEY"]
 PORT: int                  = int(os.getenv("PORT", "3000"))
 TEST_MODE: bool            = os.getenv("TEST_MODE", "false").lower() == "true"
-TEST_PHONE: str            = os.getenv("TEST_PHONE", "").strip()
+# Normalize TEST_PHONE to WhatsApp chat ID format (e.g. "0529330102" → "9720529330102@c.us")
+_raw_phone = os.getenv("TEST_PHONE", "").strip().replace("-", "").replace("+", "")
+if _raw_phone.startswith("0"):
+    _raw_phone = "972" + _raw_phone[1:]
+TEST_PHONE: str = (_raw_phone + "@c.us") if _raw_phone and not _raw_phone.endswith("@c.us") else _raw_phone
 GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
