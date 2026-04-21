@@ -325,6 +325,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "needs_frame_removal":     parsed.get("needs_frame_removal"),
             "needs_installation":      parsed.get("needs_installation"),
             "full_name":               parsed.get("full_name"),
+            "phone":                   parsed.get("phone"),
             "service_type":            parsed.get("service_type"),
             "city":                    parsed.get("city"),
         }
@@ -334,8 +335,8 @@ def _parse_response(raw: str, sender: str) -> dict:
             "reply_text": raw, "handoff_to_human": False,
             "summary": "Parse error — raw reply returned",
             "preferred_contact_hours": None, "needs_frame_removal": None,
-            "needs_installation": None, "full_name": None, "service_type": None,
-            "city": None,
+            "needs_installation": None, "full_name": None, "phone": None,
+            "service_type": None, "city": None,
         }
 
 

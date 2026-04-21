@@ -100,6 +100,8 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
         lead["needs_installation"] = result["needs_installation"]
     if result.get("full_name"):
         lead["full_name"] = result["full_name"]
+    if result.get("phone"):
+        lead["callback_phone"] = result["phone"]
     if result.get("service_type"):
         lead["service_type"] = result["service_type"]
     if result.get("city"):
@@ -125,13 +127,22 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
         return
     if lead.get("sheets_sent"):
         return
+    # Prefer callback phone given by customer; fall back to WhatsApp sender number
+    raw_phone = lead.get("callback_phone") or lead.get("phone", "")
+    # Normalize to Israeli format: "972529330102@c.us" → "052-9330102"
+    phone_clean = raw_phone.replace("@c.us", "").strip()
+    if phone_clean.startswith("972") and len(phone_clean) >= 11:
+        phone_clean = "0" + phone_clean[3:]
+    if len(phone_clean) == 10 and phone_clean.isdigit():
+        phone_clean = phone_clean[:3] + "-" + phone_clean[3:]
+
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
         "service_type":            lead.get("service_type", ""),
         "datetime":                lead.get("firstContact", ""),
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
-        "phone":                   lead.get("phone", ""),
+        "phone":                   phone_clean,
     }
     await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
     lead["sheets_sent"] = True
