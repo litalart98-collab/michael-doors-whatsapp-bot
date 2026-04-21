@@ -271,7 +271,7 @@ Use it to inform your reply but do NOT copy its wording. Follow this prompt's to
 
 ## OUTPUT FORMAT
 
-Always respond with valid JSON only. No text outside the JSON object.
+Always respond with a raw JSON object only. No markdown, no code fences, no "json" label, no text outside the JSON object. Start your response with `{` and end with `}`.
 
 {
   "reply_text": "ההודעה לשלוח ללקוח בעברית",

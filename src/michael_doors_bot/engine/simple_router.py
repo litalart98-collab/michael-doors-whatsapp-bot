@@ -312,10 +312,17 @@ def _get_claude(api_key: str) -> anthropic.AsyncAnthropic:
     return _claude
 
 
+_PARSE_ERROR_REPLY = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
+
+
 def _parse_response(raw: str, sender: str) -> dict:
     try:
-        cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+        cleaned = raw.strip()
+        # Strip markdown code fences: ```json ... ``` or ``` ... ```
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        # Strip bare "json" label that Claude sometimes adds without backticks
+        cleaned = re.sub(r"^json\s*", "", cleaned, flags=re.IGNORECASE).strip()
         parsed = json.loads(cleaned)
         return {
             "reply_text":              str(parsed.get("reply_text", "")),
@@ -330,10 +337,10 @@ def _parse_response(raw: str, sender: str) -> dict:
             "city":                    parsed.get("city"),
         }
     except Exception:
-        logger.warning("Non-JSON response | sender=%s — using raw text", sender)
+        logger.warning("Non-JSON response | sender=%s — raw: %s", sender, raw[:120])
         return {
-            "reply_text": raw, "handoff_to_human": False,
-            "summary": "Parse error — raw reply returned",
+            "reply_text": _PARSE_ERROR_REPLY, "handoff_to_human": False,
+            "summary": "Parse error — fallback reply sent",
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "phone": None,
             "service_type": None, "city": None,
