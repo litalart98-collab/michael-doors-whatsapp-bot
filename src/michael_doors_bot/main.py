@@ -258,7 +258,8 @@ async def _process_message(sender: str, text: str) -> None:
             return
         if config.TEST_MODE:
             if sender != config.TEST_PHONE:
-                return  # silently ignore all other numbers
+                logger.info("TEST_MODE: blocked sender=%s (allowed=%s)", sender, config.TEST_PHONE)
+                return
             if text.strip() == "#reset":
                 clear_conversation(sender)
                 _followup.pop(sender, None)
