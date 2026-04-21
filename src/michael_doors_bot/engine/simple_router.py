@@ -291,6 +291,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "needs_installation":      parsed.get("needs_installation"),
             "full_name":               parsed.get("full_name"),
             "service_type":            parsed.get("service_type"),
+            "city":                    parsed.get("city"),
         }
     except Exception:
         logger.warning("Non-JSON response | sender=%s — using raw text", sender)
@@ -299,6 +300,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "summary": "Parse error — raw reply returned",
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "service_type": None,
+            "city": None,
         }
 
 

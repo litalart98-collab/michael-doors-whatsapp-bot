@@ -78,6 +78,8 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
         lead["full_name"] = result["full_name"]
     if result.get("service_type"):
         lead["service_type"] = result["service_type"]
+    if result.get("city"):
+        lead["city"] = result["city"]
     if result.get("handoff_to_human"):
         lead["handoff_to_human"] = True
         lead["handoff_time"] = datetime.utcnow().isoformat()
@@ -101,6 +103,7 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
         return
     row = {
         "full_name":               lead.get("full_name", ""),
+        "city":                    lead.get("city", ""),
         "service_type":            lead.get("service_type", ""),
         "datetime":                lead.get("firstContact", ""),
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
