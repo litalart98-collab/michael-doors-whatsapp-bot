@@ -262,57 +262,69 @@ def _is_individual_chat(sender: str) -> bool:
     return sender.endswith("@c.us")
 
 
+# Per-sender locks: messages from the same sender are processed one at a time;
+# messages from different senders run in parallel without blocking each other.
+_sender_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_sender_lock(sender: str) -> asyncio.Lock:
+    if sender not in _sender_locks:
+        _sender_locks[sender] = asyncio.Lock()
+    return _sender_locks[sender]
+
+
 async def _process_message(sender: str, text: str) -> None:
-    try:
-        if not _is_individual_chat(sender):
-            logger.info("Skipping non-individual chat | sender=%s", sender)
-            return
-        if config.TEST_MODE:
-            if sender != config.TEST_PHONE:
-                logger.info("TEST_MODE: blocked sender=%s (allowed=%s)", sender, config.TEST_PHONE)
-                return
-            if text.strip() == "#reset":
-                clear_conversation(sender)
-                _followup.pop(sender, None)
-                await green.send_message(sender, "שיחה אופסה ✓")
-                return
-
-        # Customer replied — reset follow-up timer
-        _followup_reset(sender)
-
-        # Smart closing: if customer says goodbye/thanks mid-conversation, close gracefully
-        conv_turns = len(_conv_history.get(sender, []))
-        if is_closing_intent(text, conv_turns):
-            logger.info("Closing intent detected | sender=%s", sender)
-            closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
-            try:
-                await green.send_message(sender, closing_msg)
-                _followup[sender] = {
-                    "last_bot_time": time.time(),
-                    "followup_sent": True,
-                    "followup_time": time.time(),
-                    "closed": True,
-                }
-                logger.info("Conversation closed gracefully | sender=%s", sender)
-                await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
-            except Exception as send_err:
-                logger.error("Closing send failed | sender=%s | %s", sender, send_err)
-            return
-
-        result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
-        logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
-        lead = _record_lead(sender, text, result, config.TEST_MODE)
-        await _maybe_send_to_sheets(lead, result)
-        if result.get("handoff_to_human"):
-            await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
+    async with _get_sender_lock(sender):
         try:
-            await green.send_message(sender, result["reply_text"])
-            _followup_mark_bot_replied(sender)
-            logger.info("Message sent to %s", sender)
-        except Exception as send_err:
-            logger.error("Send failed | sender=%s | %s", sender, send_err)
-    except Exception as exc:
-        logger.error("_process_message error | sender=%s | %s", sender, exc)
+            if not _is_individual_chat(sender):
+                logger.info("Skipping non-individual chat | sender=%s", sender)
+                return
+            if config.TEST_MODE:
+                if sender != config.TEST_PHONE:
+                    logger.info("TEST_MODE: blocked sender=%s (allowed=%s)", sender, config.TEST_PHONE)
+                    return
+                if text.strip() == "#reset":
+                    clear_conversation(sender)
+                    _followup.pop(sender, None)
+                    await green.send_message(sender, "שיחה אופסה ✓")
+                    return
+
+            # Customer replied — reset follow-up timer
+            _followup_reset(sender)
+
+            # Smart closing: if customer says goodbye/thanks mid-conversation, close gracefully
+            conv_turns = len(_conv_history.get(sender, []))
+            if is_closing_intent(text, conv_turns):
+                logger.info("Closing intent detected | sender=%s", sender)
+                closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
+                try:
+                    await green.send_message(sender, closing_msg)
+                    _followup[sender] = {
+                        "last_bot_time": time.time(),
+                        "followup_sent": True,
+                        "followup_time": time.time(),
+                        "closed": True,
+                    }
+                    logger.info("Conversation closed gracefully | sender=%s", sender)
+                    await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
+                except Exception as send_err:
+                    logger.error("Closing send failed | sender=%s | %s", sender, send_err)
+                return
+
+            result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
+            logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
+            lead = _record_lead(sender, text, result, config.TEST_MODE)
+            await _maybe_send_to_sheets(lead, result)
+            if result.get("handoff_to_human"):
+                await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
+            try:
+                await green.send_message(sender, result["reply_text"])
+                _followup_mark_bot_replied(sender)
+                logger.info("Message sent to %s", sender)
+            except Exception as send_err:
+                logger.error("Send failed | sender=%s | %s", sender, send_err)
+        except Exception as exc:
+            logger.error("_process_message error | sender=%s | %s", sender, exc)
 
 
 # ── Polling loop (fallback when no webhook configured) ────────────────────────
