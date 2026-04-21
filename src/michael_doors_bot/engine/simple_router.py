@@ -48,27 +48,46 @@ _BUSINESS = {
         "Institutional & warehouse doors",
         "Synagogue doors (custom)",
     ],
-    "hours": {"start": 8, "end": 18, "tz": "Asia/Jerusalem", "days": "א'–ה'", "closed": "שישי, שבת וחגים"},
+    "hours": {"start": 9, "end": 18, "tz": "Asia/Jerusalem", "days": "א'–ה'", "fri_end": 13, "closed": "שבת וחגים"},
 }
 
 
 def _is_working_hours() -> bool:
     from datetime import datetime
     import zoneinfo
-    hour = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"])).hour
+    now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
+    hour, weekday = now.hour, now.weekday()  # 0=Mon … 5=Sat … 6=Sun (Israel: 4=Fri, 5=Sat)
+    if weekday == 5:  # Saturday — closed
+        return False
+    if weekday == 4:  # Friday — half day
+        return _BUSINESS["hours"]["start"] <= hour < _BUSINESS["hours"]["fri_end"]
     return _BUSINESS["hours"]["start"] <= hour < _BUSINESS["hours"]["end"]
 
 
 def _context_block() -> str:
-    status = (
-        f"within working hours ({_BUSINESS['hours']['start']}:00–{_BUSINESS['hours']['end']}:00)"
-        if _is_working_hours()
-        else "outside working hours — let the customer know and offer to schedule a callback"
-    )
+    from datetime import datetime
+    import zoneinfo
+    now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
+    weekday = now.weekday()
+    if weekday == 5:
+        status = "outside working hours (Saturday — closed)"
+    elif weekday == 4:
+        status = (
+            f"within working hours (Friday {_BUSINESS['hours']['start']}:00–{_BUSINESS['hours']['fri_end']}:00)"
+            if _is_working_hours()
+            else f"outside working hours (Friday closes at {_BUSINESS['hours']['fri_end']}:00)"
+        )
+    else:
+        status = (
+            f"within working hours ({_BUSINESS['hours']['start']}:00–{_BUSINESS['hours']['end']}:00)"
+            if _is_working_hours()
+            else "outside working hours — let the customer know and offer to schedule a callback"
+        )
     return "\n".join([
         f"Business: {_BUSINESS['name']}",
         f"Phone: {_BUSINESS['phone']}",
         f"Products: {', '.join(_BUSINESS['products'])}",
+        f"Hours: Sun–Thu 09:00–18:00 | Fri 09:00–13:00 | Sat closed",
         f"Current time status: {status}",
     ])
 
@@ -139,41 +158,39 @@ _SCENARIOS: dict[str, dict] = {
         "response": "היי, תודה שפניתם לדלתות מיכאל, איך אפשר לעזור?",
     },
     "showroom_address": {
-        "handoff_to_human": True, "needs_frame_removal": None,
-        "summary": "Customer asking for showroom address",
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Customer asking for showroom address — gave address, collecting contact",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אולם התצוגה שלנו נמצא בבעלי המלאכה 15, נתיבות.\n"
-            "שעות פעילות: ימים א'–ה', 08:00–18:00. סגור בימי שישי, שבת וחגים.\n"
-            "מומלץ לתאם פגישת ייעוץ מראש כדי להבטיח שנציג יהיה פנוי לטפל בכם באופן מלא.\n"
-            "אשמח שתשאירו שם מלא ומספר טלפון, וניצור איתכם קשר לתיאום."
+            "אולם התצוגה שלנו נמצא בבעלי המלאכה 15, נתיבות 📍\n"
+            "שעות פעילות: א'–ה' 09:00–18:00 | ו' 09:00–13:00 | שבת סגור.\n"
+            "מומלץ לתאם פגישת ייעוץ מראש — רוצים שאקבע לכם זמן?"
         ),
     },
     "showroom_hours": {
-        "handoff_to_human": True, "needs_frame_removal": None,
-        "summary": "Customer asking about hours or scheduling a showroom visit",
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Customer asking about hours — answered, offering to schedule visit",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "שעות הפעילות של אולם התצוגה: ימים א'–ה', 08:00–18:00. סגור בימי שישי, שבת וחגים.\n"
-            "מומלץ לתאם פגישת ייעוץ מראש כדי להבטיח שנציג יהיה פנוי לטפל בכם באופן מלא.\n"
-            "אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים, וניצור איתכם קשר לתיאום."
+            "שעות הפעילות: א'–ה' 09:00–18:00 | ו' 09:00–13:00 | שבת סגור 😊\n"
+            "רוצים לתאם ביקור באולם התצוגה?"
         ),
     },
     "repair": {
-        "handoff_to_human": True, "needs_frame_removal": None,
-        "summary": "Customer requesting repair or service",
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Customer requesting repair — asking what the issue is",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אשמח שתכתבו שם מלא, עיר מגורים ומספר טלפון, וניצור איתכם קשר בהקדם."
+            "אוי, אני ממש מצטערת לשמוע 💙 בואו נטפל בזה מיד.\n"
+            "מה בדיוק קורה עם הדלת?"
         ),
     },
     "mamad": {
-        "handoff_to_human": True, "needs_frame_removal": None,
+        "handoff_to_human": False, "needs_frame_removal": None,
         "summary": "Customer asking about ממ\"ד door — clarifying new or existing",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "האם מדובר בממ\"ד חדש או שיש ממ\"ד קיים שצריך להחליף את הדלת שלו?\n"
-            "אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים, ונציג יחזור אליכם עם הצעת מחיר לאחר מדידה בשטח בהתאם למידות הפתח בממ\"ד."
+            "שמחה לעזור! האם מדובר בממ\"ד חדש, או שיש ממ\"ד קיים שרוצים להחליף את דלתו?"
         ),
     },
     "frame_removal": {
@@ -335,15 +352,25 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         scenario = _detect_scenario(user_message)
         if scenario:
             logger.info("Scenario: %s | %s", scenario.get("summary", "?"), sender)
-            _conversations[sender].append({"role": "assistant", "content": scenario["response"]})
+            # Inject time-based greeting into the opening line
+            greeting = _israel_greeting()
+            response = scenario["response"].replace(
+                "היי, תודה שפניתם לדלתות מיכאל",
+                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊",
+                1,
+            )
+            _conversations[sender].append({"role": "assistant", "content": response})
             _save_conversations()
             return {
-                "reply_text":              scenario["response"],
+                "reply_text":              response,
                 "handoff_to_human":        scenario["handoff_to_human"],
                 "summary":                 scenario["summary"],
                 "preferred_contact_hours": None,
                 "needs_frame_removal":     scenario["needs_frame_removal"],
                 "needs_installation":      None,
+                "full_name":               None,
+                "service_type":            None,
+                "city":                    None,
             }
 
     # Claude
