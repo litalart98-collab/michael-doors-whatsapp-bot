@@ -453,6 +453,37 @@ def is_closing_intent(message: str, conversation_turns: int) -> bool:
     ))
 
 
+async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> str:
+    """Generate a structured Hebrew summary of the full conversation for CRM use."""
+    history = _conversations.get(sender, [])
+    if not history:
+        return "שיחה קצרה — לא נאסף מידע."
+    client = _get_claude(anthropic_api_key)
+    system = (
+        "אתה נציג של דלתות מיכאל. סכם את שיחת הוואטסאפ הבאה בעברית בצורה קצרה ומובנית.\n"
+        "כלול את הסעיפים הרלוונטיים בלבד (אל תכתוב סעיף שאין לו מידע):\n"
+        "• שם: [שם הלקוח אם ידוע]\n"
+        "• עיר: [עיר מגורים אם ידועה]\n"
+        "• בקשה: [מה הלקוח רצה — סוג דלת/שירות/דגם]\n"
+        "• פרטים: [מידות, צבע, סגנון, פירוק משקוף — אם הוזכרו]\n"
+        "• זמינות: [שעות מועדפות לחזרה אם הוזכרו]\n"
+        "• סטטוס: [הועבר לנציג / נסגרה בידידות / נסגרה ללא מענה / בהמתנה]\n"
+        "עד 6 שורות. ללא JSON. עברית בלבד."
+    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=system,
+            messages=history,
+            timeout=15.0,
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
+        return "שגיאה ביצירת סיכום."
+
+
 def clear_conversation(sender: str) -> None:
     if sender in _conversations:
         del _conversations[sender]

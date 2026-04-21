@@ -17,6 +17,7 @@ from . import config
 from .engine.simple_router import (
     _conversations as _conv_history,
     clear_conversation,
+    generate_conversation_summary,
     get_closing_message,
     get_followup_message,
     get_reply,
@@ -60,6 +61,21 @@ def _save_leads(leads: dict, is_test: bool) -> None:
         _leads_path(is_test).write_text(json.dumps(leads, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
         logger.error("Failed to save leads: %s", e)
+
+
+async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None:
+    """Generate a summary and attach it to the lead record."""
+    try:
+        summary = await generate_conversation_summary(sender, config.ANTHROPIC_API_KEY)
+        leads = _load_leads(is_test)
+        if sender in leads:
+            leads[sender]["conv_summary"] = summary
+            leads[sender]["close_reason"] = close_reason
+            leads[sender]["close_time"] = datetime.utcnow().isoformat()
+            _save_leads(leads, is_test)
+            logger.info("Summary saved | sender=%s | reason=%s", sender, close_reason)
+    except Exception as exc:
+        logger.error("_attach_summary error | sender=%s | %s", sender, exc)
 
 
 def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> None:
@@ -181,6 +197,7 @@ async def _followup_loop() -> None:
                     await green.send_message(sender, _CLOSE_MSG)
                     state["closed"] = True
                     logger.info("Inquiry closed | sender=%s", sender)
+                    await _attach_summary(sender, "נסגרה ללא מענה", False)
                 except Exception as exc:
                     logger.error("Close message error | sender=%s | %s", sender, exc)
 
@@ -271,6 +288,7 @@ async def _process_message(sender: str, text: str) -> None:
                     "closed": True,
                 }
                 logger.info("Conversation closed gracefully | sender=%s", sender)
+                await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
             except Exception as send_err:
                 logger.error("Closing send failed | sender=%s | %s", sender, send_err)
             return
@@ -279,6 +297,8 @@ async def _process_message(sender: str, text: str) -> None:
         logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
         lead = _record_lead(sender, text, result, config.TEST_MODE)
         await _maybe_send_to_sheets(lead, result)
+        if result.get("handoff_to_human"):
+            await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
         try:
             await green.send_message(sender, result["reply_text"])
             _followup_mark_bot_replied(sender)
@@ -403,6 +423,47 @@ async def conversations(test: str = "false", format: str = "html"):
     if format == "json":
         return JSONResponse(leads)
 
+    # ── Summary cards ─────────────────────────────────────────────────────────
+    _STATUS_COLOR = {
+        "הועבר לנציג":       "#e8f5e9",
+        "סגירה בידידות":     "#e3f2fd",
+        "נסגרה ללא מענה":    "#fff8e1",
+    }
+    _STATUS_BADGE = {
+        "הועבר לנציג":       "#2e7d32",
+        "סגירה בידידות":     "#1565c0",
+        "נסגרה ללא מענה":    "#f57f17",
+    }
+
+    summary_cards = ""
+    for lead in sorted(entries, key=lambda l: l.get("close_time", l.get("firstContact", "")), reverse=True):
+        s = lead.get("conv_summary")
+        if not s:
+            continue
+        phone_clean = lead["phone"].replace("@c.us", "")
+        name = lead.get("full_name") or phone_clean
+        reason = lead.get("close_reason", "—")
+        close_dt = ""
+        if lead.get("close_time"):
+            try:
+                close_dt = datetime.fromisoformat(lead["close_time"]).strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                pass
+        bg = _STATUS_COLOR.get(reason, "#fafafa")
+        badge_color = _STATUS_BADGE.get(reason, "#666")
+        summary_safe = s.replace("<", "&lt;").replace("\n", "<br>")
+        summary_cards += f"""
+  <div class="card" style="background:{bg}">
+    <div class="card-header">
+      <span class="name">{name}</span>
+      <span class="phone">{phone_clean}</span>
+      <span class="badge" style="background:{badge_color}">{reason}</span>
+      <span class="dt">{close_dt}</span>
+    </div>
+    <div class="card-body">{summary_safe}</div>
+  </div>"""
+
+    # ── Message rows ──────────────────────────────────────────────────────────
     rows = ""
     for lead in entries:
         for m in lead.get("messages", []):
@@ -411,9 +472,10 @@ async def conversations(test: str = "false", format: str = "html"):
             sender_label = "🤖 בוט" if is_bot else "👤 לקוח"
             text_safe = m["text"].replace("<", "&lt;")
             time_str = datetime.fromisoformat(m["time"]).strftime("%d/%m/%Y %H:%M")
-            rows += f'<tr class="{css}"><td>{lead["phone"]}</td><td>{sender_label}</td><td style="white-space:pre-wrap">{text_safe}</td><td>{time_str}</td></tr>'
+            rows += f'<tr class="{css}"><td>{lead["phone"].replace("@c.us","")}</td><td>{sender_label}</td><td style="white-space:pre-wrap">{text_safe}</td><td>{time_str}</td></tr>'
 
     total_msgs = sum(len(l.get("messages", [])) for l in entries)
+    summarized = sum(1 for l in entries if l.get("conv_summary"))
 
     return f"""<!DOCTYPE html>
 <html dir="rtl" lang="he">
@@ -421,24 +483,40 @@ async def conversations(test: str = "false", format: str = "html"):
   <meta charset="UTF-8">
   <title>שיחות בוט - דלתות מיכאל</title>
   <style>
-    body {{ font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; }}
-    h1 {{ color: #333; }}
-    table {{ border-collapse: collapse; width: 100%; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }}
+    body {{ font-family: Arial, sans-serif; padding: 20px; background: #f0f2f5; }}
+    h1 {{ color: #333; margin-bottom: 4px; }}
+    h2 {{ color: #555; font-size: 16px; margin: 24px 0 10px; }}
+    .meta {{ color: #888; font-size: 12px; margin-bottom: 16px; }}
+    a {{ color: #075e54; }}
+    .card {{ border-radius: 10px; padding: 14px 18px; margin-bottom: 12px;
+             box-shadow: 0 1px 3px rgba(0,0,0,0.12); }}
+    .card-header {{ display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }}
+    .name {{ font-weight: bold; font-size: 15px; }}
+    .phone {{ color: #555; font-size: 13px; }}
+    .badge {{ color: white; padding: 2px 9px; border-radius: 12px; font-size: 12px; }}
+    .dt {{ color: #888; font-size: 12px; margin-right: auto; }}
+    .card-body {{ font-size: 14px; line-height: 1.7; color: #333; white-space: pre-wrap; }}
+    table {{ border-collapse: collapse; width: 100%; background: white; border-radius: 8px;
+             overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }}
     th {{ background: #075e54; color: white; padding: 10px 14px; text-align: right; }}
     td {{ padding: 8px 14px; border-bottom: 1px solid #eee; vertical-align: top; max-width: 400px; }}
     tr.bot td {{ background: #dcf8c6; }}
     tr.customer td {{ background: #fff; }}
     tr:hover td {{ opacity: 0.85; }}
-    .meta {{ color: #888; font-size: 12px; margin-bottom: 12px; }}
   </style>
 </head>
 <body>
   <h1>שיחות בוט — דלתות מיכאל</h1>
-  <p class="meta">{len(entries)} לידים | {total_msgs} הודעות
+  <p class="meta">{len(entries)} לידים | {total_msgs} הודעות | {summarized} סיכומים
     &nbsp;|&nbsp; <a href="/conversations?test=false">פרודקשן</a>
     &nbsp;|&nbsp; <a href="/conversations?test=true">טסט</a>
     &nbsp;|&nbsp; <a href="/conversations?format=json">JSON</a>
   </p>
+
+  <h2>📋 סיכומי פניות</h2>
+  {summary_cards or '<p style="color:#999;font-size:14px">אין סיכומים עדיין — יופיעו כאשר פניות ייסגרו.</p>'}
+
+  <h2>💬 כל ההודעות</h2>
   <table>
     <thead><tr><th>מספר</th><th>שולח</th><th>הודעה</th><th>זמן</th></tr></thead>
     <tbody>{rows or '<tr><td colspan="4" style="text-align:center;color:#999">אין שיחות עדיין</td></tr>'}</tbody>
