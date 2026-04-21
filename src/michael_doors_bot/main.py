@@ -64,7 +64,11 @@ def _save_leads(leads: dict, is_test: bool) -> None:
 
 
 async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None:
-    """Generate a summary and attach it to the lead record."""
+    """Generate a summary and attach it to the lead record. Runs at most once per conversation."""
+    if sender in _summary_attached:
+        logger.info("Summary already attached, skipping | sender=%s", sender)
+        return
+    _summary_attached.add(sender)
     try:
         summary = await generate_conversation_summary(sender, config.ANTHROPIC_API_KEY)
         leads = _load_leads(is_test)
@@ -74,8 +78,11 @@ async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None
             leads[sender]["close_time"] = datetime.utcnow().isoformat()
             _save_leads(leads, is_test)
             logger.info("Summary saved | sender=%s | reason=%s", sender, close_reason)
+        # Clear history so a future re-contact starts fresh
+        clear_conversation(sender)
     except Exception as exc:
         logger.error("_attach_summary error | sender=%s | %s", sender, exc)
+        _summary_attached.discard(sender)  # allow retry on error
 
 
 def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> None:
@@ -133,8 +140,10 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
     phone_clean = raw_phone.replace("@c.us", "").strip()
     if phone_clean.startswith("972") and len(phone_clean) >= 11:
         phone_clean = "0" + phone_clean[3:]
-    if len(phone_clean) == 10 and phone_clean.isdigit():
-        phone_clean = phone_clean[:3] + "-" + phone_clean[3:]
+    # Strip dashes/spaces before digit check (Claude may return "052-1234567")
+    phone_digits = phone_clean.replace("-", "").replace(" ", "")
+    if len(phone_digits) == 10 and phone_digits.isdigit():
+        phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
     row = {
         "full_name":               lead.get("full_name", ""),
@@ -151,6 +160,9 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
 # ── Follow-up tracker ─────────────────────────────────────────────────────────
 # {sender: {"last_bot_time": float, "followup_sent": bool, "followup_time": float, "closed": bool}}
 _followup: dict[str, dict] = {}
+
+# Guard: prevent _attach_summary from running twice for the same conversation
+_summary_attached: set[str] = set()
 
 _CLOSE_MSG = (
     "מכיוון שלא קיבלנו תגובה, נסגור את הפנייה לעת עתה 🙂\n"
@@ -286,6 +298,7 @@ async def _process_message(sender: str, text: str) -> None:
                 if text.strip() == "#reset":
                     clear_conversation(sender)
                     _followup.pop(sender, None)
+                    _summary_attached.discard(sender)
                     await green.send_message(sender, "שיחה אופסה ✓")
                     return
 
@@ -294,7 +307,15 @@ async def _process_message(sender: str, text: str) -> None:
 
             # Smart closing: if customer says goodbye/thanks mid-conversation, close gracefully
             conv_turns = len(_conv_history.get(sender, []))
-            if is_closing_intent(text, conv_turns):
+            # Skip closing check when bot is waiting for summary confirmation
+            last_bot_msg = ""
+            history = _conv_history.get(sender, [])
+            for msg in reversed(history):
+                if msg.get("role") == "assistant":
+                    last_bot_msg = msg.get("content", "")
+                    break
+            awaiting_confirmation = "הכל נכון?" in last_bot_msg or "נכון?" in last_bot_msg
+            if is_closing_intent(text, conv_turns) and not awaiting_confirmation:
                 logger.info("Closing intent detected | sender=%s", sender)
                 closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
                 try:

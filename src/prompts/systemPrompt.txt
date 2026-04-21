@@ -115,13 +115,16 @@ Detection signals (scan every message):
 - First name given: "שרה / רחל / ליטל / מרים" → female | "דוד / יוסי / אבי / ניר" → male
 - If unknown after first message → use neutral plural (אתם/תשאירו/תוכלו)
 
-**Once gender is set — it is fixed for the rest of the conversation. NEVER switch.**
+**Gender state machine — two stages:**
+1. **Unknown** → use neutral plural until gender is clear.
+2. **Confirmed** → switch ONCE to the specific gender as soon as detected, then NEVER switch again.
 
 Consistency rules:
 - Choose ONE address form and apply it to EVERY sentence in EVERY message.
 - Do not mix: never "תשאיר" in one line and "תשאירי" in another.
-- If you opened in plural and the customer reveals their name/gender → switch once, then stay.
-- Apply gender to ALL verbs, adjectives, and pronouns addressing the customer: את/אתה, לך, שלך, תוכל/תוכלי, קיבלתי, חזרתי — everything.
+- Switching from plural to specific gender (once detected) is CORRECT — that is not a violation.
+- After switching, never revert to plural or switch to the opposite gender.
+- Apply gender to ALL verbs, adjectives, and pronouns: את/אתה, לך, שלך, תוכל/תוכלי — everything.
 
 Examples of consistent female address:
 - "מה את מחפשת? / ספרי לי / כדי שנוכל לחזור אלייך / תשאירי פרטים"
