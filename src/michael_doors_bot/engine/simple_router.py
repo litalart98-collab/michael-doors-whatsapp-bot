@@ -155,11 +155,7 @@ _SCENARIOS: dict[str, dict] = {
     "greeting": {
         "handoff_to_human": False, "needs_frame_removal": None,
         "summary": "Greeting only — pitch + asking how to help",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — מגוון רחב של דגמים ועיצובים בהתאמה אישית, אחריות מקיפה של מעל שנתיים, ואולם תצוגה מרשים בנתיבות שבו תוכלו להתרשם ולמצוא בדיוק את מה שמתאים לבית שלכם. 🚪✨\n"
-            "במה אפשר לעזור?"
-        ),
+        "response": "היי, תודה שפניתם לדלתות מיכאל.\nבמה אפשר לעזור?",
     },
     "showroom_address": {
         "handoff_to_human": False, "needs_frame_removal": None,
@@ -352,16 +348,22 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     if len(_conversations[sender]) > 20:
         _conversations[sender] = _conversations[sender][-20:]
 
+    _COMPANY_PITCH = (
+        "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — "
+        "מגוון רחב של דגמים ועיצובים בהתאמה אישית, אחריות מקיפה של מעל שנתיים, "
+        "ואולם תצוגה מרשים בנתיבות שבו תוכלו להתרשם ולמצוא בדיוק את מה שמתאים לבית שלכם. 🚪✨"
+    )
+
     # Scenario check on first message only
     if len(_conversations[sender]) == 1:
         scenario = _detect_scenario(user_message)
         if scenario:
             logger.info("Scenario: %s | %s", scenario.get("summary", "?"), sender)
-            # Inject time-based greeting into the opening line
+            # Inject greeting + company pitch into the opening line
             greeting = _israel_greeting()
             response = scenario["response"].replace(
                 "היי, תודה שפניתם לדלתות מיכאל",
-                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊",
+                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊\n{_COMPANY_PITCH}",
                 1,
             )
             _conversations[sender].append({"role": "assistant", "content": response})
