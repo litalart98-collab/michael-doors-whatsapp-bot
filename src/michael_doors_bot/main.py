@@ -163,6 +163,11 @@ def _queue_send_retry(chat_id: str, message: str) -> None:
         "chat_id": chat_id, "message": message,
         "attempts": 1, "next_retry": time.time() + _SEND_RETRY_DELAY,
     })
+    # Push the follow-up timer forward so it doesn't fire before the retry resolves.
+    # Without this, the follow-up loop could fire 15 min after the customer messaged,
+    # racing with the pending retry and confusing the customer.
+    if chat_id in _followup and not _followup[chat_id].get("closed"):
+        _followup[chat_id]["last_bot_time"] = time.time()
     logger.warning("[BOT:SEND_QUEUED] Message queued for retry in %ds | chat_id=%s", _SEND_RETRY_DELAY, chat_id)
 
 
@@ -429,8 +434,24 @@ async def _followup_loop() -> None:
             followup_time = state.get("followup_time", 0.0)
 
             if not followup_sent and now - last_bot >= FOLLOWUP_DELAY:
-                # Skip follow-up if last bot message was an error — don't pile on
                 history = _conv_history.get(sender, [])
+
+                # Guard: never follow-up if no customer reply is recorded in history.
+                # This means the bot sent its initial pitch but never received a reply
+                # (webhook miss, poll error, etc.). The customer is not "going silent" —
+                # they may never have seen our message. Sending a follow-up would be wrong.
+                customer_has_replied = any(m.get("role") == "user" for m in history)
+                if not customer_has_replied:
+                    logger.info("[BOT:FOLLOWUP_SKIP] No customer reply in history | sender=%s", sender)
+                    continue
+
+                # Guard: never follow-up while a send-retry is queued for this sender.
+                # The bot's reply may still land — firing the follow-up first is confusing.
+                if any(e["chat_id"] == sender for e in _failed_sends):
+                    logger.info("[BOT:FOLLOWUP_SKIP] Pending send retry — deferring follow-up | sender=%s", sender)
+                    continue
+
+                # Skip follow-up if last bot message was an error — don't pile on
                 last_bot_text = next((m["content"] for m in reversed(history) if m.get("role") == "assistant"), "")
                 if last_bot_text in ERROR_REPLIES:
                     logger.info("Skipping follow-up — last message was error | sender=%s", sender)

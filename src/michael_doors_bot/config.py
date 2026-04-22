@@ -48,21 +48,25 @@ DATA_DIR: str = os.getenv("DATA_DIR", "")
 # STRONGLY RECOMMENDED — without it, anyone can read all customer conversation data.
 ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "")
 
-# ── Production safety warnings ────────────────────────────────────────────────
+# ── Production safety checks ──────────────────────────────────────────────────
 _PROD_WARNINGS: list[str] = []
 if not TEST_MODE:
     if not WEBHOOK_SECRET:
-        _PROD_WARNINGS.append(
-            "WEBHOOK_SECRET is not set — /webhook accepts requests from anyone. "
-            "Generate a secret (openssl rand -hex 20), set WEBHOOK_SECRET=<value>, "
-            "and update the Green-API webhook URL to include ?token=<value>."
+        print(
+            "\n[FATAL] WEBHOOK_SECRET is not set — /webhook accepts requests from anyone.\n"
+            "Generate a secret: openssl rand -hex 20\n"
+            "Set WEBHOOK_SECRET=<value> and update the Green-API webhook URL to ?token=<value>.\n",
+            file=sys.stderr,
         )
+        sys.exit(1)
     if not DATA_DIR:
-        _PROD_WARNINGS.append(
-            "DATA_DIR is not set — leads.json, conversations.json, and dedup_ids.json "
-            "are stored in the ephemeral project root and WILL BE WIPED on every Render restart. "
-            "Add a Render Persistent Disk, mount it at /data, set DATA_DIR=/data."
+        print(
+            "\n[FATAL] DATA_DIR is not set — conversations.json and dedup_ids.json will be wiped\n"
+            "on every Render restart (ephemeral filesystem).\n"
+            "Add a Render Persistent Disk, mount at /data, set DATA_DIR=/data.\n",
+            file=sys.stderr,
         )
+        sys.exit(1)
     if not ADMIN_SECRET:
         _PROD_WARNINGS.append(
             "ADMIN_SECRET is not set — /diag and /conversations are publicly readable. "

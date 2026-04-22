@@ -278,7 +278,12 @@ def _build_system(user_msg: str) -> str:
 
 # ── Scenario classifier ───────────────────────────────────────────────────────
 def _has_entrance(m: str)     -> bool: return bool(re.search(r"דלת כניסה|דלתות כניסה", m))
-def _has_interior(m: str)     -> bool: return bool(re.search(r"דלת פנים|דלתות פנים", m))
+def _has_interior(m: str)     -> bool: return bool(re.search(r"דלת פנים|דלתות פנים|פולימר", m))
+def _has_specific_product(m: str) -> bool:
+    return bool(re.search(
+        r"פולימר|אלון|ספיר|אש\b|אגוז|MDF|HDF|נפחים|פנורמי|יווני|מרקורי|עדן",
+        m, re.IGNORECASE,
+    ))
 def _has_door_type(m: str)    -> bool: return _has_entrance(m) or _has_interior(m)
 def _has_style(m: str)        -> bool: return bool(re.search(r"מודרנ|מעוצב|מעוצבת|קלאסי|קלאסית|חלקה|פשוטה", m))
 def _is_question(m: str)      -> bool: return bool(re.search(r"\?|יש לכם|האם |אפשר ", m))
@@ -423,6 +428,9 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["designed_doors"]
     # Both door types in same message → Claude handles (greeting + proper dual response)
     if _has_entrance(msg) and _has_interior(msg):
+        return None
+    # Specific product/material mentioned → Claude handles with personalized response
+    if _has_specific_product(msg):
         return None
     if _has_entrance(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
         return _SCENARIOS["detailed_inquiry"]
