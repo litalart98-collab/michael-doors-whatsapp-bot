@@ -609,7 +609,21 @@ async def _process_message(sender: str, text: str) -> None:
             is_fallback = reply_text in ERROR_REPLIES
             try:
                 await green.send_message(sender, reply_text)
-                _followup_mark_bot_replied(sender)
+                if result.get("handoff_to_human"):
+                    # Conversation complete — stop the follow-up loop for this sender.
+                    # Without this, the bot would send a "are you still there?" message
+                    # 15 minutes after a successfully completed lead handoff.
+                    if sender in _followup:
+                        _followup[sender]["closed"] = True
+                    else:
+                        _followup[sender] = {
+                            "last_bot_time": time.time(),
+                            "followup_sent": True,
+                            "followup_time": time.time(),
+                            "closed": True,
+                        }
+                else:
+                    _followup_mark_bot_replied(sender)
                 if is_fallback:
                     _record_error("parse", sender, "fallback reply sent after error")
                     logger.warning("[BOT:FALLBACK] Error fallback sent | sender=%s", sender)
@@ -661,8 +675,10 @@ async def _poll_loop() -> None:
                     msg_type = msg_data.get("typeMessage", "")
                     if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
                         logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
+                        _followup_reset(sender)
                         try:
                             await green.send_message(sender, _NON_TEXT_MSG)
+                            _followup_mark_bot_replied(sender)
                         except Exception as exc:
                             _record_error("send_fail", sender, str(exc))
                             logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
@@ -788,8 +804,10 @@ async def webhook(request: Request, token: str = Query(default="")):
         msg_type = msg_data.get("typeMessage", "")
         if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
             logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
+            _followup_reset(sender)  # customer is active — reset the follow-up clock
             try:
                 await green.send_message(sender, _NON_TEXT_MSG)
+                _followup_mark_bot_replied(sender)
             except Exception as exc:
                 _record_error("send_fail", sender, str(exc))
                 logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
