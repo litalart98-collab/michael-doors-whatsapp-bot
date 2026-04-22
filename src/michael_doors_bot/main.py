@@ -351,9 +351,11 @@ async def _process_message(sender: str, text: str) -> None:
 # ── Polling loop (fallback when no webhook configured) ────────────────────────
 async def _poll_loop() -> None:
     logger.info("Polling loop started (fallback mode)")
+    _consecutive_errors = 0
     while True:
         try:
             notification = await green.receive_notification()
+            _consecutive_errors = 0  # reset on success
             if not notification:
                 await asyncio.sleep(2)
                 continue
@@ -377,8 +379,11 @@ async def _poll_loop() -> None:
                 await green.delete_notification(receipt_id)
 
         except Exception as exc:
-            logger.error("Poll loop error: %s", exc)
-            await asyncio.sleep(5)
+            _consecutive_errors += 1
+            # Exponential backoff: 5s, 10s, 20s, up to 120s — avoids hammering API on 401
+            backoff = min(5 * (2 ** (_consecutive_errors - 1)), 120)
+            logger.error("Poll loop error (%d): %s — retry in %ds", _consecutive_errors, exc, backoff)
+            await asyncio.sleep(backoff)
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
