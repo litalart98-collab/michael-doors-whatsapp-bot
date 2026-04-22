@@ -655,25 +655,6 @@ async def _process_message(sender: str, text: str) -> None:
             is_fallback = reply_text in ERROR_REPLIES
             try:
                 await green.send_message(sender, reply_text)
-                # Two-pulse opening: send greeting+pitch first, then after a short pause
-                # send the actual response to the customer's inquiry
-                if reply_text_2 and not is_fallback:
-                    await asyncio.sleep(1.5)
-                    await green.send_message(sender, reply_text_2)
-                    logger.info("[BOT:SEND2] Second pulse sent | sender=%s", sender)
-                if result.get("handoff_to_human"):
-                    if sender in _followup:
-                        _followup[sender]["closed"] = True
-                    else:
-                        _followup[sender] = {
-                            "last_bot_time": time.time(),
-                            "followup_sent": True,
-                            "followup_time": time.time(),
-                            "closed": True,
-                        }
-                    _save_followup()
-                else:
-                    _followup_mark_bot_replied(sender)
                 if is_fallback:
                     _record_error("parse", sender, "fallback reply sent after error")
                     logger.warning("[BOT:FALLBACK] Error fallback sent | sender=%s", sender)
@@ -684,6 +665,33 @@ async def _process_message(sender: str, text: str) -> None:
                 logger.error("[BOT:SEND_FAIL] Reply delivery failed | sender=%s | %s", sender, send_err)
                 if not is_fallback:
                     _queue_send_retry(sender, reply_text)
+
+            # Second pulse (opening message split) — separate try so a failure here
+            # never blocks follow-up tracking or retries the first pulse redundantly.
+            if reply_text_2 and not is_fallback:
+                try:
+                    await asyncio.sleep(2.5)  # generous pause to avoid Green API rate limit
+                    await green.send_message(sender, reply_text_2)
+                    logger.info("[BOT:SEND2] Second pulse sent | sender=%s", sender)
+                except Exception as send_err2:
+                    _record_error("send_fail", sender, f"pulse2: {send_err2}")
+                    logger.error("[BOT:SEND2_FAIL] Second pulse failed | sender=%s | %s", sender, send_err2)
+                    _queue_send_retry(sender, reply_text_2)
+
+            # Update follow-up state regardless of whether the second pulse succeeded
+            if result.get("handoff_to_human"):
+                if sender in _followup:
+                    _followup[sender]["closed"] = True
+                else:
+                    _followup[sender] = {
+                        "last_bot_time": time.time(),
+                        "followup_sent": True,
+                        "followup_time": time.time(),
+                        "closed": True,
+                    }
+                _save_followup()
+            else:
+                _followup_mark_bot_replied(sender)
         except Exception as exc:
             _record_error("unhandled", sender, str(exc))
             logger.error("[BOT:UNHANDLED] _process_message crash | sender=%s | %s", sender, exc)
