@@ -451,12 +451,15 @@ async def _followup_loop() -> None:
                     logger.info("[BOT:FOLLOWUP_SKIP] Pending send retry — deferring follow-up | sender=%s", sender)
                     continue
 
-                # Skip follow-up if last bot message was an error — don't pile on
+                # If the last bot message was an error, stop watching entirely.
+                # Setting followup_sent=True here was a bug: it would trigger the
+                # 7-min closing sequence, sending a generic close to a customer who
+                # got an error and may simply retry. Instead we drop the watch entry
+                # so no follow-up and no close fires; the customer can write again fresh.
                 last_bot_text = next((m["content"] for m in reversed(history) if m.get("role") == "assistant"), "")
                 if last_bot_text in ERROR_REPLIES:
-                    logger.info("Skipping follow-up — last message was error | sender=%s", sender)
-                    state["followup_sent"] = True
-                    state["followup_time"] = time.time()
+                    logger.info("[BOT:FOLLOWUP_SKIP] Dropping watch after error reply | sender=%s", sender)
+                    _followup.pop(sender, None)
                     continue
                 try:
                     msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)

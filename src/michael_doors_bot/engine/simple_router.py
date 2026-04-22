@@ -277,7 +277,11 @@ def _build_system(user_msg: str) -> str:
 
 
 # ── Scenario classifier ───────────────────────────────────────────────────────
-def _has_entrance(m: str)     -> bool: return bool(re.search(r"דלת כניסה|דלתות כניסה", m))
+def _has_entrance(m: str)     -> bool: return bool(re.search(
+    r"דלת כניסה|דלתות כניסה"
+    r"|דלת חוץ|דלתות חוץ"            # colloquial: "דלת חוץ" = entrance door
+    r"|דלת חיצונית|דלתות חיצוניות",  # formal synonym
+    m))
 def _has_interior(m: str)     -> bool: return bool(re.search(r"דלת פנים|דלתות פנים|פולימר", m))
 def _has_specific_product(m: str) -> bool:
     """True when the message names a specific entrance door series or interior door material.
@@ -448,7 +452,12 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["entrance_doors"]
     if _has_interior(msg):
         return _SCENARIOS["interior_doors"]
-    if re.search(r"הצעת מחיר|כמה עולה|כמה זה עולה|כמה עולים|מחיר|אפשר הצעה|מחיר.*דלת|דלת.*מחיר", msg):
+    if re.search(
+        r"הצעת מחיר|כמה עולה|כמה זה עולה|כמה עולים"
+        r"|כמה יעלה|כמה יעלו|כמה זה יעלה|כמה יעלה לי|כמה יעלה לנו"  # future tense price
+        r"|מחיר|אפשר הצעה|מחיר.*דלת|דלת.*מחיר",
+        msg,
+    ):
         return _SCENARIOS["vague_inquiry"]
     if re.search(r"מחפש דלת|מחפשת דלת|מחפשים דלת|מתעניין|מתעניינת|מתעניינים|מעוניין|מעוניינת|מעוניינים|דלת לבית|דלת לדירה|צריך דלת|צריכה דלת|אשמח למידע|אפשר פרטים|פרטים על|רוצה לדעת|ספרו לי|מה יש לכם|מה אתם מוכרים|מה אפשר|מה השירותים|מה המוצרים", msg):
         return _SCENARIOS["ambiguous"]
