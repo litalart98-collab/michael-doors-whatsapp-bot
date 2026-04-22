@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
 from .engine.simple_router import (
+    ERROR_REPLIES,
     _conversations as _conv_history,
     clear_conversation,
     generate_conversation_summary,
@@ -206,6 +207,14 @@ async def _followup_loop() -> None:
             followup_time = state.get("followup_time", 0.0)
 
             if not followup_sent and now - last_bot >= FOLLOWUP_DELAY:
+                # Skip follow-up if last bot message was an error — don't pile on
+                history = _conv_history.get(sender, [])
+                last_bot_text = next((m["content"] for m in reversed(history) if m.get("role") == "assistant"), "")
+                if last_bot_text in ERROR_REPLIES:
+                    logger.info("Skipping follow-up — last message was error | sender=%s", sender)
+                    state["followup_sent"] = True
+                    state["followup_time"] = time.time()
+                    continue
                 try:
                     msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)
                     await green.send_message(sender, msg)

@@ -313,6 +313,10 @@ def _get_claude(api_key: str) -> anthropic.AsyncAnthropic:
 
 
 _PARSE_ERROR_REPLY = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
+_API_ERROR_REPLY   = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע."
+
+# Set of all error reply texts — used by main.py to skip follow-up after a failure
+ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY])
 
 
 def _parse_response(raw: str, sender: str) -> dict:
@@ -404,7 +408,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         raw_text = "{" + response.content[0].text
     except Exception as exc:
         logger.error("Claude API error | sender=%s | %s", sender, exc)
-        fallback = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע."
+        fallback = _API_ERROR_REPLY
         _conversations[sender].append({"role": "assistant", "content": fallback})
         _save_conversations()
         return {
