@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -42,12 +43,31 @@ SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
 CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 
-_BOT_ERROR_MSG = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
-_NON_TEXT_MSG  = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
+_BOT_ERROR_MSG    = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
+_CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
+_NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
 
-# Deduplication: track recently processed message IDs to prevent webhook+polling double-processing
-_processed_ids: set[str] = set()
-_MAX_PROCESSED_IDS = 500
+# ── Message deduplication ─────────────────────────────────────────────────────
+# Ordered deque so we evict the OLDEST IDs (not a random half) when full.
+_MAX_PROCESSED_IDS  = 500
+_processed_ids_set: set[str]   = set()
+_processed_ids_order: deque    = deque()
+
+
+def _is_duplicate(msg_id: str) -> bool:
+    return msg_id in _processed_ids_set
+
+
+def _track_msg_id(msg_id: str) -> None:
+    if not msg_id or msg_id in _processed_ids_set:
+        return
+    _processed_ids_set.add(msg_id)
+    _processed_ids_order.append(msg_id)
+    # Evict oldest when over limit
+    while len(_processed_ids_order) > _MAX_PROCESSED_IDS:
+        old = _processed_ids_order.popleft()
+        _processed_ids_set.discard(old)
+
 
 green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
 
@@ -80,12 +100,19 @@ async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None
     try:
         summary = await generate_conversation_summary(sender, config.ANTHROPIC_API_KEY)
         leads = _load_leads(is_test)
-        if sender in leads:
-            leads[sender]["conv_summary"] = summary
-            leads[sender]["close_reason"] = close_reason
-            leads[sender]["close_time"] = datetime.utcnow().isoformat()
-            _save_leads(leads, is_test)
-            logger.info("Summary saved | sender=%s | reason=%s", sender, close_reason)
+        if sender not in leads:
+            # Customer closed before lead was created (e.g. said goodbye on first message)
+            leads[sender] = {
+                "phone": sender,
+                "firstContact": datetime.utcnow().isoformat(),
+                "messages": [],
+            }
+            logger.info("Created minimal lead entry for summary | sender=%s", sender)
+        leads[sender]["conv_summary"] = summary
+        leads[sender]["close_reason"] = close_reason
+        leads[sender]["close_time"] = datetime.utcnow().isoformat()
+        _save_leads(leads, is_test)
+        logger.info("Summary saved | sender=%s | reason=%s", sender, close_reason)
         # Clear history so a future re-contact starts fresh
         clear_conversation(sender)
     except Exception as exc:
@@ -93,7 +120,7 @@ async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None
         _summary_attached.discard(sender)  # allow retry on error
 
 
-def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> None:
+def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dict:
     leads = _load_leads(is_test)
     if sender not in leads:
         leads[sender] = {
@@ -135,7 +162,7 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> Non
     return lead
 
 
-async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
+async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None:
     if not config.GOOGLE_SHEETS_WEBHOOK_URL:
         return
     if not result.get("handoff_to_human"):
@@ -162,7 +189,14 @@ async def _maybe_send_to_sheets(lead: dict, result: dict) -> None:
         "phone":                   phone_clean,
     }
     await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
+    # Persist sheets_sent flag to disk to prevent duplicate sends across restarts
+    sender_id = lead.get("phone", "")
     lead["sheets_sent"] = True
+    if sender_id:
+        fresh = _load_leads(is_test)
+        if sender_id in fresh:
+            fresh[sender_id]["sheets_sent"] = True
+            _save_leads(fresh, is_test)
 
 
 # ── Follow-up tracker ─────────────────────────────────────────────────────────
@@ -220,6 +254,7 @@ async def _followup_loop() -> None:
                 _summary_attached.discard(s)
             if stale:
                 logger.info("Memory cleanup: removed %d stale conversations", len(stale))
+
         for sender, state in list(_followup.items()):
             if not _is_individual_chat(sender):
                 continue
@@ -252,7 +287,7 @@ async def _followup_loop() -> None:
                     await green.send_message(sender, _CLOSE_MSG)
                     state["closed"] = True
                     logger.info("Inquiry closed | sender=%s", sender)
-                    await _attach_summary(sender, "נסגרה ללא מענה", False)
+                    await _attach_summary(sender, "נסגרה ללא מענה", config.TEST_MODE)
                 except Exception as exc:
                     logger.error("Close message error | sender=%s | %s", sender, exc)
 
@@ -367,7 +402,7 @@ async def _process_message(sender: str, text: str) -> None:
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
             logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
             lead = _record_lead(sender, text, result, config.TEST_MODE)
-            await _maybe_send_to_sheets(lead, result)
+            await _maybe_send_to_sheets(lead, result, config.TEST_MODE)
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
             try:
@@ -377,7 +412,7 @@ async def _process_message(sender: str, text: str) -> None:
             except Exception as send_err:
                 logger.error("Send failed | sender=%s | %s", sender, send_err)
         except Exception as exc:
-            logger.error("_process_message error | sender=%s | %s", sender, exc)
+            logger.error("_process_message unhandled error | sender=%s | %s", sender, exc)
             try:
                 if _is_individual_chat(sender):
                     await green.send_message(sender, _BOT_ERROR_MSG)
@@ -409,7 +444,7 @@ async def _poll_loop() -> None:
                     or msg_data.get("extendedTextMessageData", {}).get("text")
                     or ""
                 )
-                if sender and msg_id and msg_id in _processed_ids:
+                if sender and msg_id and _is_duplicate(msg_id):
                     logger.info("Duplicate poll message skipped | id=%s | sender=%s", msg_id, sender)
                 elif sender and not text and _is_individual_chat(sender):
                     msg_type = msg_data.get("typeMessage", "")
@@ -420,8 +455,7 @@ async def _poll_loop() -> None:
                         except Exception as exc:
                             logger.error("Non-text reply failed | sender=%s | %s", sender, exc)
                 elif sender and text:
-                    if msg_id:
-                        _processed_ids.add(msg_id)
+                    _track_msg_id(msg_id)
                     logger.info("Poll incoming | sender=%s | text=%s", sender, text[:60])
                     await _process_message(sender, text)
 
@@ -436,17 +470,46 @@ async def _poll_loop() -> None:
             await asyncio.sleep(backoff)
 
 
+# ── Background task supervisor ────────────────────────────────────────────────
+async def _supervised(name: str, coro_fn) -> None:
+    """Run an infinite-loop background task, restarting it if it ever crashes."""
+    while True:
+        try:
+            await coro_fn()
+        except asyncio.CancelledError:
+            logger.info("Background task %s cancelled", name)
+            raise
+        except Exception as exc:
+            logger.critical("Background task %s crashed — restarting in 5s | %s", name, exc)
+            await asyncio.sleep(5)
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+_poll_task: asyncio.Task | None = None
+_followup_task: asyncio.Task | None = None
+_bot_start_time: float = 0.0
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    global _poll_task, _followup_task, _bot_start_time
+    _bot_start_time = time.time()
+
     logger.info("=== BOT STARTING ===")
     logger.info("TEST_MODE=%s | TEST_PHONE=%s", config.TEST_MODE, config.TEST_PHONE or "(not set)")
-    logger.info("GREEN_API_INSTANCE=%s", config.GREEN_API_INSTANCE_ID)
-    poll_task    = asyncio.create_task(_poll_loop())
-    followup_task = asyncio.create_task(_followup_loop())
+    logger.info("GREEN_API_INSTANCE=%s | URL=%s", config.GREEN_API_INSTANCE_ID, config.GREEN_API_URL)
+    logger.info("ANTHROPIC_API_KEY set=%s", bool(config.ANTHROPIC_API_KEY))
+    logger.info("GOOGLE_SHEETS configured=%s", bool(config.GOOGLE_SHEETS_WEBHOOK_URL))
+
+    if config.TEST_MODE and not config.TEST_PHONE:
+        logger.warning("TEST_MODE is ON but TEST_PHONE is not set — ALL incoming messages will be blocked!")
+
+    _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
+    _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
     yield
-    poll_task.cancel()
-    followup_task.cancel()
+    _poll_task.cancel()
+    _followup_task.cancel()
+    logger.info("=== BOT SHUTTING DOWN ===")
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -454,7 +517,16 @@ app = FastAPI(lifespan=_lifespan)
 
 @app.get("/", response_class=JSONResponse)
 async def health():
-    return {"status": "Bot is running", "mode": "webhook+polling"}
+    uptime_s = int(time.time() - _bot_start_time) if _bot_start_time else 0
+    return {
+        "status": "ok",
+        "uptime_seconds": uptime_s,
+        "active_conversations": len(_conv_history),
+        "active_followups": sum(1 for s in _followup.values() if not s.get("closed")),
+        "poll_task_alive": _poll_task is not None and not _poll_task.done(),
+        "followup_task_alive": _followup_task is not None and not _followup_task.done(),
+        "test_mode": config.TEST_MODE,
+    }
 
 
 @app.post("/webhook")
@@ -469,7 +541,7 @@ async def webhook(request: Request):
     if body.get("typeWebhook") != "incomingMessageReceived":
         return JSONResponse({"ok": True})
 
-    sender = body.get("senderData", {}).get("chatId", "")
+    sender   = body.get("senderData", {}).get("chatId", "")
     msg_data = body.get("messageData", {})
     msg_id   = body.get("idMessage", "")
     text = (
@@ -478,17 +550,14 @@ async def webhook(request: Request):
         or ""
     )
 
+    # Deduplication — webhook and poll loop can both deliver the same message
     if sender and msg_id:
-        if msg_id in _processed_ids:
+        if _is_duplicate(msg_id):
             logger.info("Duplicate webhook message skipped | id=%s | sender=%s", msg_id, sender)
             return JSONResponse({"ok": True})
-        _processed_ids.add(msg_id)
-        if len(_processed_ids) > _MAX_PROCESSED_IDS:
-            # Trim oldest half to keep set bounded
-            trimmed = list(_processed_ids)[_MAX_PROCESSED_IDS // 2:]
-            _processed_ids.clear()
-            _processed_ids.update(trimmed)
+        _track_msg_id(msg_id)
 
+    # Non-text messages (images, voice notes, stickers, etc.)
     if sender and not text and _is_individual_chat(sender):
         msg_type = msg_data.get("typeMessage", "")
         if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
@@ -506,13 +575,17 @@ async def webhook(request: Request):
             leads = _load_leads(config.TEST_MODE)
             logger.info("After processing — leads count: %d", len(leads))
         except asyncio.TimeoutError:
-            logger.error("Webhook timeout for sender=%s", sender)
+            logger.error("Webhook timeout for sender=%s — sending fallback", sender)
             try:
                 await green.send_message(sender, _BOT_ERROR_MSG)
             except Exception:
                 pass
         except Exception as exc:
-            logger.error("Webhook processing error: %s", exc)
+            logger.error("Webhook processing error | sender=%s | %s", sender, exc)
+            try:
+                await green.send_message(sender, _BOT_ERROR_MSG)
+            except Exception:
+                pass
 
     return JSONResponse({"ok": True})
 
@@ -571,7 +644,7 @@ async def conversations(test: str = "false", format: str = "html"):
             try:
                 close_dt = datetime.fromisoformat(lead["close_time"]).strftime("%d/%m/%Y %H:%M")
             except Exception:
-                pass
+                close_dt = lead["close_time"][:16]
         bg = _STATUS_COLOR.get(reason, "#fafafa")
         badge_color = _STATUS_BADGE.get(reason, "#666")
         summary_safe = s.replace("<", "&lt;").replace("\n", "<br>")
@@ -594,7 +667,10 @@ async def conversations(test: str = "false", format: str = "html"):
             css = "bot" if is_bot else "customer"
             sender_label = "🤖 בוט" if is_bot else "👤 לקוח"
             text_safe = m["text"].replace("<", "&lt;")
-            time_str = datetime.fromisoformat(m["time"]).strftime("%d/%m/%Y %H:%M")
+            try:
+                time_str = datetime.fromisoformat(m["time"]).strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                time_str = m.get("time", "")[:16]
             rows += f'<tr class="{css}"><td>{lead["phone"].replace("@c.us","")}</td><td>{sender_label}</td><td style="white-space:pre-wrap">{text_safe}</td><td>{time_str}</td></tr>'
 
     total_msgs = sum(len(l.get("messages", [])) for l in entries)

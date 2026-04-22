@@ -26,15 +26,17 @@ class GreenAPIClient:
                 await asyncio.sleep(2)
 
     async def receive_notification(self) -> dict | None:
+        """Return next notification body, or None if queue is empty.
+        Raises on HTTP error so the poll loop's backoff counter increments."""
         url = f"{self._base}/receiveNotification/{self._token}"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.get(url)
-                r.raise_for_status()
-                return r.json()
-        except Exception as exc:
-            logger.error("Green-API receiveNotification failed | %s", exc)
-            return None
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            # Green-API returns null JSON when queue is empty
+            if not data:
+                return None
+            return data
 
     async def delete_notification(self, receipt_id: int) -> bool:
         url = f"{self._base}/deleteNotification/{self._token}/{receipt_id}"

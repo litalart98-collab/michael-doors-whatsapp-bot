@@ -19,8 +19,21 @@ _PROMPT_PATH  = _ROOT / "src" / "prompts" / "systemPrompt.txt"
 _FAQ_PATH     = _ROOT / "src" / "data" / "faqBank.json"
 _CONV_PATH    = _ROOT / "conversations.json"
 
-# ── FAQ bank (loaded once) ────────────────────────────────────────────────────
-_faq_bank: list[dict] = json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
+# ── System prompt — cached once at startup to avoid disk read per request ────
+try:
+    _SYSTEM_PROMPT: str = _PROMPT_PATH.read_text(encoding="utf-8")
+    logger.info("System prompt loaded (%d chars)", len(_SYSTEM_PROMPT))
+except Exception as _exc:
+    logger.critical("FATAL: Failed to load system prompt from %s — %s", _PROMPT_PATH, _exc)
+    _SYSTEM_PROMPT = ""
+
+# ── FAQ bank (loaded once; empty list on failure so bot still runs) ───────────
+try:
+    _faq_bank: list[dict] = json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
+    logger.info("FAQ bank loaded (%d entries)", len(_faq_bank))
+except Exception as _exc:
+    logger.error("Failed to load FAQ bank: %s — FAQ matching disabled", _exc)
+    _faq_bank = []
 
 # ── Conversation history (in-memory, also persisted to disk) ──────────────────
 _conversations: dict[str, list[dict]] = {}
@@ -122,8 +135,10 @@ def _israel_greeting() -> str:
 
 
 def _build_system(user_msg: str) -> str:
+    if not _SYSTEM_PROMPT:
+        logger.error("System prompt is empty — Claude will have no instructions")
     parts = [
-        _PROMPT_PATH.read_text(encoding="utf-8"),
+        _SYSTEM_PROMPT,
         f"## Business context\n{_context_block()}",
         f"## Current time context\nGreeting to use: «{_israel_greeting()}»\nCRITICAL: If there is NO prior assistant message in the conversation history — this is the first reply. You MUST embed the greeting inside the opening line, like this: 'היי, תודה שפניתם לדלתות מיכאל, {_israel_greeting()} 😊'. Never skip this on a first reply. Never repeat it after the first reply.",
     ]
@@ -284,10 +299,6 @@ def _detect_scenario(msg: str) -> dict | None:
     if _has_entrance(msg) and _has_interior(msg):
         return None
     if _has_entrance(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
-        if _has_style(msg):
-            return {**_SCENARIOS["detailed_inquiry"],
-                    "summary": "Customer specified entrance door + style — asking about frame removal",
-                    "response": "היי, תודה שפניתם לדלתות מיכאל.\nהאם יש צורך בהחלפת משקוף קיים?"}
         return _SCENARIOS["detailed_inquiry"]
     if _has_interior(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
         return _SCENARIOS["detailed_inquiry_interior"]
@@ -318,6 +329,9 @@ _API_ERROR_REPLY   = "מצטערים, אירעה תקלה זמנית. אנא נ�
 
 # Set of all error reply texts — used by main.py to skip follow-up after a failure
 ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY])
+
+# Max conversation turns kept in memory (40 = ~20 back-and-forth exchanges)
+_MAX_HISTORY = 40
 
 
 def _parse_response(raw: str, sender: str) -> dict:
@@ -361,8 +375,9 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         _conversations[sender] = []
 
     _conversations[sender].append({"role": "user", "content": user_message})
-    if len(_conversations[sender]) > 20:
-        _conversations[sender] = _conversations[sender][-20:]
+    if len(_conversations[sender]) > _MAX_HISTORY:
+        _conversations[sender] = _conversations[sender][-_MAX_HISTORY:]
+        logger.info("History trimmed to %d turns | sender=%s", _MAX_HISTORY, sender)
 
     _COMPANY_PITCH = (
         "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — "
@@ -466,6 +481,8 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
             messages=history[-6:],
             timeout=15.0,
         )
+        if not response.content:
+            raise ValueError("Empty content from Claude (followup)")
         return response.content[0].text.strip()
     except Exception as exc:
         logger.error("get_followup_message error | sender=%s | %s", sender, exc)
@@ -496,6 +513,8 @@ async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
             messages=(history[-4:] if len(history) >= 4 else history),
             timeout=15.0,
         )
+        if not response.content:
+            raise ValueError("Empty content from Claude (closing)")
         return response.content[0].text.strip()
     except Exception as exc:
         logger.error("get_closing_message error | sender=%s | %s", sender, exc)
@@ -547,6 +566,8 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
             messages=history,
             timeout=15.0,
         )
+        if not response.content:
+            raise ValueError("Empty content from Claude (summary)")
         return response.content[0].text.strip()
     except Exception as exc:
         logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
