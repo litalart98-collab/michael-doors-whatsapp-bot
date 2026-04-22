@@ -150,6 +150,38 @@ def _is_rate_limited(sender: str) -> bool:
 
 green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
 
+# ── Outbound send retry queue (Fix 4) ─────────────────────────────────────────
+# When green.send_message exhausts its 3 internal attempts, the message is queued
+# here for 2 additional retries (30s apart) before being permanently abandoned.
+_SEND_RETRY_DELAY   = 30   # seconds between retries
+_SEND_MAX_RETRIES   = 2    # attempts in this queue (on top of greenapi's own 3)
+_failed_sends: list[dict] = []   # {"chat_id", "message", "attempts", "next_retry"}
+
+
+def _queue_send_retry(chat_id: str, message: str) -> None:
+    _failed_sends.append({
+        "chat_id": chat_id, "message": message,
+        "attempts": 1, "next_retry": time.time() + _SEND_RETRY_DELAY,
+    })
+    logger.warning("[BOT:SEND_QUEUED] Message queued for retry in %ds | chat_id=%s", _SEND_RETRY_DELAY, chat_id)
+
+
+# ── Google Sheets retry queue (Fix 3) ─────────────────────────────────────────
+# append_lead now raises on failure. Failed sends are queued here and retried
+# up to 3 times with 5-minute delays before being permanently abandoned.
+_SHEETS_RETRY_DELAY  = 300  # 5 minutes between retries
+_SHEETS_MAX_ATTEMPTS = 3
+_sheets_retry_queue: list[dict] = []  # {"row", "is_test", "sender", "attempts", "next_retry"}
+
+
+def _queue_sheets_retry(row: dict, is_test: bool, sender: str, exc: Exception) -> None:
+    _sheets_retry_queue.append({
+        "row": row, "is_test": is_test, "sender": sender,
+        "attempts": 1, "next_retry": time.time() + _SHEETS_RETRY_DELAY,
+    })
+    logger.warning("[SHEETS:QUEUED] Sheets send failed — queued for retry | phone=%s | %s", row.get("phone"), exc)
+
+
 # ── Leads helpers ─────────────────────────────────────────────────────────────
 def _leads_path(is_test: bool) -> Path:
     return _TEST_LEADS_FILE if is_test else _LEADS_FILE
@@ -267,15 +299,19 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
         "phone":                   phone_clean,
     }
-    await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
-    # Persist sheets_sent flag to disk to prevent duplicate sends across restarts
     sender_id = lead.get("phone", "")
-    lead["sheets_sent"] = True
-    if sender_id:
-        fresh = _load_leads(is_test)
-        if sender_id in fresh:
-            fresh[sender_id]["sheets_sent"] = True
-            _save_leads(fresh, is_test)
+    try:
+        await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
+        # Only mark as sent after confirmed success
+        lead["sheets_sent"] = True
+        if sender_id:
+            fresh = _load_leads(is_test)
+            if sender_id in fresh:
+                fresh[sender_id]["sheets_sent"] = True
+                _save_leads(fresh, is_test)
+    except Exception as exc:
+        _record_error("send_fail", sender_id, f"sheets initial: {exc}")
+        _queue_sheets_retry(row, is_test, sender_id, exc)
 
 
 # ── Follow-up tracker ─────────────────────────────────────────────────────────
@@ -333,6 +369,55 @@ async def _followup_loop() -> None:
                 _summary_attached.discard(s)
             if stale:
                 logger.info("Memory cleanup: removed %d stale conversations", len(stale))
+
+        # ── Drain outbound send retry queue ───────────────────────────────────
+        still_pending_sends: list[dict] = []
+        for entry in _failed_sends:
+            if now < entry["next_retry"]:
+                still_pending_sends.append(entry)
+                continue
+            try:
+                await green.send_message(entry["chat_id"], entry["message"])
+                logger.info("[BOT:SEND_RETRY_OK] Retry succeeded | chat_id=%s | attempt=%d",
+                            entry["chat_id"], entry["attempts"])
+            except Exception as exc:
+                entry["attempts"] += 1
+                if entry["attempts"] > _SEND_MAX_RETRIES:
+                    logger.critical("[BOT:SEND_PERMANENT_FAIL] All retry attempts exhausted — "
+                                    "message permanently lost | chat_id=%s | text=%s",
+                                    entry["chat_id"], entry["message"][:60])
+                else:
+                    entry["next_retry"] = now + _SEND_RETRY_DELAY
+                    still_pending_sends.append(entry)
+                    logger.warning("[BOT:SEND_RETRY_FAIL] attempt=%d | chat_id=%s | %s",
+                                   entry["attempts"], entry["chat_id"], exc)
+        _failed_sends[:] = still_pending_sends
+
+        # ── Drain Google Sheets retry queue ───────────────────────────────────
+        still_pending_sheets: list[dict] = []
+        for entry in _sheets_retry_queue:
+            if now < entry["next_retry"]:
+                still_pending_sheets.append(entry)
+                continue
+            try:
+                await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, entry["row"])
+                fresh = _load_leads(entry["is_test"])
+                if entry["sender"] in fresh:
+                    fresh[entry["sender"]]["sheets_sent"] = True
+                    _save_leads(fresh, entry["is_test"])
+                logger.info("[SHEETS:RETRY_OK] Retry succeeded | phone=%s | attempt=%d",
+                            entry["row"].get("phone"), entry["attempts"])
+            except Exception as exc:
+                entry["attempts"] += 1
+                if entry["attempts"] >= _SHEETS_MAX_ATTEMPTS:
+                    logger.critical("[SHEETS:PERMANENT_FAIL] All %d attempts failed — lead not in Sheets | "
+                                    "phone=%s | %s", _SHEETS_MAX_ATTEMPTS, entry["row"].get("phone"), exc)
+                else:
+                    entry["next_retry"] = now + _SHEETS_RETRY_DELAY
+                    still_pending_sheets.append(entry)
+                    logger.warning("[SHEETS:RETRY_FAIL] attempt=%d | phone=%s | %s",
+                                   entry["attempts"], entry["row"].get("phone"), exc)
+        _sheets_retry_queue[:] = still_pending_sheets
 
         for sender, state in list(_followup.items()):
             if not _is_individual_chat(sender):
@@ -491,6 +576,7 @@ async def _process_message(sender: str, text: str) -> None:
                 except Exception as send_err:
                     _record_error("send_fail", sender, str(send_err))
                     logger.error("[BOT:SEND_FAIL] Closing send failed | sender=%s | %s", sender, send_err)
+                    _queue_send_retry(sender, closing_msg)
                 return
 
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
@@ -511,6 +597,8 @@ async def _process_message(sender: str, text: str) -> None:
             except Exception as send_err:
                 _record_error("send_fail", sender, str(send_err))
                 logger.error("[BOT:SEND_FAIL] Reply delivery failed | sender=%s | %s", sender, send_err)
+                if not is_fallback:  # don't retry error messages — just log
+                    _queue_send_retry(sender, reply_text)
         except Exception as exc:
             _record_error("unhandled", sender, str(exc))
             logger.error("[BOT:UNHANDLED] _process_message crash | sender=%s | %s", sender, exc)
@@ -606,12 +694,8 @@ async def _lifespan(app: FastAPI):
     logger.info("WEBHOOK_SECRET set=%s", bool(config.WEBHOOK_SECRET))
     logger.info("DATA_DIR=%s", str(_DATA_DIR))
 
-    if not config.DATA_DIR:
-        logger.warning(
-            "[BOOT] DATA_DIR not set — runtime data (leads, conversations, dedup) stored in "
-            "project root. On Render this directory is EPHEMERAL and will be wiped on restart. "
-            "Set DATA_DIR to a Render Persistent Disk mount path (e.g. /data) to persist data."
-        )
+    for _warn in config._PROD_WARNINGS:
+        logger.critical("[BOOT:PROD_WARNING] %s", _warn)
 
     if config.TEST_MODE and not config.TEST_PHONE:
         logger.warning("TEST_MODE is ON but TEST_PHONE is not set — ALL incoming messages will be blocked!")
@@ -732,9 +816,18 @@ async def debug_test():
         return {"ok": False, "error": str(exc)}
 
 
+def _check_admin(admin: str) -> JSONResponse | None:
+    """Return 403 response if ADMIN_SECRET is set and token doesn't match, else None."""
+    if config.ADMIN_SECRET and admin != config.ADMIN_SECRET:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    return None
+
+
 @app.get("/diag", response_class=JSONResponse)
-async def diag():
+async def diag(admin: str = Query(default="")):
     """Lightweight diagnostics endpoint — runtime state, error counts, recent errors."""
+    if (denied := _check_admin(admin)):
+        return denied
     uptime_s = int(time.time() - _bot_start_time) if _bot_start_time else 0
     return {
         "uptime_seconds": uptime_s,
@@ -758,6 +851,10 @@ async def diag():
             "closed":   sum(1 for s in _followup.values() if s.get("closed")),
         },
         "dedup_cache_size": len(_processed_ids_set),
+        "retry_queues": {
+            "failed_sends": len(_failed_sends),
+            "sheets_pending": len(_sheets_retry_queue),
+        },
         "rate_limit": {
             "window_seconds": _RATE_WINDOW,
             "max_per_window": _RATE_MAX_MSG,
@@ -773,7 +870,9 @@ async def diag():
 
 
 @app.get("/conversations", response_class=HTMLResponse)
-async def conversations(test: str = "false", format: str = "html"):
+async def conversations(test: str = "false", format: str = "html", admin: str = Query(default="")):
+    if (denied := _check_admin(admin)):
+        return denied
     is_test = test.lower() == "true"
     leads = _load_leads(is_test)
     entries = list(leads.values())

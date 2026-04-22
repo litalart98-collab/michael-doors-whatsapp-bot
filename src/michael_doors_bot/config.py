@@ -34,11 +34,58 @@ TEST_PHONE: str = (_raw_phone + "@c.us") if _raw_phone and not _raw_phone.endswi
 
 GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
 
-# Optional shared secret appended as ?token=... in the webhook URL registered with Green-API.
-# If set, every POST to /webhook must carry a matching token= query param or it is rejected 403.
+# Secret token appended as ?token=... in the webhook URL registered with Green-API.
+# STRONGLY RECOMMENDED in production — without it, any external party who discovers
+# the URL can inject fake messages and burn Claude API budget.
 WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 
-# Persistent data directory — set to a Render Persistent Disk mount path (e.g. /data)
-# so leads.json / conversations.json survive service restarts.
-# Defaults to the project root (ephemeral on Render free tier).
+# Persistent data directory — REQUIRED for production to survive Render restarts.
+# Set to a Render Persistent Disk mount path (e.g. /data).
+# Defaults to the project root which is EPHEMERAL on Render's service filesystem.
 DATA_DIR: str = os.getenv("DATA_DIR", "")
+
+# Admin secret for /diag and /conversations endpoints.
+# STRONGLY RECOMMENDED — without it, anyone can read all customer conversation data.
+ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "")
+
+# ── Production safety warnings ────────────────────────────────────────────────
+_PROD_WARNINGS: list[str] = []
+if not TEST_MODE:
+    if not WEBHOOK_SECRET:
+        _PROD_WARNINGS.append(
+            "WEBHOOK_SECRET is not set — /webhook accepts requests from anyone. "
+            "Generate a secret (openssl rand -hex 20), set WEBHOOK_SECRET=<value>, "
+            "and update the Green-API webhook URL to include ?token=<value>."
+        )
+    if not DATA_DIR:
+        _PROD_WARNINGS.append(
+            "DATA_DIR is not set — leads.json, conversations.json, and dedup_ids.json "
+            "are stored in the ephemeral project root and WILL BE WIPED on every Render restart. "
+            "Add a Render Persistent Disk, mount it at /data, set DATA_DIR=/data."
+        )
+    if not ADMIN_SECRET:
+        _PROD_WARNINGS.append(
+            "ADMIN_SECRET is not set — /diag and /conversations are publicly readable. "
+            "Set ADMIN_SECRET=<secret> and access these endpoints with ?admin=<secret>."
+        )
+
+# Validate DATA_DIR path is accessible if explicitly set
+if DATA_DIR:
+    _data_path = Path(DATA_DIR)
+    if not _data_path.exists():
+        try:
+            _data_path.mkdir(parents=True, exist_ok=True)
+        except Exception as _e:
+            print(
+                f"\n[FATAL] DATA_DIR={DATA_DIR!r} does not exist and could not be created: {_e}\n"
+                "Fix the DATA_DIR path or remove it to use the default.\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if not os.access(DATA_DIR, os.W_OK):
+        print(
+            f"\n[FATAL] DATA_DIR={DATA_DIR!r} is not writable. "
+            "Check mount permissions on your Render Persistent Disk.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)

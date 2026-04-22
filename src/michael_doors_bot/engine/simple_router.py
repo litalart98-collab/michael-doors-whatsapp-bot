@@ -40,12 +40,55 @@ except Exception as _exc:
     logger.error("[BOOT] Failed to load FAQ bank: %s — FAQ matching disabled", _exc)
     _faq_bank = []
 
+# ── Fix 8: FAQ / system-prompt consistency check ─────────────────────────────
+def _check_content_consistency() -> list[str]:
+    """Compare key facts between system prompt and FAQ bank.
+    Returns a list of discrepancy descriptions (empty = all consistent)."""
+    issues: list[str] = []
+    if not _SYSTEM_PROMPT or not _faq_bank:
+        return issues
+
+    # Phone numbers
+    prompt_phones = set(re.findall(r'0\d{2}-\d{7}', _SYSTEM_PROMPT))
+    faq_phones: set[str] = set()
+    for entry in _faq_bank:
+        faq_phones.update(re.findall(r'0\d{2}-\d{7}', entry.get("answer", "")))
+    conflict = faq_phones - prompt_phones
+    if conflict:
+        issues.append(f"Phone number mismatch — FAQ contains {conflict} not in system prompt {prompt_phones}")
+
+    # Showroom address (street + number)
+    prompt_addr = set(re.findall(r'בעלי המלאכה\s+\d+', _SYSTEM_PROMPT))
+    faq_addr: set[str] = set()
+    for entry in _faq_bank:
+        faq_addr.update(re.findall(r'בעלי המלאכה\s+\d+', entry.get("answer", "")))
+    if faq_addr and prompt_addr and faq_addr != prompt_addr:
+        issues.append(f"Address mismatch — FAQ: {faq_addr}, prompt: {prompt_addr}")
+
+    # Friday closing hour
+    prompt_fri = set(re.findall(r'ו[׳\']?\s+(?:עד\s+)?(\d{1,2}):00', _SYSTEM_PROMPT))
+    faq_fri: set[str] = set()
+    for entry in _faq_bank:
+        faq_fri.update(re.findall(r'ו[׳\']?\s+(?:עד\s+)?(\d{1,2}):00', entry.get("answer", "")))
+    if faq_fri and prompt_fri and faq_fri != prompt_fri:
+        issues.append(f"Friday hours mismatch — FAQ: {faq_fri}:00, prompt: {prompt_fri}:00")
+
+    return issues
+
+
+_consistency_issues = _check_content_consistency()
+for _issue in _consistency_issues:
+    logger.critical("[CONSISTENCY] System prompt / FAQ mismatch: %s", _issue)
+if not _consistency_issues and _faq_bank:
+    logger.info("[BOOT] Content consistency check passed (%d FAQ entries)", len(_faq_bank))
+
 # ── Diagnostics state (read by main.py /diag endpoint) ───────────────────────
 DIAG_STATE: dict = {
     "system_prompt_loaded": bool(_SYSTEM_PROMPT),
     "system_prompt_chars":  len(_SYSTEM_PROMPT),
     "faq_count":            len(_faq_bank),
     "data_dir":             str(_DATA_DIR),
+    "consistency_issues":   _consistency_issues,
 }
 
 # Max raw input length — truncated before hitting Claude to prevent abuse
@@ -150,14 +193,81 @@ def _israel_greeting() -> str:
         return "לילה טוב"
 
 
+def _next_opening_time() -> str:
+    """Return a human-readable Hebrew string for when the business next opens."""
+    from datetime import datetime, timedelta
+    import zoneinfo
+    now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
+    wd = now.weekday()  # 0=Mon…4=Fri, 5=Sat, 6=Sun
+    hour = now.hour
+    h_start = _BUSINESS["hours"]["start"]
+    h_end   = _BUSINESS["hours"]["end"]
+    h_fri   = _BUSINESS["hours"]["fri_end"]
+
+    # Still today (weekday, before closing)
+    if wd < 4 and hour < h_end:
+        return f"היום עד {h_end}:00"
+    # Friday, still open
+    if wd == 4 and hour < h_fri:
+        return f"היום עד {h_fri}:00"
+    # Friday after closing → Sunday
+    if wd == 4 and hour >= h_fri:
+        return f"ביום ראשון משעה {h_start}:00"
+    # Saturday → Sunday
+    if wd == 5:
+        return f"ביום ראשון משעה {h_start}:00"
+    # Sunday (wd=6) — open today if before h_end
+    if wd == 6 and hour < h_end:
+        return f"היום עד {h_end}:00"
+    # Weekday evening (after closing) → tomorrow morning
+    tomorrow_he = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+    next_day = tomorrow_he[(wd + 1) % 7]
+    return f"ביום {next_day} משעה {h_start}:00"
+
+
 def _build_system(user_msg: str) -> str:
     if not _SYSTEM_PROMPT:
         logger.error("System prompt is empty — Claude will have no instructions")
+    greeting = _israel_greeting()
     parts = [
         _SYSTEM_PROMPT,
         f"## Business context\n{_context_block()}",
-        f"## Current time context\nGreeting to use: «{_israel_greeting()}»\nCRITICAL: If there is NO prior assistant message in the conversation history — this is the first reply. You MUST embed the greeting inside the opening line, like this: 'היי, תודה שפניתם לדלתות מיכאל, {_israel_greeting()} 😊'. Never skip this on a first reply. Never repeat it after the first reply.",
+        (
+            f"## Current time context\nGreeting to use: «{greeting}»\n"
+            f"CRITICAL: If there is NO prior assistant message in the conversation history — "
+            f"this is the first reply. You MUST embed the greeting inside the opening line, "
+            f"like this: 'היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊'. "
+            "Never skip this on a first reply. Never repeat it after the first reply."
+        ),
     ]
+
+    # Fix 7: explicit out-of-hours instruction injected on every call when closed
+    if not _is_working_hours():
+        next_open = _next_opening_time()
+        parts.append(
+            "## OUT-OF-HOURS — MANDATORY BEHAVIOUR\n"
+            f"The business is currently CLOSED. Next opening: {next_open}.\n"
+            "You MUST acknowledge this in your reply. Include ALL of the following:\n"
+            f"1. We are not available right now but received the message.\n"
+            f"2. We will call back {next_open}.\n"
+            f"3. The customer can also call directly: 054-2787578.\n"
+            "Still collect the 4 mandatory fields (שם, עיר, טלפון, שעה מועדפת) — "
+            "a sales manager will review the lead in the morning.\n"
+            "Do NOT promise immediate assistance."
+        )
+
+    # Fix 5: reinforce price policy on every single call — injected last so it's
+    # not buried and harder for Claude to ignore
+    parts.append(
+        "## ABSOLUTE RULE — PRICE/DELIVERY DISCLOSURE FORBIDDEN\n"
+        "NEVER state, estimate, hint at, or compare any price, price range, cost, or delivery time. "
+        "This includes: specific amounts, 'around X', 'starting from X', 'up to X', "
+        "'cheaper than', 'roughly X ₪', ranges like 'X–Y ₪', or spelled-out numbers. "
+        "This rule overrides every other instruction in this prompt. "
+        "If asked about price, respond with exactly: "
+        "'המחיר מותאם אישית לפי סוג ועיצוב — מנהל המכירות יחזור אלייך עם הצעה מדויקת 😊'"
+    )
+
     faqs = _find_faqs(user_msg)
     block = _faq_block(faqs)
     if block:
