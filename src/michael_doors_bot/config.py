@@ -33,3 +33,12 @@ if _raw_phone.startswith("0"):
 TEST_PHONE: str = (_raw_phone + "@c.us") if _raw_phone and not _raw_phone.endswith("@c.us") else _raw_phone
 
 GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
+
+# Optional shared secret appended as ?token=... in the webhook URL registered with Green-API.
+# If set, every POST to /webhook must carry a matching token= query param or it is rejected 403.
+WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
+
+# Persistent data directory — set to a Render Persistent Disk mount path (e.g. /data)
+# so leads.json / conversations.json survive service restarts.
+# Defaults to the project root (ephemeral on Render free tier).
+DATA_DIR: str = os.getenv("DATA_DIR", "")

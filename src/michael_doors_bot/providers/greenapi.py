@@ -12,7 +12,8 @@ class GreenAPIClient:
 
     async def send_message(self, chat_id: str, message: str) -> dict:
         url = f"{self._base}/sendMessage/{self._token}"
-        for attempt in range(1, 3):
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):  # 3 attempts: delays 2s, 4s
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     r = await client.post(url, json={"chatId": chat_id, "message": message})
@@ -20,10 +21,11 @@ class GreenAPIClient:
                     logger.info("Green-API sendMessage OK | chatId=%s | attempt=%d", chat_id, attempt)
                     return r.json()
             except Exception as exc:
-                logger.error("Green-API sendMessage failed | attempt=%d | chatId=%s | %s", attempt, chat_id, exc)
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2)
+                last_exc = exc
+                logger.error("Green-API sendMessage failed | attempt=%d/3 | chatId=%s | %s", attempt, chat_id, exc)
+                if attempt < 3:
+                    await asyncio.sleep(2 ** attempt)  # 2s, 4s
+        raise last_exc  # type: ignore[misc]
 
     async def receive_notification(self) -> dict | None:
         """Return next notification body, or None if queue is empty.

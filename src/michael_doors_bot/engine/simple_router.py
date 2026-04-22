@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 _ROOT         = Path(__file__).parent.parent.parent.parent
 _PROMPT_PATH  = _ROOT / "src" / "prompts" / "systemPrompt.txt"
 _FAQ_PATH     = _ROOT / "src" / "data" / "faqBank.json"
-_CONV_PATH    = _ROOT / "conversations.json"
+
+# DATA_DIR can point to a Render Persistent Disk (e.g. /data) so conversations
+# survive service restarts.  Falls back to project root if not configured.
+from .. import config as _cfg  # noqa: E402 (module-level import after Path setup)
+_DATA_DIR  = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
+_CONV_PATH = _DATA_DIR / "conversations.json"
 
 # ── System prompt — cached once at startup to avoid disk read per request ────
 try:
@@ -40,6 +45,7 @@ DIAG_STATE: dict = {
     "system_prompt_loaded": bool(_SYSTEM_PROMPT),
     "system_prompt_chars":  len(_SYSTEM_PROMPT),
     "faq_count":            len(_faq_bank),
+    "data_dir":             str(_DATA_DIR),
 }
 
 # Max raw input length — truncated before hitting Claude to prevent abuse
@@ -344,6 +350,26 @@ ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY]
 _MAX_HISTORY = 40
 
 
+# Matches explicit shekel amounts: "500 ₪", "₪1,200", "1500 שקל", "כ-3000 ש\"ח"
+# Does NOT match "מחיר מותאם אישית" or similar non-numeric phrases.
+_PRICE_RE = re.compile(
+    r'(?:כ[-–]?|מ[-–]?|ב[-–]?|עד\s)?'
+    r'\d[\d,\.]*\s*(?:₪|ש["\']?ח\b|שקל\b)'
+    r'|(?:₪)\s*\d[\d,\.]*',
+    re.UNICODE,
+)
+
+
+def _scrub_prices(text: str, sender: str) -> str:
+    """Replace any explicit price amount with a safe placeholder."""
+    if not _PRICE_RE.search(text):
+        return text
+    scrubbed = _PRICE_RE.sub("מחיר מותאם אישית", text)
+    logger.warning("[PRICE:BLOCKED] Claude disclosed price — scrubbed | sender=%s | original=%s",
+                   sender, text[:100])
+    return scrubbed
+
+
 def _parse_response(raw: str, sender: str) -> dict:
     try:
         cleaned = raw.strip()
@@ -357,6 +383,7 @@ def _parse_response(raw: str, sender: str) -> dict:
         if not reply_text.strip():
             logger.warning("Empty reply_text in parsed response | sender=%s", sender)
             reply_text = _PARSE_ERROR_REPLY
+        reply_text = _scrub_prices(reply_text, sender)
         return {
             "reply_text":              reply_text,
             "handoff_to_human":        bool(parsed.get("handoff_to_human", False)),
@@ -571,8 +598,9 @@ async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
 
 
 def is_closing_intent(message: str, conversation_turns: int) -> bool:
-    """Return True if message looks like a farewell/thank-you and conversation is underway."""
-    if conversation_turns < 2:
+    """Return True if message looks like a farewell/thank-you and conversation is underway.
+    Requires >= 4 turns so a lone 'תודה' on a 1-turn greeting doesn't trigger closing."""
+    if conversation_turns < 4:
         return False
     m = message.strip()
     return bool(re.match(

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
@@ -35,10 +35,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ROOT            = Path(__file__).parent.parent.parent
-_LEADS_FILE      = _ROOT / "leads.json"
-_TEST_LEADS_FILE = _ROOT / "leads_test.json"
-_SESSIONS_FILE   = _ROOT / "sessions.json"
+_ROOT     = Path(__file__).parent.parent.parent
+# DATA_DIR can be set to a Render Persistent Disk mount (e.g. /data) so runtime
+# data files survive service restarts.  Falls back to project root.
+_DATA_DIR        = Path(config.DATA_DIR) if config.DATA_DIR else _ROOT
+_LEADS_FILE      = _DATA_DIR / "leads.json"
+_TEST_LEADS_FILE = _DATA_DIR / "leads_test.json"
+_SESSIONS_FILE   = _DATA_DIR / "sessions.json"
+_DEDUP_FILE      = _DATA_DIR / "dedup_ids.json"  # persisted dedup cache
 
 SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
@@ -80,19 +84,68 @@ _processed_ids_set: set[str]   = set()
 _processed_ids_order: deque    = deque()
 
 
+def _load_dedup_cache() -> None:
+    """Load persisted dedup IDs from disk on startup (Fix 3)."""
+    try:
+        ids = json.loads(_DEDUP_FILE.read_text(encoding="utf-8"))
+        for msg_id in ids[-_MAX_PROCESSED_IDS:]:
+            _processed_ids_set.add(msg_id)
+            _processed_ids_order.append(msg_id)
+        logger.info("[BOOT] Dedup cache loaded: %d IDs from disk", len(_processed_ids_set))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("[BOOT] Dedup cache load failed (starting empty): %s", exc)
+
+
+def _save_dedup_cache() -> None:
+    try:
+        _DEDUP_FILE.write_text(
+            json.dumps(list(_processed_ids_order)),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("[DEDUP] Cache save failed: %s", exc)
+
+
+_dedup_dirty_count = 0  # batch writes every 10 new IDs
+
+
 def _is_duplicate(msg_id: str) -> bool:
     return msg_id in _processed_ids_set
 
 
 def _track_msg_id(msg_id: str) -> None:
+    global _dedup_dirty_count
     if not msg_id or msg_id in _processed_ids_set:
         return
     _processed_ids_set.add(msg_id)
     _processed_ids_order.append(msg_id)
-    # Evict oldest when over limit
     while len(_processed_ids_order) > _MAX_PROCESSED_IDS:
         old = _processed_ids_order.popleft()
         _processed_ids_set.discard(old)
+    _dedup_dirty_count += 1
+    if _dedup_dirty_count >= 10:
+        _save_dedup_cache()
+        _dedup_dirty_count = 0
+
+
+# ── Per-sender rate limiting ──────────────────────────────────────────────────
+# Prevents a single sender from flooding the bot and burning Claude API budget.
+_RATE_WINDOW  = 60    # seconds
+_RATE_MAX_MSG = 10    # max messages per sender per window
+_sender_msg_times: dict[str, deque] = {}
+
+
+def _is_rate_limited(sender: str) -> bool:
+    now = time.time()
+    times = _sender_msg_times.setdefault(sender, deque())
+    while times and now - times[0] > _RATE_WINDOW:
+        times.popleft()
+    if len(times) >= _RATE_MAX_MSG:
+        return True
+    times.append(now)
+    return False
 
 
 green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
@@ -380,6 +433,11 @@ def _get_sender_lock(sender: str) -> asyncio.Lock:
 
 
 async def _process_message(sender: str, text: str) -> None:
+    # Rate limiting — checked before acquiring lock so flooded senders don't queue (Fix 6)
+    if _is_rate_limited(sender):
+        logger.warning("[BOT:RATE_LIMIT] Dropped message | sender=%s | text=%s", sender, text[:40])
+        return
+
     # Truncate extreme-length input before acquiring lock
     if len(text) > _MAX_MSG_CHARS:
         logger.warning("[BOT:TRUNCATE] Input truncated %d→%d | sender=%s", len(text), _MAX_MSG_CHARS, sender)
@@ -414,8 +472,10 @@ async def _process_message(sender: str, text: str) -> None:
                 if msg.get("role") == "assistant":
                     last_bot_msg = msg.get("content", "")
                     break
-            awaiting_confirmation = "הכל נכון?" in last_bot_msg or "נכון?" in last_bot_msg
-            if is_closing_intent(text, conv_turns) and not awaiting_confirmation:
+            # Fix 7: suppress closing intent if the bot's last message was a question
+            # (covers "הכל נכון?", "מה מספרך?", "מתי נוח?", etc.)
+            bot_last_is_question = "?" in last_bot_msg
+            if is_closing_intent(text, conv_turns) and not bot_last_is_question:
                 logger.info("[BOT:CLOSE] Closing intent | sender=%s", sender)
                 closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
                 try:
@@ -543,9 +603,20 @@ async def _lifespan(app: FastAPI):
     logger.info("GREEN_API_INSTANCE=%s | URL=%s", config.GREEN_API_INSTANCE_ID, config.GREEN_API_URL)
     logger.info("ANTHROPIC_API_KEY set=%s", bool(config.ANTHROPIC_API_KEY))
     logger.info("GOOGLE_SHEETS configured=%s", bool(config.GOOGLE_SHEETS_WEBHOOK_URL))
+    logger.info("WEBHOOK_SECRET set=%s", bool(config.WEBHOOK_SECRET))
+    logger.info("DATA_DIR=%s", str(_DATA_DIR))
+
+    if not config.DATA_DIR:
+        logger.warning(
+            "[BOOT] DATA_DIR not set — runtime data (leads, conversations, dedup) stored in "
+            "project root. On Render this directory is EPHEMERAL and will be wiped on restart. "
+            "Set DATA_DIR to a Render Persistent Disk mount path (e.g. /data) to persist data."
+        )
 
     if config.TEST_MODE and not config.TEST_PHONE:
         logger.warning("TEST_MODE is ON but TEST_PHONE is not set — ALL incoming messages will be blocked!")
+
+    _load_dedup_cache()
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
@@ -573,7 +644,14 @@ async def health():
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, token: str = Query(default="")):
+    # Fix 5: reject requests that don't carry the expected secret token (if configured).
+    # Register the webhook URL in Green-API as: https://your-app.onrender.com/webhook?token=SECRET
+    if config.WEBHOOK_SECRET and token != config.WEBHOOK_SECRET:
+        logger.warning("[BOT:AUTH_FAIL] Webhook rejected — bad/missing token from %s",
+                       getattr(request.client, "host", "unknown"))
+        return JSONResponse({"ok": False}, status_code=403)
+
     try:
         body = await request.json()
     except Exception:
@@ -680,6 +758,15 @@ async def diag():
             "closed":   sum(1 for s in _followup.values() if s.get("closed")),
         },
         "dedup_cache_size": len(_processed_ids_set),
+        "rate_limit": {
+            "window_seconds": _RATE_WINDOW,
+            "max_per_window": _RATE_MAX_MSG,
+            "tracked_senders": len(_sender_msg_times),
+        },
+        "disk": {
+            "data_dir": str(_DATA_DIR),
+            "ephemeral_warning": not bool(config.DATA_DIR),
+        },
         "error_counts": _error_counts,
         "recent_errors": list(_recent_errors),
     }
