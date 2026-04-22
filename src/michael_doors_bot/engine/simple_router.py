@@ -125,7 +125,8 @@ _BUSINESS = {
 }
 
 
-def _is_working_hours() -> bool:
+def is_working_hours() -> bool:
+    """Return True when the business is currently open (exported for use in main.py)."""
     from datetime import datetime
     import zoneinfo
     now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
@@ -147,13 +148,13 @@ def _context_block() -> str:
     elif weekday == 4:
         status = (
             f"within working hours (Friday {_BUSINESS['hours']['start']}:00–{_BUSINESS['hours']['fri_end']}:00)"
-            if _is_working_hours()
+            if is_working_hours()
             else f"outside working hours (Friday closes at {_BUSINESS['hours']['fri_end']}:00)"
         )
     else:
         status = (
             f"within working hours ({_BUSINESS['hours']['start']}:00–{_BUSINESS['hours']['end']}:00)"
-            if _is_working_hours()
+            if is_working_hours()
             else "outside working hours — let the customer know and offer to schedule a callback"
         )
     return "\n".join([
@@ -242,7 +243,7 @@ def _build_system(user_msg: str) -> str:
     ]
 
     # Fix 7: explicit out-of-hours instruction injected on every call when closed
-    if not _is_working_hours():
+    if not is_working_hours():
         next_open = _next_opening_time()
         parts.append(
             "## OUT-OF-HOURS — MANDATORY BEHAVIOUR\n"
@@ -279,10 +280,21 @@ def _build_system(user_msg: str) -> str:
 # ── Scenario classifier ───────────────────────────────────────────────────────
 def _has_entrance(m: str)     -> bool: return bool(re.search(
     r"דלת כניסה|דלתות כניסה"
-    r"|דלת חוץ|דלתות חוץ"            # colloquial: "דלת חוץ" = entrance door
-    r"|דלת חיצונית|דלתות חיצוניות",  # formal synonym
+    r"|דלת חוץ|דלתות חוץ"                          # colloquial: "דלת חוץ" = entrance door
+    r"|דלת חיצונית|דלתות חיצוניות"                 # formal synonym
+    r"|דלת ראשית|דלתות ראשיות"                     # "main door" = entrance door
+    r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"   # iron/steel = typically entrance
+    r"|כניסה לבית|כניסה לדירה|כניסה לבניין",       # "entrance to house/apartment/building"
     m))
-def _has_interior(m: str)     -> bool: return bool(re.search(r"דלת פנים|דלתות פנים|פולימר", m))
+def _has_interior(m: str)     -> bool: return bool(re.search(
+    r"דלת פנים|דלתות פנים|פולימר"
+    r"|דלת לחדר|דלת חדר|דלתות חדר"                 # "door to room"
+    r"|דלת שירותים|דלת לשירותים"                   # bathroom door
+    r"|דלת אמבטיה|דלת לאמבטיה"                    # bathroom door
+    r"|דלת מטבח|דלת למטבח"                         # kitchen door
+    r"|דלת שינה|דלת לשינה|דלת חדר שינה"           # bedroom door
+    r"|דלת סלון|דלת לסלון",                        # living room door
+    m))
 def _has_specific_product(m: str) -> bool:
     """True when the message names a specific entrance door series or interior door material.
     Used in _detect_scenario to bypass scripted responses for entrance models only."""
@@ -299,11 +311,18 @@ def _is_question(m: str)      -> bool: return bool(re.search(r"\?|יש לכם|ה
 def _has_frame_removal(m: str) -> bool:
     return bool(re.search(r"פירוק משקוף|עם פירוק|בלי פירוק|להוציא משקוף|להחליף משקוף|ללא פירוק", m))
 def _has_intent(m: str)       -> bool:
-    return bool(re.search(r"מתעניין|מתעניינת|מעוניין|מעוניינת|רוצה|צריך|צריכה|מחפש|מחפשת|מחפשים|מעניין אותי|מעניין אותנו|אשמח|מעוניינים", m))
+    return bool(re.search(
+        r"מתעניין|מתעניינת|מעוניין|מעוניינת|רוצה|צריך|צריכה"
+        r"|מחפש|מחפשת|מחפשים|מעניין אותי|מעניין אותנו|אשמח|מעוניינים"
+        r"|להזמין|לקנות|לרכוש"                          # to order/buy/purchase
+        r"|רוצה לדעת|מעניין אותו|מעניין אותה"           # want to know / he/she is interested
+        r"|מעניין\b",                                    # standalone "interested"
+        m))
 
 def _is_greeting_only(m: str) -> bool:
     return bool(re.match(
-        r"^(שלום|היי|הי|בוקר טוב|ערב טוב|צהריים טובים|לילה טוב|אהלן|טוב|מה שלומכם|מה נשמע|ספריד|חחח|אוקי|אחלה|נהדר|מצוין)[.!,\s]*$",
+        r"^(שלום|היי|הי|בוקר טוב|בוקר אור|ערב טוב|צהריים טובים|צהריים טוב|לילה טוב"
+        r"|אהלן|טוב|מה שלומכם|מה נשמע|מה קורה|מה קורה שם|ספריד|חחח|אוקי|אחלה|נהדר|מצוין)[.!,\s]*$",
         m.strip(), re.IGNORECASE
     ))
 
@@ -427,7 +446,17 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["showroom_address"]
     if re.search(r"שעות פעילות|שעות הפעילות|שעות פתיחה|שעות הפתיחה|מתי פתוח|מתי אפשר להגיע|לקבוע פגישה|תיאום פגישה|אולם תצוגה|אולם התצוגה", msg):
         return _SCENARIOS["showroom_hours"]
-    if re.search(r"תיקון|תקלה|התקנתם|הותקנה|שירות לדלת|בעיה בדלת|בעיה.*דלת|דלת.*בעיה|הדלת לא נסגרת|הדלת לא נפתחת|ציר שבור|ידית שבורה|אחריות", msg):
+    if re.search(
+        r"תיקון|תקלה|התקנתם|הותקנה|שירות לדלת"
+        r"|בעיה בדלת|בעיה.*דלת|דלת.*בעיה"
+        r"|הדלת לא נסגרת|הדלת לא נפתחת|הדלת תקועה|הדלת נפלה"
+        r"|ציר שבור|ציר.*דלת|דלת.*ציר"              # hinge issues
+        r"|מנעול שבור|בעיה במנעול|מנעול לא|לא נועל|לא נועלת"  # lock issues
+        r"|ידית שבורה|ידית לא"                       # handle issues
+        r"|התפרקה|התפרק|נשברה|נשבר"                 # came apart / broke
+        r"|אחריות",
+        msg,
+    ):
         return _SCENARIOS["repair"]
     if re.search(r"ממ\"ד|ממד|דלת ממד|דלת ממ״ד|חדר ביטחון|מרחב מוגן", msg):
         return _SCENARIOS["mamad"]
@@ -455,11 +484,22 @@ def _detect_scenario(msg: str) -> dict | None:
     if re.search(
         r"הצעת מחיר|כמה עולה|כמה זה עולה|כמה עולים"
         r"|כמה יעלה|כמה יעלו|כמה זה יעלה|כמה יעלה לי|כמה יעלה לנו"  # future tense price
+        r"|כמה לשים דלת|כמה לקנות דלת|כמה עולה לשים|כמה עולה להתקין"  # installation price
+        r"|כמה זה|כמה ה|תעריף|מה העלות"             # colloquial "how much is it" / rates
         r"|מחיר|אפשר הצעה|מחיר.*דלת|דלת.*מחיר",
         msg,
     ):
         return _SCENARIOS["vague_inquiry"]
-    if re.search(r"מחפש דלת|מחפשת דלת|מחפשים דלת|מתעניין|מתעניינת|מתעניינים|מעוניין|מעוניינת|מעוניינים|דלת לבית|דלת לדירה|צריך דלת|צריכה דלת|אשמח למידע|אפשר פרטים|פרטים על|רוצה לדעת|ספרו לי|מה יש לכם|מה אתם מוכרים|מה אפשר|מה השירותים|מה המוצרים", msg):
+    if re.search(
+        r"מחפש דלת|מחפשת דלת|מחפשים דלת|מתעניין|מתעניינת|מתעניינים"
+        r"|מעוניין|מעוניינת|מעוניינים|דלת לבית|דלת לדירה|צריך דלת|צריכה דלת"
+        r"|אשמח למידע|אפשר פרטים|פרטים על|רוצה לדעת|ספרו לי"
+        r"|מה יש לכם|מה אתם מוכרים|מה אפשר|מה השירותים|מה המוצרים"
+        r"|להזמין דלת|לקנות דלת|לרכוש דלת"          # order/buy a door
+        r"|דלת לחנות|דלת למשרד|דלת למחסן|דלת למוסד"  # commercial doors
+        r"|יש לכם דלת|האם יש לכם",                   # "do you have X"
+        msg,
+    ):
         return _SCENARIOS["ambiguous"]
     return None
 
@@ -475,8 +515,8 @@ def _get_claude(api_key: str) -> anthropic.AsyncAnthropic:
     return _claude
 
 
-_PARSE_ERROR_REPLY = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
-_API_ERROR_REPLY   = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע."
+_PARSE_ERROR_REPLY = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
+_API_ERROR_REPLY   = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
 
 # Set of all error reply texts — used by main.py to skip follow-up after a failure
 ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY])
@@ -519,8 +559,13 @@ def _parse_response(raw: str, sender: str) -> dict:
             logger.warning("Empty reply_text in parsed response | sender=%s", sender)
             reply_text = _PARSE_ERROR_REPLY
         reply_text = _scrub_prices(reply_text, sender)
+        reply_text_2_raw = parsed.get("reply_text_2")
+        reply_text_2 = str(reply_text_2_raw).strip() if reply_text_2_raw else None
+        if reply_text_2:
+            reply_text_2 = _scrub_prices(reply_text_2, sender)
         return {
             "reply_text":              reply_text,
+            "reply_text_2":            reply_text_2,
             "handoff_to_human":        bool(parsed.get("handoff_to_human", False)),
             "summary":                 str(parsed.get("summary", "")),
             "preferred_contact_hours": parsed.get("preferred_contact_hours"),
@@ -534,7 +579,8 @@ def _parse_response(raw: str, sender: str) -> dict:
     except Exception:
         logger.warning("Non-JSON response | sender=%s — raw: %s", sender, raw[:120])
         return {
-            "reply_text": _PARSE_ERROR_REPLY, "handoff_to_human": False,
+            "reply_text": _PARSE_ERROR_REPLY, "reply_text_2": None,
+            "handoff_to_human": False,
             "summary": "Parse error — fallback reply sent",
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "phone": None,
@@ -589,23 +635,33 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         scenario = _detect_scenario(user_message)
         if scenario:
             logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
-            # Inject greeting + company pitch into the opening line
             greeting = _israel_greeting()
-            response = scenario["response"].replace(
-                "היי, תודה שפניתם לדלתות מיכאל",
-                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊\n{_COMPANY_PITCH}",
-                1,
+            # Message 1: greeting + pitch only
+            msg1 = (
+                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊\n"
+                f"{_COMPANY_PITCH}"
             )
-            _conversations[sender].append({"role": "assistant", "content": response})
+            # Message 2: the scenario's actual response — strip the opening line prefix
+            msg2 = re.sub(
+                r"^היי, תודה שפניתם לדלתות מיכאל[^.\n]*\.?\n?",
+                "",
+                scenario["response"],
+                count=1,
+            ).strip()
+            # Store both as one combined assistant turn in history
+            combined = msg1 + "\n\n" + msg2
+            _conversations[sender].append({"role": "assistant", "content": combined})
             _save_conversations()
             return {
-                "reply_text":              response,
+                "reply_text":              msg1,
+                "reply_text_2":            msg2,
                 "handoff_to_human":        scenario["handoff_to_human"],
                 "summary":                 scenario["summary"],
                 "preferred_contact_hours": None,
                 "needs_frame_removal":     scenario["needs_frame_removal"],
                 "needs_installation":      None,
                 "full_name":               None,
+                "phone":                   None,
                 "service_type":            None,
                 "city":                    None,
             }
@@ -648,7 +704,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         _conversations[sender].append({"role": "assistant", "content": fallback})
         _save_conversations()
         return {
-            "reply_text": fallback, "handoff_to_human": False,
+            "reply_text": fallback, "reply_text_2": None, "handoff_to_human": False,
             "summary": "Claude API error — fallback sent",
             "preferred_contact_hours": None, "needs_frame_removal": None, "needs_installation": None,
         }
@@ -658,7 +714,11 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         logger.warning("[FALLBACK] Parse fallback used | sender=%s | raw_preview=%s", sender, raw_text[:80])
     else:
         logger.info("[REPLY:OK] sender=%s | text=%s", sender, structured["reply_text"][:60])
-    _conversations[sender].append({"role": "assistant", "content": structured["reply_text"]})
+    # Store both parts as a single assistant turn so history stays clean
+    history_content = structured["reply_text"]
+    if structured.get("reply_text_2"):
+        history_content += "\n\n" + structured["reply_text_2"]
+    _conversations[sender].append({"role": "assistant", "content": history_content})
     _save_conversations()
     return structured
 

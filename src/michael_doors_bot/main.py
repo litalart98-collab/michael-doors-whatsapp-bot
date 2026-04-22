@@ -25,6 +25,7 @@ from .engine.simple_router import (
     get_followup_message,
     get_reply,
     is_closing_intent,
+    is_working_hours,
 )
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
@@ -42,13 +43,14 @@ _DATA_DIR        = Path(config.DATA_DIR) if config.DATA_DIR else _ROOT
 _LEADS_FILE      = _DATA_DIR / "leads.json"
 _TEST_LEADS_FILE = _DATA_DIR / "leads_test.json"
 _SESSIONS_FILE   = _DATA_DIR / "sessions.json"
-_DEDUP_FILE      = _DATA_DIR / "dedup_ids.json"  # persisted dedup cache
+_DEDUP_FILE      = _DATA_DIR / "dedup_ids.json"   # persisted dedup cache
+_FOLLOWUP_FILE   = _DATA_DIR / "followup_state.json"  # persisted follow-up timers
 
 SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
 CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 
-_BOT_ERROR_MSG    = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
+_BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
 _NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
 
@@ -323,12 +325,37 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
 # {sender: {"last_bot_time": float, "followup_sent": bool, "followup_time": float, "closed": bool}}
 _followup: dict[str, dict] = {}
 
+
+def _load_followup() -> None:
+    """Restore active follow-up timers from disk after a restart."""
+    try:
+        data = json.loads(_FOLLOWUP_FILE.read_text(encoding="utf-8"))
+        cutoff = time.time() - 30 * 60  # discard entries older than 30 min
+        restored = 0
+        for sender, state in data.items():
+            if not state.get("closed") and state.get("last_bot_time", 0) > cutoff:
+                _followup[sender] = state
+                restored += 1
+        logger.info("[BOOT] Follow-up state loaded: %d active entries restored", restored)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("[BOOT] Follow-up state load failed (starting empty): %s", exc)
+
+
+def _save_followup() -> None:
+    try:
+        _FOLLOWUP_FILE.write_text(json.dumps(_followup), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("[FOLLOWUP] State save failed: %s", exc)
+
+
 # Guard: prevent _attach_summary from running twice for the same conversation
 _summary_attached: set[str] = set()
 
 _CLOSE_MSG = (
-    "מכיוון שלא קיבלנו תגובה, נסגור את הפנייה לעת עתה 🙂\n"
-    "אם תרצו לחזור אלינו בכל עת — אנחנו כאן!\n"
+    "ראיתי שלא חזרת, אז נסגור את הפנייה לעת עתה 😊\n"
+    "אם תרצה/י לחזור בכל שעה ולהתחיל שיחה חדשה — נשמח לעזור!\n"
     "דלתות מיכאל | 054-2787578"
 )
 
@@ -343,6 +370,7 @@ def _followup_reset(sender: str) -> None:
         state["followup_time"] = 0.0
     else:
         _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
+    _save_followup()
 
 
 def _followup_mark_bot_replied(sender: str) -> None:
@@ -351,6 +379,7 @@ def _followup_mark_bot_replied(sender: str) -> None:
     else:
         _followup[sender]["last_bot_time"] = time.time()
         _followup[sender]["closed"] = False
+    _save_followup()
 
 
 async def _followup_loop() -> None:
@@ -374,6 +403,7 @@ async def _followup_loop() -> None:
                 _summary_attached.discard(s)
             if stale:
                 logger.info("Memory cleanup: removed %d stale conversations", len(stale))
+                _save_followup()
 
         # ── Drain outbound send retry queue ───────────────────────────────────
         still_pending_sends: list[dict] = []
@@ -434,6 +464,10 @@ async def _followup_loop() -> None:
             followup_time = state.get("followup_time", 0.0)
 
             if not followup_sent and now - last_bot >= FOLLOWUP_DELAY:
+                # Never send follow-ups outside business hours — defer until opening time
+                if not is_working_hours():
+                    continue
+
                 history = _conv_history.get(sender, [])
 
                 # Guard: never follow-up if no customer reply is recorded in history.
@@ -460,22 +494,29 @@ async def _followup_loop() -> None:
                 if last_bot_text in ERROR_REPLIES:
                     logger.info("[BOT:FOLLOWUP_SKIP] Dropping watch after error reply | sender=%s", sender)
                     _followup.pop(sender, None)
+                    _save_followup()
                     continue
                 try:
                     msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)
                     await green.send_message(sender, msg)
                     state["followup_sent"] = True
                     state["followup_time"] = time.time()
+                    _save_followup()
                     logger.info("[BOT:FOLLOWUP] Sent | sender=%s", sender)
                 except Exception as exc:
                     _record_error("followup", sender, str(exc))
                     logger.error("[BOT:FOLLOWUP_ERR] sender=%s | %s", sender, exc)
 
             elif followup_sent and now - followup_time >= CLOSE_AFTER_FOLLOWUP:
+                # Never send outside business hours — defer until opening time
+                if not is_working_hours():
+                    continue
+
                 try:
                     await green.send_message(sender, _CLOSE_MSG)
                     state["closed"] = True
-                    logger.info("Inquiry closed | sender=%s", sender)
+                    _save_followup()
+                    logger.info("[BOT:CLOSE] Inquiry closed (no-response) | sender=%s", sender)
                     await _attach_summary(sender, "נסגרה ללא מענה", config.TEST_MODE)
                 except Exception as exc:
                     logger.error("Close message error | sender=%s | %s", sender, exc)
@@ -596,6 +637,7 @@ async def _process_message(sender: str, text: str) -> None:
                         "followup_time": time.time(),
                         "closed": True,
                     }
+                    _save_followup()
                     await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
                 except Exception as send_err:
                     _record_error("send_fail", sender, str(send_err))
@@ -609,13 +651,17 @@ async def _process_message(sender: str, text: str) -> None:
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
             reply_text = result["reply_text"]
+            reply_text_2 = result.get("reply_text_2")  # second pulse (opening message only)
             is_fallback = reply_text in ERROR_REPLIES
             try:
                 await green.send_message(sender, reply_text)
+                # Two-pulse opening: send greeting+pitch first, then after a short pause
+                # send the actual response to the customer's inquiry
+                if reply_text_2 and not is_fallback:
+                    await asyncio.sleep(1.5)
+                    await green.send_message(sender, reply_text_2)
+                    logger.info("[BOT:SEND2] Second pulse sent | sender=%s", sender)
                 if result.get("handoff_to_human"):
-                    # Conversation complete — stop the follow-up loop for this sender.
-                    # Without this, the bot would send a "are you still there?" message
-                    # 15 minutes after a successfully completed lead handoff.
                     if sender in _followup:
                         _followup[sender]["closed"] = True
                     else:
@@ -625,6 +671,7 @@ async def _process_message(sender: str, text: str) -> None:
                             "followup_time": time.time(),
                             "closed": True,
                         }
+                    _save_followup()
                 else:
                     _followup_mark_bot_replied(sender)
                 if is_fallback:
@@ -635,11 +682,15 @@ async def _process_message(sender: str, text: str) -> None:
             except Exception as send_err:
                 _record_error("send_fail", sender, str(send_err))
                 logger.error("[BOT:SEND_FAIL] Reply delivery failed | sender=%s | %s", sender, send_err)
-                if not is_fallback:  # don't retry error messages — just log
+                if not is_fallback:
                     _queue_send_retry(sender, reply_text)
         except Exception as exc:
             _record_error("unhandled", sender, str(exc))
             logger.error("[BOT:UNHANDLED] _process_message crash | sender=%s | %s", sender, exc)
+            # Clear follow-up watch — the conversation state is unknown after a crash.
+            # Without this, a follow-up would fire 15 min later from a broken history state.
+            _followup.pop(sender, None)
+            _save_followup()
             try:
                 if _is_individual_chat(sender):
                     await green.send_message(sender, _BOT_ERROR_MSG)
@@ -741,6 +792,7 @@ async def _lifespan(app: FastAPI):
         logger.warning("TEST_MODE is ON but TEST_PHONE is not set — ALL incoming messages will be blocked!")
 
     _load_dedup_cache()
+    _load_followup()
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
