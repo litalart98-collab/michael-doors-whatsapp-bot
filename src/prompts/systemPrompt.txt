@@ -383,7 +383,7 @@ Use it to inform your reply but do NOT copy its wording. Follow this prompt's to
 
 ## OUTPUT FORMAT
 
-Always respond with a raw JSON object only. No markdown, no code fences, no "json" label, no text outside the JSON object. Start your response with `{` and end with `}`.
+**CRITICAL: Your entire response must be a single raw JSON object. Nothing before `{`, nothing after `}`. No markdown, no code fences, no "json" label, no plain text, no explanations outside the JSON. If you write anything other than a JSON object, the message will never reach the customer.**
 
 {
   "reply_text": "ההודעה הראשונה לשלוח ללקוח בעברית",

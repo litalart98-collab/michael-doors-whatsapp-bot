@@ -553,6 +553,10 @@ def _parse_response(raw: str, sender: str) -> dict:
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
         # Strip bare "json" label that Claude sometimes adds without backticks
         cleaned = re.sub(r"^json\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        # If Claude prepended plain text before the JSON object, find the first `{`
+        brace_pos = cleaned.find("{")
+        if brace_pos > 0:
+            cleaned = cleaned[brace_pos:]
         parsed = json.loads(cleaned)
         reply_text = str(parsed.get("reply_text", ""))
         if not reply_text.strip():
@@ -672,9 +676,6 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         _t0 = _time.monotonic()
         logger.info("[CLAUDE:REQ] sender=%s | turns=%d", sender, len(_conversations[sender]))
         client = _get_claude(anthropic_api_key)
-        # Prefill assistant turn with "{" — forces Claude to output valid JSON
-        # and makes it impossible for any label/code-fence to appear before the object.
-        prefilled_messages = _conversations[sender] + [{"role": "assistant", "content": "{"}]
         response = None
         for _attempt in range(3):
             try:
@@ -682,7 +683,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
                     model="claude-sonnet-4-6",
                     max_tokens=900,
                     system=_build_system(user_message),
-                    messages=prefilled_messages,
+                    messages=_conversations[sender],
                     timeout=50.0,
                 )
                 break
@@ -694,7 +695,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
                 await asyncio.sleep(wait)
         if not response or not response.content:
             raise ValueError("Claude returned empty response")
-        raw_text = "{" + response.content[0].text
+        raw_text = response.content[0].text
         logger.info("[CLAUDE:OK] sender=%s | latency=%.1fs | tokens_out=%s",
                     sender, _time.monotonic() - _t0,
                     getattr(response.usage, "output_tokens", "?"))
