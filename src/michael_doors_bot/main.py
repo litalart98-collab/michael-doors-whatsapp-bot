@@ -42,6 +42,13 @@ SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
 CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 
+_BOT_ERROR_MSG = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
+_NON_TEXT_MSG  = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
+
+# Deduplication: track recently processed message IDs to prevent webhook+polling double-processing
+_processed_ids: set[str] = set()
+_MAX_PROCESSED_IDS = 500
+
 green = GreenAPIClient(config.GREEN_API_INSTANCE_ID, config.GREEN_API_TOKEN, config.GREEN_API_URL)
 
 # ── Leads helpers ─────────────────────────────────────────────────────────────
@@ -194,9 +201,25 @@ def _followup_mark_bot_replied(sender: str) -> None:
 
 async def _followup_loop() -> None:
     logger.info("Follow-up loop started")
+    _tick = 0
     while True:
         await asyncio.sleep(60)
+        _tick += 1
         now = time.time()
+
+        # Hourly cleanup: remove closed conversations older than 2 hours to prevent memory leaks
+        if _tick % 60 == 0:
+            cutoff = now - 2 * 3600
+            stale = [
+                s for s, st in _followup.items()
+                if st.get("closed") and st.get("followup_time", 0) < cutoff
+            ]
+            for s in stale:
+                _followup.pop(s, None)
+                _sender_locks.pop(s, None)
+                _summary_attached.discard(s)
+            if stale:
+                logger.info("Memory cleanup: removed %d stale conversations", len(stale))
         for sender, state in list(_followup.items()):
             if not _is_individual_chat(sender):
                 continue
@@ -355,6 +378,11 @@ async def _process_message(sender: str, text: str) -> None:
                 logger.error("Send failed | sender=%s | %s", sender, send_err)
         except Exception as exc:
             logger.error("_process_message error | sender=%s | %s", sender, exc)
+            try:
+                if _is_individual_chat(sender):
+                    await green.send_message(sender, _BOT_ERROR_MSG)
+            except Exception:
+                pass
 
 
 # ── Polling loop (fallback when no webhook configured) ────────────────────────
@@ -373,14 +401,27 @@ async def _poll_loop() -> None:
             body = notification.get("body", {})
 
             if body.get("typeWebhook") == "incomingMessageReceived":
-                sender = body.get("senderData", {}).get("chatId", "")
+                sender   = body.get("senderData", {}).get("chatId", "")
                 msg_data = body.get("messageData", {})
+                msg_id   = body.get("idMessage", "")
                 text = (
                     msg_data.get("textMessageData", {}).get("textMessage")
                     or msg_data.get("extendedTextMessageData", {}).get("text")
                     or ""
                 )
-                if sender and text:
+                if sender and msg_id and msg_id in _processed_ids:
+                    logger.info("Duplicate poll message skipped | id=%s | sender=%s", msg_id, sender)
+                elif sender and not text and _is_individual_chat(sender):
+                    msg_type = msg_data.get("typeMessage", "")
+                    if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
+                        logger.info("Non-text message (poll) | type=%s | sender=%s", msg_type, sender)
+                        try:
+                            await green.send_message(sender, _NON_TEXT_MSG)
+                        except Exception as exc:
+                            logger.error("Non-text reply failed | sender=%s | %s", sender, exc)
+                elif sender and text:
+                    if msg_id:
+                        _processed_ids.add(msg_id)
                     logger.info("Poll incoming | sender=%s | text=%s", sender, text[:60])
                     await _process_message(sender, text)
 
@@ -430,11 +471,33 @@ async def webhook(request: Request):
 
     sender = body.get("senderData", {}).get("chatId", "")
     msg_data = body.get("messageData", {})
+    msg_id   = body.get("idMessage", "")
     text = (
         msg_data.get("textMessageData", {}).get("textMessage")
         or msg_data.get("extendedTextMessageData", {}).get("text")
         or ""
     )
+
+    if sender and msg_id:
+        if msg_id in _processed_ids:
+            logger.info("Duplicate webhook message skipped | id=%s | sender=%s", msg_id, sender)
+            return JSONResponse({"ok": True})
+        _processed_ids.add(msg_id)
+        if len(_processed_ids) > _MAX_PROCESSED_IDS:
+            # Trim oldest half to keep set bounded
+            trimmed = list(_processed_ids)[_MAX_PROCESSED_IDS // 2:]
+            _processed_ids.clear()
+            _processed_ids.update(trimmed)
+
+    if sender and not text and _is_individual_chat(sender):
+        msg_type = msg_data.get("typeMessage", "")
+        if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
+            logger.info("Non-text message | type=%s | sender=%s", msg_type, sender)
+            try:
+                await green.send_message(sender, _NON_TEXT_MSG)
+            except Exception as exc:
+                logger.error("Non-text reply failed | sender=%s | %s", sender, exc)
+        return JSONResponse({"ok": True})
 
     if sender and text:
         logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
@@ -444,6 +507,10 @@ async def webhook(request: Request):
             logger.info("After processing — leads count: %d", len(leads))
         except asyncio.TimeoutError:
             logger.error("Webhook timeout for sender=%s", sender)
+            try:
+                await green.send_message(sender, _BOT_ERROR_MSG)
+            except Exception:
+                pass
         except Exception as exc:
             logger.error("Webhook processing error: %s", exc)
 

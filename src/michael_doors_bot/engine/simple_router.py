@@ -3,6 +3,7 @@ Scenario classifier + Claude service.
 Scenario classifier runs only on the first message of a conversation.
 All subsequent messages go directly to Claude.
 """
+import asyncio
 import json
 import logging
 import re
@@ -328,8 +329,12 @@ def _parse_response(raw: str, sender: str) -> dict:
         # Strip bare "json" label that Claude sometimes adds without backticks
         cleaned = re.sub(r"^json\s*", "", cleaned, flags=re.IGNORECASE).strip()
         parsed = json.loads(cleaned)
+        reply_text = str(parsed.get("reply_text", ""))
+        if not reply_text.strip():
+            logger.warning("Empty reply_text in parsed response | sender=%s", sender)
+            reply_text = _PARSE_ERROR_REPLY
         return {
-            "reply_text":              str(parsed.get("reply_text", "")),
+            "reply_text":              reply_text,
             "handoff_to_human":        bool(parsed.get("handoff_to_human", False)),
             "summary":                 str(parsed.get("summary", "")),
             "preferred_contact_hours": parsed.get("preferred_contact_hours"),
@@ -398,13 +403,25 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         # Prefill assistant turn with "{" — forces Claude to output valid JSON
         # and makes it impossible for any label/code-fence to appear before the object.
         prefilled_messages = _conversations[sender] + [{"role": "assistant", "content": "{"}]
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=900,
-            system=_build_system(user_message),
-            messages=prefilled_messages,
-            timeout=50.0,
-        )
+        response = None
+        for _attempt in range(3):
+            try:
+                response = await client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=900,
+                    system=_build_system(user_message),
+                    messages=prefilled_messages,
+                    timeout=50.0,
+                )
+                break
+            except (anthropic.RateLimitError, anthropic.APITimeoutError) as retry_exc:
+                if _attempt == 2:
+                    raise
+                wait = 5 * (2 ** _attempt)
+                logger.warning("Claude retry %d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
+                await asyncio.sleep(wait)
+        if not response or not response.content:
+            raise ValueError("Claude returned empty response")
         raw_text = "{" + response.content[0].text
     except Exception as exc:
         logger.error("Claude API error | sender=%s | %s", sender, exc)
