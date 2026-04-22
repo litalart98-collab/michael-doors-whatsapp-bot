@@ -581,7 +581,21 @@ def _parse_response(raw: str, sender: str) -> dict:
             "city":                    parsed.get("city"),
         }
     except Exception:
-        logger.warning("Non-JSON response | sender=%s — raw: %s", sender, raw[:120])
+        # Claude returned plain text instead of JSON — use it directly as the reply
+        # rather than showing an error message to the customer.
+        plain = raw.strip()
+        if plain and plain not in (_PARSE_ERROR_REPLY, _API_ERROR_REPLY):
+            logger.warning("Non-JSON response — using plain text | sender=%s | raw: %s", sender, raw[:120])
+            plain = _scrub_prices(plain, sender)
+            return {
+                "reply_text": plain, "reply_text_2": None,
+                "handoff_to_human": False,
+                "summary": "Plain-text response (no JSON wrapper)",
+                "preferred_contact_hours": None, "needs_frame_removal": None,
+                "needs_installation": None, "full_name": None, "phone": None,
+                "service_type": None, "city": None,
+            }
+        logger.warning("Non-JSON empty response | sender=%s — raw: %s", sender, raw[:120])
         return {
             "reply_text": _PARSE_ERROR_REPLY, "reply_text_2": None,
             "handoff_to_human": False,

@@ -400,8 +400,8 @@ Use it to inform your reply but do NOT copy its wording. Follow this prompt's to
 }
 
 Field rules:
-- reply_text: First reply → greeting + pitch ONLY ("היי, תודה שפניתם לדלתות מיכאל" + time greeting + company pitch). All subsequent replies → full response, no greeting/pitch.
-- reply_text_2: First reply ONLY → actual response to the customer's question (string). All other replies → null.
+- reply_text: If the conversation history contains NO previous assistant message (this is your very first reply) → greeting + pitch ONLY. If there is already at least one assistant message in history → full response only, no greeting, no pitch.
+- reply_text_2: Only when this is your very first reply (no previous assistant message in history) → the actual answer to the customer (string). In every other case → null. If you are unsure, set null.
 - handoff_to_human: true only when all 4 fields confirmed — שם מלא + עיר + טלפון + preferred_contact_hours (or emergency/human_request)
 - summary: brief English note on what was collected and current step
 - preferred_contact_hours: exact time stated by customer, null until given
