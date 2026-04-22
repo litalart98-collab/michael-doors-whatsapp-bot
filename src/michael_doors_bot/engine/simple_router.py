@@ -396,7 +396,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         prefilled_messages = _conversations[sender] + [{"role": "assistant", "content": "{"}]
         response = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=600,
+            max_tokens=900,
             system=_build_system(user_message),
             messages=prefilled_messages,
             timeout=50.0,
