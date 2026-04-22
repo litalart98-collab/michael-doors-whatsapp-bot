@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config
 from .engine.simple_router import (
+    DIAG_STATE as _ROUTER_DIAG,
     ERROR_REPLIES,
     _conversations as _conv_history,
     clear_conversation,
@@ -46,6 +47,31 @@ CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 _BOT_ERROR_MSG    = "מצטערים, אירעה תקלה זמנית. אנא נסו שנית בעוד רגע 🙏"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
 _NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
+
+# Max text length passed into _process_message — truncated if exceeded
+_MAX_MSG_CHARS = 2000
+
+# ── Diagnostics — error tracking ──────────────────────────────────────────────
+_recent_errors: deque = deque(maxlen=50)  # last 50 error events
+_error_counts: dict[str, int] = {
+    "claude_api":  0,
+    "parse":       0,
+    "send_fail":   0,
+    "webhook":     0,
+    "followup":    0,
+    "unhandled":   0,
+}
+
+
+def _record_error(kind: str, sender: str, detail: str) -> None:
+    _error_counts[kind] = _error_counts.get(kind, 0) + 1
+    _recent_errors.append({
+        "ts":     datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "type":   kind,
+        "sender": sender[-8:] if sender else "",  # last 8 chars only (privacy)
+        "detail": str(detail)[:200],
+    })
+
 
 # ── Message deduplication ─────────────────────────────────────────────────────
 # Ordered deque so we evict the OLDEST IDs (not a random half) when full.
@@ -278,9 +304,10 @@ async def _followup_loop() -> None:
                     await green.send_message(sender, msg)
                     state["followup_sent"] = True
                     state["followup_time"] = time.time()
-                    logger.info("Follow-up sent | sender=%s", sender)
+                    logger.info("[BOT:FOLLOWUP] Sent | sender=%s", sender)
                 except Exception as exc:
-                    logger.error("Follow-up error | sender=%s | %s", sender, exc)
+                    _record_error("followup", sender, str(exc))
+                    logger.error("[BOT:FOLLOWUP_ERR] sender=%s | %s", sender, exc)
 
             elif followup_sent and now - followup_time >= CLOSE_AFTER_FOLLOWUP:
                 try:
@@ -353,14 +380,19 @@ def _get_sender_lock(sender: str) -> asyncio.Lock:
 
 
 async def _process_message(sender: str, text: str) -> None:
+    # Truncate extreme-length input before acquiring lock
+    if len(text) > _MAX_MSG_CHARS:
+        logger.warning("[BOT:TRUNCATE] Input truncated %d→%d | sender=%s", len(text), _MAX_MSG_CHARS, sender)
+        text = text[:_MAX_MSG_CHARS]
+
     async with _get_sender_lock(sender):
         try:
             if not _is_individual_chat(sender):
-                logger.info("Skipping non-individual chat | sender=%s", sender)
+                logger.info("[BOT:SKIP] Non-individual chat | sender=%s", sender)
                 return
             if config.TEST_MODE:
                 if sender != config.TEST_PHONE:
-                    logger.info("TEST_MODE: blocked sender=%s (allowed=%s)", sender, config.TEST_PHONE)
+                    logger.info("[BOT:BLOCKED] TEST_MODE blocked sender=%s", sender)
                     return
                 if text.strip() == "#reset":
                     clear_conversation(sender)
@@ -369,12 +401,13 @@ async def _process_message(sender: str, text: str) -> None:
                     await green.send_message(sender, "שיחה אופסה ✓")
                     return
 
+            logger.info("[BOT:RECV] sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
+
             # Customer replied — reset follow-up timer
             _followup_reset(sender)
 
             # Smart closing: if customer says goodbye/thanks mid-conversation, close gracefully
             conv_turns = len(_conv_history.get(sender, []))
-            # Skip closing check when bot is waiting for summary confirmation
             last_bot_msg = ""
             history = _conv_history.get(sender, [])
             for msg in reversed(history):
@@ -383,39 +416,48 @@ async def _process_message(sender: str, text: str) -> None:
                     break
             awaiting_confirmation = "הכל נכון?" in last_bot_msg or "נכון?" in last_bot_msg
             if is_closing_intent(text, conv_turns) and not awaiting_confirmation:
-                logger.info("Closing intent detected | sender=%s", sender)
+                logger.info("[BOT:CLOSE] Closing intent | sender=%s", sender)
                 closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
                 try:
                     await green.send_message(sender, closing_msg)
+                    logger.info("[BOT:SEND] Closing message sent | sender=%s", sender)
                     _followup[sender] = {
                         "last_bot_time": time.time(),
                         "followup_sent": True,
                         "followup_time": time.time(),
                         "closed": True,
                     }
-                    logger.info("Conversation closed gracefully | sender=%s", sender)
                     await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
                 except Exception as send_err:
-                    logger.error("Closing send failed | sender=%s | %s", sender, send_err)
+                    _record_error("send_fail", sender, str(send_err))
+                    logger.error("[BOT:SEND_FAIL] Closing send failed | sender=%s | %s", sender, send_err)
                 return
 
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
-            logger.info("Got reply for %s: %s", sender, result["reply_text"][:60])
             lead = _record_lead(sender, text, result, config.TEST_MODE)
             await _maybe_send_to_sheets(lead, result, config.TEST_MODE)
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
+            reply_text = result["reply_text"]
+            is_fallback = reply_text in ERROR_REPLIES
             try:
-                await green.send_message(sender, result["reply_text"])
+                await green.send_message(sender, reply_text)
                 _followup_mark_bot_replied(sender)
-                logger.info("Message sent to %s", sender)
+                if is_fallback:
+                    _record_error("parse", sender, "fallback reply sent after error")
+                    logger.warning("[BOT:FALLBACK] Error fallback sent | sender=%s", sender)
+                else:
+                    logger.info("[BOT:SEND] Reply sent | sender=%s | chars=%d", sender, len(reply_text))
             except Exception as send_err:
-                logger.error("Send failed | sender=%s | %s", sender, send_err)
+                _record_error("send_fail", sender, str(send_err))
+                logger.error("[BOT:SEND_FAIL] Reply delivery failed | sender=%s | %s", sender, send_err)
         except Exception as exc:
-            logger.error("_process_message unhandled error | sender=%s | %s", sender, exc)
+            _record_error("unhandled", sender, str(exc))
+            logger.error("[BOT:UNHANDLED] _process_message crash | sender=%s | %s", sender, exc)
             try:
                 if _is_individual_chat(sender):
                     await green.send_message(sender, _BOT_ERROR_MSG)
+                    logger.info("[BOT:FALLBACK] Sent fallback after crash | sender=%s", sender)
             except Exception:
                 pass
 
@@ -445,18 +487,19 @@ async def _poll_loop() -> None:
                     or ""
                 )
                 if sender and msg_id and _is_duplicate(msg_id):
-                    logger.info("Duplicate poll message skipped | id=%s | sender=%s", msg_id, sender)
+                    logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
                 elif sender and not text and _is_individual_chat(sender):
                     msg_type = msg_data.get("typeMessage", "")
                     if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
-                        logger.info("Non-text message (poll) | type=%s | sender=%s", msg_type, sender)
+                        logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
                         try:
                             await green.send_message(sender, _NON_TEXT_MSG)
                         except Exception as exc:
-                            logger.error("Non-text reply failed | sender=%s | %s", sender, exc)
+                            _record_error("send_fail", sender, str(exc))
+                            logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
                 elif sender and text:
                     _track_msg_id(msg_id)
-                    logger.info("Poll incoming | sender=%s | text=%s", sender, text[:60])
+                    logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
                     await _process_message(sender, text)
 
             if receipt_id:
@@ -464,9 +507,9 @@ async def _poll_loop() -> None:
 
         except Exception as exc:
             _consecutive_errors += 1
-            # Exponential backoff: 5s, 10s, 20s, up to 120s — avoids hammering API on 401
             backoff = min(5 * (2 ** (_consecutive_errors - 1)), 120)
-            logger.error("Poll loop error (%d): %s — retry in %ds", _consecutive_errors, exc, backoff)
+            _record_error("webhook", "", f"poll_loop error #{_consecutive_errors}: {exc}")
+            logger.error("[BOT:POLL_ERR] count=%d %s — retry in %ds", _consecutive_errors, exc, backoff)
             await asyncio.sleep(backoff)
 
 
@@ -553,7 +596,7 @@ async def webhook(request: Request):
     # Deduplication — webhook and poll loop can both deliver the same message
     if sender and msg_id:
         if _is_duplicate(msg_id):
-            logger.info("Duplicate webhook message skipped | id=%s | sender=%s", msg_id, sender)
+            logger.info("[BOT:DEDUP] Webhook duplicate skipped | id=%s | sender=%s", msg_id, sender)
             return JSONResponse({"ok": True})
         _track_msg_id(msg_id)
 
@@ -561,27 +604,28 @@ async def webhook(request: Request):
     if sender and not text and _is_individual_chat(sender):
         msg_type = msg_data.get("typeMessage", "")
         if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
-            logger.info("Non-text message | type=%s | sender=%s", msg_type, sender)
+            logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
             try:
                 await green.send_message(sender, _NON_TEXT_MSG)
             except Exception as exc:
-                logger.error("Non-text reply failed | sender=%s | %s", sender, exc)
+                _record_error("send_fail", sender, str(exc))
+                logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
         return JSONResponse({"ok": True})
 
     if sender and text:
-        logger.info("Webhook incoming | sender=%s | text=%s", sender, text[:60])
+        logger.info("[BOT:RECV] Webhook | sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
         try:
             await asyncio.wait_for(_process_message(sender, text), timeout=60.0)
-            leads = _load_leads(config.TEST_MODE)
-            logger.info("After processing — leads count: %d", len(leads))
         except asyncio.TimeoutError:
-            logger.error("Webhook timeout for sender=%s — sending fallback", sender)
+            _record_error("webhook", sender, "60s processing timeout")
+            logger.error("[BOT:TIMEOUT] Webhook timeout | sender=%s — sending fallback", sender)
             try:
                 await green.send_message(sender, _BOT_ERROR_MSG)
             except Exception:
                 pass
         except Exception as exc:
-            logger.error("Webhook processing error | sender=%s | %s", sender, exc)
+            _record_error("webhook", sender, str(exc))
+            logger.error("[BOT:WEBHOOK_ERR] sender=%s | %s", sender, exc)
             try:
                 await green.send_message(sender, _BOT_ERROR_MSG)
             except Exception:
@@ -608,6 +652,37 @@ async def debug_test():
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.get("/diag", response_class=JSONResponse)
+async def diag():
+    """Lightweight diagnostics endpoint — runtime state, error counts, recent errors."""
+    uptime_s = int(time.time() - _bot_start_time) if _bot_start_time else 0
+    return {
+        "uptime_seconds": uptime_s,
+        "test_mode": config.TEST_MODE,
+        "config": {
+            "green_api_instance": config.GREEN_API_INSTANCE_ID[:4] + "...",
+            "anthropic_key_set":  bool(config.ANTHROPIC_API_KEY),
+            "sheets_configured":  bool(config.GOOGLE_SHEETS_WEBHOOK_URL),
+            **_ROUTER_DIAG,
+        },
+        "tasks": {
+            "poll_alive":    _poll_task is not None and not _poll_task.done(),
+            "followup_alive": _followup_task is not None and not _followup_task.done(),
+        },
+        "conversations": {
+            "active":      len(_conv_history),
+            "total_turns": sum(len(v) for v in _conv_history.values()),
+        },
+        "followups": {
+            "watching": sum(1 for s in _followup.values() if not s.get("closed")),
+            "closed":   sum(1 for s in _followup.values() if s.get("closed")),
+        },
+        "dedup_cache_size": len(_processed_ids_set),
+        "error_counts": _error_counts,
+        "recent_errors": list(_recent_errors),
+    }
 
 
 @app.get("/conversations", response_class=HTMLResponse)

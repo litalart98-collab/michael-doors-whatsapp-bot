@@ -22,18 +22,28 @@ _CONV_PATH    = _ROOT / "conversations.json"
 # ── System prompt — cached once at startup to avoid disk read per request ────
 try:
     _SYSTEM_PROMPT: str = _PROMPT_PATH.read_text(encoding="utf-8")
-    logger.info("System prompt loaded (%d chars)", len(_SYSTEM_PROMPT))
+    logger.info("[BOOT] System prompt loaded (%d chars)", len(_SYSTEM_PROMPT))
 except Exception as _exc:
-    logger.critical("FATAL: Failed to load system prompt from %s — %s", _PROMPT_PATH, _exc)
+    logger.critical("[BOOT] FATAL: Failed to load system prompt from %s — %s", _PROMPT_PATH, _exc)
     _SYSTEM_PROMPT = ""
 
 # ── FAQ bank (loaded once; empty list on failure so bot still runs) ───────────
 try:
     _faq_bank: list[dict] = json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
-    logger.info("FAQ bank loaded (%d entries)", len(_faq_bank))
+    logger.info("[BOOT] FAQ bank loaded (%d entries)", len(_faq_bank))
 except Exception as _exc:
-    logger.error("Failed to load FAQ bank: %s — FAQ matching disabled", _exc)
+    logger.error("[BOOT] Failed to load FAQ bank: %s — FAQ matching disabled", _exc)
     _faq_bank = []
+
+# ── Diagnostics state (read by main.py /diag endpoint) ───────────────────────
+DIAG_STATE: dict = {
+    "system_prompt_loaded": bool(_SYSTEM_PROMPT),
+    "system_prompt_chars":  len(_SYSTEM_PROMPT),
+    "faq_count":            len(_faq_bank),
+}
+
+# Max raw input length — truncated before hitting Claude to prevent abuse
+_MAX_INPUT_CHARS = 2000
 
 # ── Conversation history (in-memory, also persisted to disk) ──────────────────
 _conversations: dict[str, list[dict]] = {}
@@ -370,14 +380,41 @@ def _parse_response(raw: str, sender: str) -> dict:
         }
 
 
+def _sanitize_input(text: str, sender: str) -> str:
+    """Truncate extreme-length input and strip control characters."""
+    if len(text) > _MAX_INPUT_CHARS:
+        logger.warning("[INPUT:TRUNCATE] Message truncated %d→%d | sender=%s", len(text), _MAX_INPUT_CHARS, sender)
+        text = text[:_MAX_INPUT_CHARS]
+    return text
+
+
+def _validate_history(sender: str) -> None:
+    """Remove any malformed entries from conversation history."""
+    history = _conversations.get(sender, [])
+    valid = [
+        m for m in history
+        if isinstance(m, dict)
+        and m.get("role") in ("user", "assistant")
+        and isinstance(m.get("content"), str)
+        and m["content"].strip()
+    ]
+    if len(valid) != len(history):
+        logger.warning("[HIST:FIX] Removed %d malformed entries | sender=%s", len(history) - len(valid), sender)
+        _conversations[sender] = valid
+
+
 async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> dict:
+    user_message = _sanitize_input(user_message, sender)
+
     if sender not in _conversations:
         _conversations[sender] = []
 
     _conversations[sender].append({"role": "user", "content": user_message})
     if len(_conversations[sender]) > _MAX_HISTORY:
         _conversations[sender] = _conversations[sender][-_MAX_HISTORY:]
-        logger.info("History trimmed to %d turns | sender=%s", _MAX_HISTORY, sender)
+        logger.info("[HIST:TRIM] History trimmed to %d turns | sender=%s", _MAX_HISTORY, sender)
+
+    _validate_history(sender)
 
     _COMPANY_PITCH = (
         "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — "
@@ -389,7 +426,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     if len(_conversations[sender]) == 1:
         scenario = _detect_scenario(user_message)
         if scenario:
-            logger.info("Scenario: %s | %s", scenario.get("summary", "?"), sender)
+            logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
             # Inject greeting + company pitch into the opening line
             greeting = _israel_greeting()
             response = scenario["response"].replace(
@@ -413,7 +450,9 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
 
     # Claude
     try:
-        logger.info("Claude request | sender=%s | turns=%d", sender, len(_conversations[sender]))
+        import time as _time
+        _t0 = _time.monotonic()
+        logger.info("[CLAUDE:REQ] sender=%s | turns=%d", sender, len(_conversations[sender]))
         client = _get_claude(anthropic_api_key)
         # Prefill assistant turn with "{" — forces Claude to output valid JSON
         # and makes it impossible for any label/code-fence to appear before the object.
@@ -433,13 +472,16 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
                 if _attempt == 2:
                     raise
                 wait = 5 * (2 ** _attempt)
-                logger.warning("Claude retry %d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
+                logger.warning("[CLAUDE:RETRY] attempt=%d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
                 await asyncio.sleep(wait)
         if not response or not response.content:
             raise ValueError("Claude returned empty response")
         raw_text = "{" + response.content[0].text
+        logger.info("[CLAUDE:OK] sender=%s | latency=%.1fs | tokens_out=%s",
+                    sender, _time.monotonic() - _t0,
+                    getattr(response.usage, "output_tokens", "?"))
     except Exception as exc:
-        logger.error("Claude API error | sender=%s | %s", sender, exc)
+        logger.error("[CLAUDE:ERR] sender=%s | %s", sender, exc)
         fallback = _API_ERROR_REPLY
         _conversations[sender].append({"role": "assistant", "content": fallback})
         _save_conversations()
@@ -450,7 +492,10 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         }
 
     structured = _parse_response(raw_text, sender)
-    logger.info("Reply created | sender=%s | text=%s", sender, structured["reply_text"][:60])
+    if structured["reply_text"] in ERROR_REPLIES:
+        logger.warning("[FALLBACK] Parse fallback used | sender=%s | raw_preview=%s", sender, raw_text[:80])
+    else:
+        logger.info("[REPLY:OK] sender=%s | text=%s", sender, structured["reply_text"][:60])
     _conversations[sender].append({"role": "assistant", "content": structured["reply_text"]})
     _save_conversations()
     return structured
