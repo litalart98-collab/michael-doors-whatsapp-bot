@@ -280,8 +280,13 @@ def _build_system(user_msg: str) -> str:
 def _has_entrance(m: str)     -> bool: return bool(re.search(r"דלת כניסה|דלתות כניסה", m))
 def _has_interior(m: str)     -> bool: return bool(re.search(r"דלת פנים|דלתות פנים|פולימר", m))
 def _has_specific_product(m: str) -> bool:
+    """True when the message names a specific entrance door series or interior door material.
+    Used in _detect_scenario to bypass scripted responses for entrance models only."""
     return bool(re.search(
-        r"פולימר|אלון|ספיר|אש\b|אגוז|MDF|HDF|נפחים|פנורמי|יווני|מרקורי|עדן",
+        # Entrance door series (system prompt RULE 2)
+        r"נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|אומנויות|סביליה"
+        # Interior door materials — these are NOT bypassed (see _detect_scenario)
+        r"|פולימר|אלון|אגוז|MDF|HDF",
         m, re.IGNORECASE,
     ))
 def _has_door_type(m: str)    -> bool: return _has_entrance(m) or _has_interior(m)
@@ -429,8 +434,11 @@ def _detect_scenario(msg: str) -> dict | None:
     # Both door types in same message → Claude handles (greeting + proper dual response)
     if _has_entrance(msg) and _has_interior(msg):
         return None
-    # Specific product/material mentioned → Claude handles with personalized response
-    if _has_specific_product(msg):
+    # Specific entrance-door model name (נפחות/פנורמי/יווני/מרקורי/עדן…) → Claude
+    # handles with a model-specific reply per RULE 7 of the system prompt.
+    # Interior door materials (פולימר, אלון, MDF…) are intentionally NOT bypassed —
+    # they follow the normal interior door scenario flow below.
+    if _has_specific_product(msg) and not _has_interior(msg):
         return None
     if _has_entrance(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
         return _SCENARIOS["detailed_inquiry"]
