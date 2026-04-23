@@ -421,10 +421,11 @@ _SCENARIOS: dict[str, dict] = {
     },
     "vague_inquiry": {
         "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Quote request without door type — asking for clarification",
+        "summary": "Quote request without door type — asking entrance vs interior",
         "response": (
             "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אשמח להבין באיזו דלת אתם מתעניינים — דלת כניסה או דלת פנים?"
+            "בכיף! כדי שנוכל לתת לכם הצעת מחיר מסודרת, אשמח לדעת במה אתם מתעניינים — "
+            "דלת כניסה, דלת פנים או משהו אחר?"
         ),
     },
     "ambiguous": {
