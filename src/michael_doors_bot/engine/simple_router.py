@@ -654,25 +654,23 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         if scenario:
             logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
             greeting = _israel_greeting()
-            # Message 1: greeting + pitch only
-            msg1 = (
+            intro = (
                 f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊\n"
                 f"{_COMPANY_PITCH}"
             )
-            # Message 2: the scenario's actual response — strip the opening line prefix
-            msg2 = re.sub(
+            # Strip duplicate opening line from scenario response, then combine
+            body = re.sub(
                 r"^היי, תודה שפניתם לדלתות מיכאל[^.\n]*\.?\n?",
                 "",
                 scenario["response"],
                 count=1,
             ).strip()
-            # Store both as one combined assistant turn in history
-            combined = msg1 + "\n\n" + msg2
+            combined = intro + "\n\n" + body
             _conversations[sender].append({"role": "assistant", "content": combined})
             _save_conversations()
             return {
-                "reply_text":              msg1,
-                "reply_text_2":            msg2,
+                "reply_text":              combined,
+                "reply_text_2":            None,
                 "handoff_to_human":        scenario["handoff_to_human"],
                 "summary":                 scenario["summary"],
                 "preferred_contact_hours": None,
