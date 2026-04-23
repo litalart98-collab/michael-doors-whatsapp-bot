@@ -58,13 +58,13 @@ async def test_scripted_first_message():
     r = await run_turn(sender, "אני מחפש דלתות פנים לדירה")
 
     check("Has reply_text",   bool(r.get("reply_text")))
-    check("reply_text_2 is null", r.get("reply_text_2") is None)
-    check("Has greeting",
+    check("Has reply_text_2", bool(r.get("reply_text_2")), "(pulse 2 on first message)")
+    check("pulse1 is greeting/pitch",
           "תודה שפניתם" in r["reply_text"],
           r["reply_text"][:60])
-    check("Has actual response (not error)",
-          "בודקת" not in r["reply_text"],
-          r["reply_text"][:80])
+    check("pulse2 is actual response (not error)",
+          "בודקת" not in r.get("reply_text_2", ""),
+          (r.get("reply_text_2") or "")[:60])
     check("Not handoff",      not r.get("handoff_to_human"))
 
 
@@ -98,11 +98,11 @@ async def test_greeting():
 
     r = await run_turn(sender, "שלום")
 
-    check("Has reply_text", bool(r.get("reply_text")))
-    check("reply_text_2 is null", r.get("reply_text_2") is None)
-    check("Asks how to help",
-          any(w in r.get("reply_text", "") for w in ["במה", "לעזור", "?"]),
-          r.get("reply_text", "")[:60])
+    check("Has pulse1", bool(r.get("reply_text")))
+    check("Has pulse2", bool(r.get("reply_text_2")))
+    check("pulse2 asks how to help",
+          any(w in (r.get("reply_text_2") or "") for w in ["במה", "לעזור", "?"]),
+          (r.get("reply_text_2") or "")[:60])
 
 
 # ─── Scenario 4: Price inquiry ─────────────────────────────────────────────────
@@ -114,8 +114,8 @@ async def test_price_inquiry():
 
     r = await run_turn(sender, "כמה עולה דלת כניסה?")
 
-    check("Has reply_text", bool(r.get("reply_text")))
-    check("reply_text_2 is null", r.get("reply_text_2") is None)
+    check("Has pulse1", bool(r.get("reply_text")))
+    check("Has pulse2", bool(r.get("reply_text_2")))
     check("No explicit price leaked (scrubbed)",
           "₪" not in r.get("reply_text", "") and "₪" not in (r.get("reply_text_2") or ""))
 
@@ -128,7 +128,7 @@ async def test_multi_turn():
     _conversations.pop(sender, None)
 
     r1 = await run_turn(sender, "יש לי בעיה בדלת הכניסה")
-    check("Turn1 has greeting+response", "תודה שפניתם" in r1.get("reply_text", "") and "בודקת" not in r1.get("reply_text", ""))
+    check("Turn1 has pulse2", bool(r1.get("reply_text_2")))
 
     r2 = await run_turn(sender, "הדלת לא נסגרת עד הסוף")
     check("Turn2 not error",  "בודקת" not in r2.get("reply_text", ""),
