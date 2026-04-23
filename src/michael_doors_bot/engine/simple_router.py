@@ -770,8 +770,11 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     """15-min silence → personalized reminder that references the conversation topic."""
     history = _conversations.get(sender, [])
+    _FALLBACK = "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
     if len(history) < 2:
-        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
+        _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
+        _save_conversations()
+        return _FALLBACK
     client = _get_claude(anthropic_api_key)
     system = (
         "אתה נציג מכירות של דלתות מיכאל. "
@@ -791,10 +794,15 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         )
         if not response.content:
             raise ValueError("Empty content from Claude (followup)")
-        return response.content[0].text.strip()
+        msg = response.content[0].text.strip()
+        _conversations[sender].append({"role": "assistant", "content": msg})
+        _save_conversations()
+        return msg
     except Exception as exc:
         logger.error("get_followup_message error | sender=%s | %s", sender, exc)
-        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
+        _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
+        _save_conversations()
+        return _FALLBACK
 
 
 async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
