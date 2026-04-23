@@ -131,6 +131,11 @@ def _save_last_seen() -> None:
         pass
 
 
+# Senders explicitly reset via clear_conversation — next get_reply call starts fresh
+# regardless of _last_seen or any residual disk state. In-memory only (intentional).
+_force_fresh: set[str] = set()
+
+
 # ── Business context ──────────────────────────────────────────────────────────
 _BUSINESS = {
     "name":    "Michael Doors",
@@ -655,14 +660,21 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     import time as _time
     user_message = _sanitize_input(user_message, sender)
 
-    # ── Session gap check: if last customer message was >24h ago, start fresh ──
+    # ── Fresh-start gate ──────────────────────────────────────────────────────
     now = _time.time()
-    last = _last_seen.get(sender, 0.0)
-    if last > 0 and (now - last) > _SESSION_GAP:
-        gap_h = (now - last) / 3600
-        logger.info("[SESSION:RESET] %.1fh gap — clearing history for fresh start | sender=%s", gap_h, sender)
+    if sender in _force_fresh:
+        # Explicit reset (manual #reset, session close, handoff) — wipe everything
+        _force_fresh.discard(sender)
         _conversations.pop(sender, None)
-        _save_conversations()
+        _last_seen.pop(sender, None)
+        logger.info("[SESSION:FORCED] Fresh start after explicit reset | sender=%s", sender)
+    else:
+        # 24h inactivity — same wipe
+        last = _last_seen.get(sender, 0.0)
+        if last > 0 and (now - last) > _SESSION_GAP:
+            gap_h = (now - last) / 3600
+            logger.info("[SESSION:RESET] %.1fh gap — fresh start | sender=%s", gap_h, sender)
+            _conversations.pop(sender, None)
     _last_seen[sender] = now
     _save_last_seen()
 
@@ -922,9 +934,9 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
 
 
 def clear_conversation(sender: str) -> None:
-    if sender in _conversations:
-        del _conversations[sender]
-        _save_conversations()
+    _conversations.pop(sender, None)
+    _save_conversations()
     _last_seen.pop(sender, None)
     _save_last_seen()
+    _force_fresh.add(sender)  # guarantees next message starts as a new conversation
     logger.info("Conversation cleared | %s", sender)
