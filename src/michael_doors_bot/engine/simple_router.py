@@ -663,13 +663,14 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
     # ── Fresh-start gate ──────────────────────────────────────────────────────
     now = _time.time()
     if sender in _force_fresh:
-        # Explicit reset (manual #reset, session close, handoff) — wipe everything
+        # Explicit #reset (or session close / handoff) — always wipe, works in both modes
         _force_fresh.discard(sender)
         _conversations.pop(sender, None)
         _last_seen.pop(sender, None)
         logger.info("[SESSION:FORCED] Fresh start after explicit reset | sender=%s", sender)
-    else:
-        # 24h inactivity — same wipe
+    elif not _cfg.TEST_MODE:
+        # 24h inactivity auto-reset — production only.
+        # In test mode only #reset can start a new conversation.
         last = _last_seen.get(sender, 0.0)
         if last > 0 and (now - last) > _SESSION_GAP:
             gap_h = (now - last) / 3600
