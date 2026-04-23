@@ -266,7 +266,7 @@ def _build_system(user_msg: str) -> str:
         "'cheaper than', 'roughly X ₪', ranges like 'X–Y ₪', or spelled-out numbers. "
         "This rule overrides every other instruction in this prompt. "
         "If asked about price, respond with exactly: "
-        "'המחיר מותאם אישית לפי סוג ועיצוב — מנהל המכירות יחזור אלייך עם הצעה מדויקת 😊'"
+        "'המחיר מותאם אישית לפי סוג ועיצוב — מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת, אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים 😊'"
     )
 
     faqs = _find_faqs(user_msg)
