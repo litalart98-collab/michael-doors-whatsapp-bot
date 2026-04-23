@@ -21,8 +21,12 @@ _FAQ_PATH     = _ROOT / "src" / "data" / "faqBank.json"
 # DATA_DIR can point to a Render Persistent Disk (e.g. /data) so conversations
 # survive service restarts.  Falls back to project root if not configured.
 from .. import config as _cfg  # noqa: E402 (module-level import after Path setup)
-_DATA_DIR  = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
-_CONV_PATH = _DATA_DIR / "conversations.json"
+_DATA_DIR       = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
+_CONV_PATH      = _DATA_DIR / "conversations.json"
+_LAST_SEEN_PATH = _DATA_DIR / "last_seen.json"
+
+# Inactivity gap after which conversation history is reset (customer is treated as new)
+_SESSION_GAP = 24 * 3600  # seconds
 
 # ── System prompt — cached once at startup to avoid disk read per request ────
 try:
@@ -106,6 +110,23 @@ except Exception:
 def _save_conversations() -> None:
     try:
         _CONV_PATH.write_text(json.dumps(_conversations), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ── Last-seen timestamps (tracks last customer message time per sender) ────────
+# Used to detect 24h+ gaps and reset conversation to a clean slate.
+_last_seen: dict[str, float] = {}
+
+try:
+    _last_seen = json.loads(_LAST_SEEN_PATH.read_text(encoding="utf-8"))
+except Exception:
+    pass
+
+
+def _save_last_seen() -> None:
+    try:
+        _LAST_SEEN_PATH.write_text(json.dumps(_last_seen), encoding="utf-8")
     except Exception:
         pass
 
@@ -631,7 +652,19 @@ def _validate_history(sender: str) -> None:
 
 
 async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> dict:
+    import time as _time
     user_message = _sanitize_input(user_message, sender)
+
+    # ── Session gap check: if last customer message was >24h ago, start fresh ──
+    now = _time.time()
+    last = _last_seen.get(sender, 0.0)
+    if last > 0 and (now - last) > _SESSION_GAP:
+        gap_h = (now - last) / 3600
+        logger.info("[SESSION:RESET] %.1fh gap — clearing history for fresh start | sender=%s", gap_h, sender)
+        _conversations.pop(sender, None)
+        _save_conversations()
+    _last_seen[sender] = now
+    _save_last_seen()
 
     if sender not in _conversations:
         _conversations[sender] = []
@@ -892,4 +925,6 @@ def clear_conversation(sender: str) -> None:
     if sender in _conversations:
         del _conversations[sender]
         _save_conversations()
-        logger.info("Conversation cleared | %s", sender)
+    _last_seen.pop(sender, None)
+    _save_last_seen()
+    logger.info("Conversation cleared | %s", sender)
