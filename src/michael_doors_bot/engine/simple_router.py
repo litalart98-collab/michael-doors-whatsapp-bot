@@ -733,16 +733,26 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
 
     structured = _parse_response(raw_text, sender)
 
-    # Turn 2+: forcibly strip any greeting/pitch Claude may have incorrectly included.
-    # We check for a prior assistant message before the current user message.
+    # Always strip greeting/pitch from Claude responses — these lines belong only
+    # in the scripted first-pulse (sent separately). Strip from any position in the text.
+    _GREETING_PAT = re.compile(r"היי,?\s*תודה שפניתם לדלתות מיכאל[^\n]*\n?", re.IGNORECASE)
+    _PITCH_PAT    = re.compile(r"אנחנו מציעים דלתות כניסה ופנים[^\n]*\n?", re.IGNORECASE)
+
+    def _strip_greeting(text: str) -> str:
+        text = _GREETING_PAT.sub("", text).strip()
+        text = _PITCH_PAT.sub("", text).strip()
+        return text
+
     is_followup_turn = any(m["role"] == "assistant" for m in _conversations[sender][:-1])
     if is_followup_turn:
-        reply = structured["reply_text"]
-        reply = re.sub(r"^היי,?\s*תודה שפניתם לדלתות מיכאל[^\n]*\n?", "", reply).strip()
-        reply = re.sub(r"^אנחנו מציעים דלתות כניסה ופנים[^\n]*\n?", "", reply).strip()
-        if reply:
-            structured["reply_text"] = reply
-        structured["reply_text_2"] = None  # never send second pulse on turn 2+
+        stripped = _strip_greeting(structured["reply_text"])
+        if stripped:
+            structured["reply_text"] = stripped
+        structured["reply_text_2"] = None
+    elif structured.get("reply_text_2"):
+        # First Claude turn: strip from pulse2 in case Claude duplicated the greeting there
+        stripped2 = _strip_greeting(structured["reply_text_2"])
+        structured["reply_text_2"] = stripped2 or None
 
     if structured["reply_text"] in ERROR_REPLIES:
         logger.warning("[FALLBACK] Parse fallback used | sender=%s | raw_preview=%s", sender, raw_text[:80])
