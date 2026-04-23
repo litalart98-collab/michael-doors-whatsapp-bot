@@ -771,14 +771,14 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     """15-min silence → personalized reminder that references the conversation topic."""
     history = _conversations.get(sender, [])
     if len(history) < 2:
-        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה שנשארה פתוחה, אנחנו כאן לעזור!"
+        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
     client = _get_claude(anthropic_api_key)
     system = (
         "אתה נציג מכירות של דלתות מיכאל. "
         "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים בסגנון הזה: "
         "\"היי, עדיין ממתינה לתגובה ממך 😊 אם יש עוד שאלות לגבי [נושא ספציפי מהשיחה], אנחנו כאן!\". "
         "החלף את [נושא ספציפי מהשיחה] בנושא האמיתי מהשיחה (סוג הדלת, השירות, הדגם שהוזכר). "
-        "אם אין נושא ספציפי — השתמש בניסוח הגנרי: \"היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה שנשארה פתוחה, אנחנו כאן לעזור!\". "
+        "אם אין נושא ספציפי — השתמש בניסוח הגנרי: \"היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!\". "
         "שפה ישירה ואנושית. בעברית בלבד. ללא JSON. ללא ברכות פתיחה נוספות."
     )
     try:
@@ -794,7 +794,7 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         return response.content[0].text.strip()
     except Exception as exc:
         logger.error("get_followup_message error | sender=%s | %s", sender, exc)
-        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה שנשארה פתוחה, אנחנו כאן לעזור!"
+        return "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
 
 
 async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
