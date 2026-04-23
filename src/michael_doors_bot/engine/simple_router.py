@@ -649,8 +649,14 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         "ואולם תצוגה מרשים בנתיבות שבו תוכלו להתרשם ולמצוא בדיוק את מה שמתאים לבית שלכם. 🚪✨"
     )
 
-    # Scenario check on first message only
-    if len(_conversations[sender]) == 1:
+    # Scenario check on first message only.
+    # Skip if the message looks like a mid-conversation answer (single short word
+    # with no door-related noun) — likely the history was reset by a server restart.
+    _looks_like_answer = bool(re.match(
+        r"^(כן|לא|חלקה|מעוצבת|מודרנית|קלאסית|בית חדש|שיפוץ|החלפה|אולי|בסדר|אחלה|נכון|ברור|טוב)[.!?\s]*$",
+        user_message.strip(), re.IGNORECASE
+    ))
+    if len(_conversations[sender]) == 1 and not _looks_like_answer:
         scenario = _detect_scenario(user_message)
         if scenario:
             logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
