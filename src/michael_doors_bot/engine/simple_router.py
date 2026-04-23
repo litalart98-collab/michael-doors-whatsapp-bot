@@ -738,7 +738,6 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
 
     # Claude
     try:
-        import time as _time
         _t0 = _time.monotonic()
         logger.info("[CLAUDE:REQ] sender=%s | turns=%d", sender, len(_conversations[sender]))
         client = _get_claude(anthropic_api_key)
