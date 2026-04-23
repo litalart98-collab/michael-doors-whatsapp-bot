@@ -726,6 +726,18 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
         }
 
     structured = _parse_response(raw_text, sender)
+
+    # Turn 2+: forcibly strip any greeting/pitch Claude may have incorrectly included.
+    # We check for a prior assistant message before the current user message.
+    is_followup_turn = any(m["role"] == "assistant" for m in _conversations[sender][:-1])
+    if is_followup_turn:
+        reply = structured["reply_text"]
+        reply = re.sub(r"^היי,?\s*תודה שפניתם לדלתות מיכאל[^\n]*\n?", "", reply).strip()
+        reply = re.sub(r"^אנחנו מציעים דלתות כניסה ופנים[^\n]*\n?", "", reply).strip()
+        if reply:
+            structured["reply_text"] = reply
+        structured["reply_text_2"] = None  # never send second pulse on turn 2+
+
     if structured["reply_text"] in ERROR_REPLIES:
         logger.warning("[FALLBACK] Parse fallback used | sender=%s | raw_preview=%s", sender, raw_text[:80])
     else:
