@@ -308,7 +308,7 @@ def _has_entrance(m: str)     -> bool: return bool(re.search(
     r"דלת כניסה|דלתות כניסה"
     r"|דלת חוץ|דלתות חוץ"                          # colloquial: "דלת חוץ" = entrance door
     r"|דלת חיצונית|דלתות חיצוניות"                 # formal synonym
-    r"|דלת ראשית|דלתות ראשיות"                     # "main door" = entrance door
+    r"|דלת ראשית|דלתות ראשיות|וראשית\b|וכניסה\b"  # "main door" — also bare "וראשית" mid-sentence
     r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"   # iron/steel = typically entrance
     r"|כניסה לבית|כניסה לדירה|כניסה לבניין",       # "entrance to house/apartment/building"
     m))
@@ -766,7 +766,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
                     sender, _time.monotonic() - _t0,
                     getattr(response.usage, "output_tokens", "?"))
     except Exception as exc:
-        logger.error("[CLAUDE:ERR] sender=%s | %s", sender, exc)
+        logger.error("[CLAUDE:ERR] sender=%s | type=%s | %s", sender, type(exc).__name__, exc)
         fallback = _API_ERROR_REPLY
         _conversations[sender].append({"role": "assistant", "content": fallback})
         _save_conversations()
