@@ -23,6 +23,7 @@ _instance_prefix = GREEN_API_INSTANCE_ID[:4] if len(GREEN_API_INSTANCE_ID) >= 4 
 GREEN_API_URL: str = os.getenv("GREEN_API_URL", f"https://{_instance_prefix}.api.greenapi.com")
 
 ANTHROPIC_API_KEY: str = os.environ["ANTHROPIC_API_KEY"]
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 PORT: int              = int(os.getenv("PORT", "3000"))
 TEST_MODE: bool        = os.getenv("TEST_MODE", "false").lower() == "true"
 

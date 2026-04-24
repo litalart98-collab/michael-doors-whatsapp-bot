@@ -559,8 +559,17 @@ def _detect_scenario(msg: str) -> dict | None:
     return None
 
 
-# ── Claude client ─────────────────────────────────────────────────────────────
+# ── AI client (Claude or OpenRouter/GPT-4.1-mini) ─────────────────────────────
 _claude: anthropic.AsyncAnthropic | None = None
+_openrouter = None  # openai.AsyncOpenAI instance, created lazily
+
+_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
+_CLAUDE_MODEL     = "claude-sonnet-4-6"
+_HAIKU_MODEL      = "claude-haiku-4-5-20251001"
+
+
+def _use_openrouter() -> bool:
+    return bool(_cfg.OPENROUTER_API_KEY)
 
 
 def _get_claude(api_key: str) -> anthropic.AsyncAnthropic:
@@ -568,6 +577,40 @@ def _get_claude(api_key: str) -> anthropic.AsyncAnthropic:
     if _claude is None:
         _claude = anthropic.AsyncAnthropic(api_key=api_key)
     return _claude
+
+
+def _get_openrouter():
+    global _openrouter
+    if _openrouter is None:
+        from openai import AsyncOpenAI
+        _openrouter = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=_cfg.OPENROUTER_API_KEY,
+        )
+    return _openrouter
+
+
+async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, timeout: float = 50.0) -> str:
+    """Unified call — uses OpenRouter/GPT-4.1-mini when configured, else Claude."""
+    if _use_openrouter():
+        client = _get_openrouter()
+        response = await client.chat.completions.create(
+            model=_OPENROUTER_MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system}] + messages,
+            timeout=timeout,
+        )
+        return response.choices[0].message.content or ""
+    else:
+        client = _get_claude(api_key)
+        response = await client.messages.create(
+            model=_CLAUDE_MODEL,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+            timeout=timeout,
+        )
+        return response.content[0].text
 
 
 _PARSE_ERROR_REPLY = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
@@ -776,10 +819,10 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
                 "doors_count":             None,
             }
 
-    # Mock mode — skip Claude entirely (for UI testing without burning API credits)
+    # Mock mode — skip AI entirely (for UI testing without burning API credits)
     if mock_claude:
         turn = len(_conversations[sender])
-        mock_reply = f"🤖 [מוק סיבוב {turn}] קלוד היה עונה כאן על: ״{user_message[:40]}״"
+        mock_reply = f"🤖 [מוק סיבוב {turn}] AI היה עונה כאן על: ״{user_message[:40]}״"
         _conversations[sender].append({"role": "assistant", "content": mock_reply})
         _save_conversations()
         return {
@@ -791,19 +834,19 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             "service_type": None, "city": None, "doors_count": None,
         }
 
-    # Claude
+    # AI call (OpenRouter/GPT-4.1-mini or Claude)
+    provider = "openrouter" if _use_openrouter() else "claude"
     try:
         _t0 = _time.monotonic()
-        logger.info("[CLAUDE:REQ] sender=%s | turns=%d", sender, len(_conversations[sender]))
-        client = _get_claude(anthropic_api_key)
-        response = None
+        logger.info("[AI:REQ] provider=%s | sender=%s | turns=%d", provider, sender, len(_conversations[sender]))
+        raw_text = None
         for _attempt in range(3):
             try:
-                response = await client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=900,
+                raw_text = await _call_ai(
                     system=_build_system(user_message),
                     messages=_conversations[sender],
+                    max_tokens=900,
+                    api_key=anthropic_api_key,
                     timeout=50.0,
                 )
                 break
@@ -811,22 +854,19 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
                 if _attempt == 2:
                     raise
                 wait = 5 * (2 ** _attempt)
-                logger.warning("[CLAUDE:RETRY] attempt=%d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
+                logger.warning("[AI:RETRY] attempt=%d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
                 await asyncio.sleep(wait)
-        if not response or not response.content:
-            raise ValueError("Claude returned empty response")
-        raw_text = response.content[0].text
-        logger.info("[CLAUDE:OK] sender=%s | latency=%.1fs | tokens_out=%s",
-                    sender, _time.monotonic() - _t0,
-                    getattr(response.usage, "output_tokens", "?"))
+        if not raw_text:
+            raise ValueError("AI returned empty response")
+        logger.info("[AI:OK] provider=%s | sender=%s | latency=%.1fs", provider, sender, _time.monotonic() - _t0)
     except Exception as exc:
-        logger.error("[CLAUDE:ERR] sender=%s | type=%s | %s", sender, type(exc).__name__, exc)
+        logger.error("[AI:ERR] provider=%s | sender=%s | type=%s | %s", provider, sender, type(exc).__name__, exc)
         fallback = _API_ERROR_REPLY
         _conversations[sender].append({"role": "assistant", "content": fallback})
         _save_conversations()
         return {
             "reply_text": fallback, "reply_text_2": None, "handoff_to_human": False,
-            "summary": "Claude API error — fallback sent",
+            "summary": "AI API error — fallback sent",
             "preferred_contact_hours": None, "needs_frame_removal": None, "needs_installation": None,
         }
 
@@ -875,7 +915,6 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
         _save_conversations()
         return _FALLBACK
-    client = _get_claude(anthropic_api_key)
     system = (
         "אתה נציג מכירות של דלתות מיכאל. "
         "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים בסגנון הזה: "
@@ -885,16 +924,8 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         "שפה ישירה ואנושית. בעברית בלבד. ללא JSON. ללא ברכות פתיחה נוספות."
     )
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=120,
-            system=system,
-            messages=history[-6:],
-            timeout=15.0,
-        )
-        if not response.content:
-            raise ValueError("Empty content from Claude (followup)")
-        msg = response.content[0].text.strip()
+        msg = await _call_ai(system=system, messages=history[-6:], max_tokens=120, api_key=anthropic_api_key, timeout=15.0)
+        msg = msg.strip()
         _conversations[sender].append({"role": "assistant", "content": msg})
         _save_conversations()
         return msg
@@ -908,7 +939,6 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
 async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
     """Generate a warm, personalized closing when customer says goodbye/thanks."""
     history = _conversations.get(sender, [])
-    client = _get_claude(anthropic_api_key)
     system = (
         "אתה נציג מכירות חם של דלתות מיכאל. "
         "הלקוח סיים את השיחה (אמר תודה / להתראות / הביע הסכמה). "
@@ -919,16 +949,14 @@ async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
         "שפה אנושית, חמה, מכירתית. בעברית בלבד. ללא JSON."
     )
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=120,
+        msg = await _call_ai(
             system=system,
             messages=(history[-4:] if len(history) >= 4 else history),
+            max_tokens=120,
+            api_key=anthropic_api_key,
             timeout=15.0,
         )
-        if not response.content:
-            raise ValueError("Empty content from Claude (closing)")
-        return response.content[0].text.strip()
+        return msg.strip()
     except Exception as exc:
         logger.error("get_closing_message error | sender=%s | %s", sender, exc)
         return (
@@ -960,7 +988,6 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
     history = _conversations.get(sender, [])
     if not history:
         return "שיחה קצרה — לא נאסף מידע."
-    client = _get_claude(anthropic_api_key)
     system = (
         "אתה נציג של דלתות מיכאל. סכם את שיחת הוואטסאפ הבאה בעברית בצורה קצרה ומובנית.\n"
         "כלול את הסעיפים הרלוונטיים בלבד (אל תכתוב סעיף שאין לו מידע):\n"
@@ -973,16 +1000,8 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
         "עד 6 שורות. ללא JSON. עברית בלבד."
     )
     try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            system=system,
-            messages=history,
-            timeout=15.0,
-        )
-        if not response.content:
-            raise ValueError("Empty content from Claude (summary)")
-        return response.content[0].text.strip()
+        result = await _call_ai(system=system, messages=history, max_tokens=200, api_key=anthropic_api_key, timeout=15.0)
+        return result.strip()
     except Exception as exc:
         logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
         return "שגיאה ביצירת סיכום."
