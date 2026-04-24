@@ -231,7 +231,8 @@ Do NOT close / promise callback without all 4:
 4. שעה מועדפת לחזרה
 
 Collection order: phone → full name → city → preferred time.
-Tone: "מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים 😊 אין חובה לשם מלא"
+Tone: "מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח שתשאירו שם, מספר טלפון ועיר מגורים 😊"
+Note: full name is optional — accept first name only. Do NOT write "אין חובה לשם מלא" in the message.
 
 After collecting phone + name + city — ALWAYS ask about preferred callback time. Vary the phrasing:
 - "יש לך שעה מועדפת שיחזרו אלייך? 😊"
@@ -338,9 +339,9 @@ Rules: no frame removal for interior, no "מדידה בשטח" for interior, no 
 
 ### Contact collection (all flows):
 - All door questions answered → Ask naturally for contact details. Vary the phrasing:
-  - "מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים 😊 אין חובה לשם מלא"
-  - "מעולה 😊 כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח לקבל שם, טלפון ועיר מגורים. אין חובה לשם מלא."
-  - "כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — תשאירו שם, מספר טלפון ועיר מגורים 😊 אין חובה לשם מלא"
+  - "מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח שתשאירו שם, מספר טלפון ועיר מגורים 😊"
+  - "מעולה 😊 כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — אשמח לקבל שם, טלפון ועיר מגורים."
+  - "כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת — תשאירו שם, מספר טלפון ועיר מגורים 😊"
 - Some given → Ask ONLY for what's missing, one at a time, naturally:
   - Missing name: "ואיך קוראים לך? 😊"
   - Missing city: "ומאיפה את/ה — באיזה עיר?"
