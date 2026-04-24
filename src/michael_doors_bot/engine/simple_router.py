@@ -491,6 +491,78 @@ _SCENARIOS: dict[str, dict] = {
             "אחרי שתכתבו את הפרט הזה, נמשיך יחד בצורה מסודרת."
         ),
     },
+    "human_request": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Customer wants human agent — collecting name + phone",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "בשמחה 😊 אסדר שיחזרו אליכם — מה השם ומספר הטלפון שלכם?"
+        ),
+    },
+    "emergency": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Emergency — break-in or urgent door issue",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "איזה סיוט 💙 קודם כל — את/ה בסדר?\n"
+            "אני מעבירה אותך למנהל עכשיו — מה שמך ומה המספר שלך?"
+        ),
+    },
+    "contractor": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Contractor or large project — escalating to sales manager",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "פרויקט גדול — מנהל המכירות שלנו יטפל ישירות 🌟\n"
+            "מה השם, טלפון ועיר שלך?"
+        ),
+    },
+    "geographic": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Geographic coverage question — confirming service area",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "אנחנו מגיעים לכל הארץ — דרום, שפלה, מרכז ועוד 😊\n"
+            "מה סוג הדלת שמחפשים — כניסה, פנים, או משהו אחר?"
+        ),
+    },
+    "sticker_only": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Sticker/emoji only — asking how to help",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "קיבלתי 😊 במה אפשר לעזור?"
+        ),
+    },
+    "warranty": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Warranty question — answered",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "אחריות מלאה על כל המוצרים וההתקנות שלנו — מעל שנתיים 😊\n"
+            "יש משהו ספציפי שמדאיג אותך, או שתרצה לשמוע על מוצר מסוים?"
+        ),
+    },
+    "installation_time": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Installation time question — collecting contact for sales manager",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "זמן ההתקנה תלוי בלוח הזמנים ובפרטי הפרויקט 😊\n"
+            "מנהל המכירות יסביר לך בדיוק — מה הטלפון שלך?"
+        ),
+    },
+    "colors": {
+        "handoff_to_human": False, "needs_frame_removal": None,
+        "summary": "Colors question — answered with range",
+        "response": (
+            "היי, תודה שפניתם לדלתות מיכאל.\n"
+            "יש לנו מגוון רחב של צבעים 😊\n"
+            "דלתות כניסה: לבן, שמנת, אפור, שחור, וכל גוון ממניפת אלידור.\n"
+            "דלתות פנים: לבן, שמנת, אפור, שחור, טורקיז ועוד.\n"
+            "על איזה דלת מדובר?"
+        ),
+    },
 }
 
 
@@ -499,8 +571,32 @@ def _detect_scenario(msg: str) -> dict | None:
         return _SCENARIOS["greeting"]
     if re.search(r"כתובת|איפה אתם|איפה האולם|איפה החנות|המיקום שלכם|מיקום|להגיע אליכם|איך מגיעים", msg):
         return _SCENARIOS["showroom_address"]
-    if re.search(r"שעות פעילות|שעות הפעילות|שעות פתיחה|שעות הפתיחה|מתי פתוח|מתי אפשר להגיע|לקבוע פגישה|תיאום פגישה|אולם תצוגה|אולם התצוגה", msg):
+    if re.search(r"שעות פעילות|שעות הפעילות|שעות פתיחה|שעות הפתיחה|מתי פתוח|מתי אתם פתוחים|מתי אפשר להגיע|לקבוע פגישה|תיאום פגישה|אולם תצוגה|אולם התצוגה|מה השעות|עד מתי פתוחים|מתי סגורים", msg):
         return _SCENARIOS["showroom_hours"]
+    # Single emoji / sticker only
+    if re.match(r"^[\U00010000-\U0010ffff\U00002600-\U000027BF\U0001F300-\U0001FAFF\s]+$", msg.strip()) and len(msg.strip()) <= 4:
+        return _SCENARIOS["sticker_only"]
+    # Emergency
+    if re.search(r"פריצה|פרצו|שוד|חירום|עזרה דחופה|דחוף מאוד|דלת שבורה.*עכשיו|עכשיו.*דלת שבורה", msg):
+        return _SCENARIOS["emergency"]
+    # Human / agent request
+    if re.search(r"נציג אנושי|נציג אמיתי|לדבר עם מישהו|לדבר עם אדם|לדבר עם נציג|שיחזרו אלי|תחזרו אלי|אדם אמיתי|בן אדם", msg):
+        return _SCENARIOS["human_request"]
+    # Contractor / large project
+    if re.search(r"קבלן|פרויקט גדול|הרבה דלתות|עשרות דלתות|\d{2,} דלתות|בניין שלם|בניין חדש.*דלתות|דלתות.*בניין", msg):
+        return _SCENARIOS["contractor"]
+    # Geographic coverage
+    if re.search(r"אתם מגיעים|אתם עובדים|מגיעים ל|תל אביב.*אתם|ירושלים.*אתם|חיפה.*אתם|אתם.*צפון|אתם.*מרכז|כיסוי גיאוגרפי|איזור השירות|עד איפה", msg):
+        return _SCENARIOS["geographic"]
+    # Warranty
+    if re.search(r"אחריות|גארנטי|warranty|כמה שנים|כמה זמן אחריות|מה האחריות", msg):
+        return _SCENARIOS["warranty"]
+    # Installation time
+    if re.search(r"כמה זמן לוקח|זמן התקנה|מתי יתקינו|תוך כמה זמן|זמן אספקה|מתי אפשר להתקין|כמה זמן עד|זמן המתנה", msg):
+        return _SCENARIOS["installation_time"]
+    # Colors
+    if re.search(r"באיזה צבעים|איזה צבעים|צבעים יש|מה הצבעים|צבע.*דלת|דלת.*צבע|צבע אפשרי|גוונים", msg):
+        return _SCENARIOS["colors"]
     if re.search(
         r"תיקון|תקלה|התקנתם|הותקנה|שירות לדלת"
         r"|בעיה בדלת|בעיה.*דלת|דלת.*בעיה"
@@ -591,26 +687,34 @@ def _get_openrouter():
 
 
 async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, timeout: float = 50.0) -> str:
-    """Unified call — uses OpenRouter/GPT-4.1-mini when configured, else Claude."""
+    """Unified call — tries OpenRouter first, falls back to Claude on any error."""
     if _use_openrouter():
-        client = _get_openrouter()
-        response = await client.chat.completions.create(
-            model=_OPENROUTER_MODEL,
-            max_tokens=max_tokens,
-            messages=[{"role": "system", "content": system}] + messages,
-            timeout=timeout,
-        )
-        return response.choices[0].message.content or ""
-    else:
-        client = _get_claude(api_key)
-        response = await client.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-            timeout=timeout,
-        )
-        return response.content[0].text
+        try:
+            client = _get_openrouter()
+            response = await client.chat.completions.create(
+                model=_OPENROUTER_MODEL,
+                max_tokens=max_tokens,
+                messages=[{"role": "system", "content": system}] + messages,
+                timeout=timeout,
+            )
+            content = response.choices[0].message.content or ""
+            if content:
+                return content
+            raise ValueError("OpenRouter returned empty content")
+        except Exception as or_exc:
+            logger.warning("[OPENROUTER:FAIL] %s — falling back to Claude", or_exc)
+            # fall through to Claude below
+
+    # Claude (primary when no OpenRouter key, or fallback after OpenRouter failure)
+    client = _get_claude(api_key)
+    response = await client.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        messages=messages,
+        timeout=timeout,
+    )
+    return response.content[0].text
 
 
 _PARSE_ERROR_REPLY = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
