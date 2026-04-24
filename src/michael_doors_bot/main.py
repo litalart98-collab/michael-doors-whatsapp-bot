@@ -26,10 +26,12 @@ from .engine.simple_router import (
     get_reply,
     is_closing_intent,
     is_working_hours,
+    _refresh_system_prompt,
+    _refresh_faq,
 )
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
-from .providers.supabase_store import upsert_lead, save_followup
+from .providers.supabase_store import upsert_lead, save_followup, load_all_conversations
 
 logging.basicConfig(
     level=logging.INFO,
@@ -806,6 +808,18 @@ async def _lifespan(app: FastAPI):
 
     _load_dedup_cache()
     _load_followup()
+
+    # Load system prompt and FAQ from Supabase (overrides file-based fallback)
+    await _refresh_system_prompt()
+    await _refresh_faq()
+
+    # Load conversation history from Supabase (fills in what's not already in memory)
+    supabase_convs = await load_all_conversations()
+    for sender, msgs in supabase_convs.items():
+        if sender not in _conv_history:
+            _conv_history[sender] = msgs
+    if supabase_convs:
+        logger.info("[BOOT] Supabase conversations loaded: %d senders", len(supabase_convs))
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))

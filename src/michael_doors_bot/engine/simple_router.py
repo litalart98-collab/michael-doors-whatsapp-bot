@@ -28,21 +28,49 @@ _LAST_SEEN_PATH = _DATA_DIR / "last_seen.json"
 # Inactivity gap after which conversation history is reset (customer is treated as new)
 _SESSION_GAP = 24 * 3600  # seconds
 
-# ── System prompt — cached once at startup to avoid disk read per request ────
-try:
-    _SYSTEM_PROMPT: str = _PROMPT_PATH.read_text(encoding="utf-8")
-    logger.info("[BOOT] System prompt loaded (%d chars)", len(_SYSTEM_PROMPT))
-except Exception as _exc:
-    logger.critical("[BOOT] FATAL: Failed to load system prompt from %s — %s", _PROMPT_PATH, _exc)
-    _SYSTEM_PROMPT = ""
+# ── System prompt — loaded from Supabase (fallback: file) ────────────────────
+def _load_system_prompt_sync() -> str:
+    try:
+        return _PROMPT_PATH.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.critical("[BOOT] FATAL: Failed to load system prompt from file: %s", e)
+        return ""
 
-# ── FAQ bank (loaded once; empty list on failure so bot still runs) ───────────
-try:
-    _faq_bank: list[dict] = json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
-    logger.info("[BOOT] FAQ bank loaded (%d entries)", len(_faq_bank))
-except Exception as _exc:
-    logger.error("[BOOT] Failed to load FAQ bank: %s — FAQ matching disabled", _exc)
-    _faq_bank = []
+_SYSTEM_PROMPT: str = _load_system_prompt_sync()
+logger.info("[BOOT] System prompt loaded from file (%d chars)", len(_SYSTEM_PROMPT))
+
+async def _refresh_system_prompt() -> None:
+    global _SYSTEM_PROMPT
+    try:
+        from ..providers.supabase_store import load_system_prompt
+        text = await load_system_prompt()
+        if text:
+            _SYSTEM_PROMPT = text
+            logger.info("[SUPABASE] System prompt refreshed (%d chars)", len(text))
+    except Exception as e:
+        logger.warning("[SUPABASE] Could not refresh system prompt: %s", e)
+
+# ── FAQ bank — loaded from Supabase (fallback: file) ─────────────────────────
+def _load_faq_sync() -> list:
+    try:
+        return json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error("[BOOT] Failed to load FAQ bank from file: %s", e)
+        return []
+
+_faq_bank: list[dict] = _load_faq_sync()
+logger.info("[BOOT] FAQ bank loaded from file (%d entries)", len(_faq_bank))
+
+async def _refresh_faq() -> None:
+    global _faq_bank
+    try:
+        from ..providers.supabase_store import load_faq
+        entries = await load_faq()
+        if entries:
+            _faq_bank = entries
+            logger.info("[SUPABASE] FAQ bank refreshed (%d entries)", len(entries))
+    except Exception as e:
+        logger.warning("[SUPABASE] Could not refresh FAQ: %s", e)
 
 # ── Fix 8: FAQ / system-prompt consistency check ─────────────────────────────
 def _check_content_consistency() -> list[str]:
@@ -657,6 +685,14 @@ def _validate_history(sender: str) -> None:
         _conversations[sender] = valid
 
 
+async def _supabase_save_conv(sender: str) -> None:
+    try:
+        from ..providers.supabase_store import save_conversation
+        await save_conversation(sender, _conversations.get(sender, []))
+    except Exception as e:
+        logger.warning("[SUPABASE] save_conversation failed: %s", e)
+
+
 async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock_claude: bool = False) -> dict:
     import time as _time
     user_message = _sanitize_input(user_message, sender)
@@ -724,6 +760,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             combined = msg1 + "\n\n" + msg2
             _conversations[sender].append({"role": "assistant", "content": combined})
             _save_conversations()
+            asyncio.create_task(_supabase_save_conv(sender))
             return {
                 "reply_text":              msg1,
                 "reply_text_2":            msg2,
@@ -826,6 +863,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         history_content += "\n\n" + structured["reply_text_2"]
     _conversations[sender].append({"role": "assistant", "content": history_content})
     _save_conversations()
+    asyncio.create_task(_supabase_save_conv(sender))
     return structured
 
 
@@ -957,3 +995,16 @@ def clear_conversation(sender: str) -> None:
     _save_last_seen()
     _force_fresh.add(sender)  # guarantees next message starts as a new conversation
     logger.info("Conversation cleared | %s", sender)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_supabase_delete_conv(sender))
+    except RuntimeError:
+        pass  # no running loop — deletion skipped (startup/test context)
+
+
+async def _supabase_delete_conv(sender: str) -> None:
+    try:
+        from ..providers.supabase_store import delete_conversation
+        await delete_conversation(sender)
+    except Exception as e:
+        logger.warning("[SUPABASE] delete_conversation failed: %s", e)

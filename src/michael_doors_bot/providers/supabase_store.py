@@ -53,6 +53,23 @@ async def save_conversation(sender: str, messages: list) -> None:
         logger.warning("[SUPABASE] save_conversation failed: %s", e)
 
 
+async def load_all_conversations() -> dict:
+    if not _enabled():
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{_URL}/rest/v1/conversations",
+                headers=_HEADERS,
+                params={"select": "sender,messages"},
+            )
+            r.raise_for_status()
+            return {row["sender"]: row["messages"] for row in r.json()}
+    except Exception as e:
+        logger.warning("[SUPABASE] load_all_conversations failed: %s", e)
+        return {}
+
+
 async def delete_conversation(sender: str) -> None:
     if not _enabled():
         return
@@ -95,6 +112,41 @@ async def upsert_lead(lead: dict) -> None:
 
 
 # ── Followup ──────────────────────────────────────────────────────────────────
+
+async def load_system_prompt() -> str | None:
+    if not _enabled():
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"{_URL}/rest/v1/bot_config",
+                headers=_HEADERS,
+                params={"key": "eq.system_prompt", "select": "value"},
+            )
+            r.raise_for_status()
+            rows = r.json()
+            return rows[0]["value"] if rows else None
+    except Exception as e:
+        logger.warning("[SUPABASE] load_system_prompt failed: %s", e)
+        return None
+
+
+async def load_faq() -> list:
+    if not _enabled():
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"{_URL}/rest/v1/faq_entries",
+                headers=_HEADERS,
+                params={"select": "id,category,keywords,answer"},
+            )
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        logger.warning("[SUPABASE] load_faq failed: %s", e)
+        return []
+
 
 async def save_followup(sender: str, state: dict) -> None:
     if not _enabled():
