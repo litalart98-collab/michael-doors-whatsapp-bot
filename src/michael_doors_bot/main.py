@@ -298,10 +298,13 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if len(phone_digits) == 10 and phone_digits.isdigit():
         phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
+    svc = lead.get("service_type", "")
+    cnt = lead.get("doors_count")
+    service_field = f"{svc} — {cnt} יחידות" if svc and cnt else svc
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
-        "service_type":            lead.get("service_type", ""),
+        "service_type":            service_field,
         "datetime":                lead.get("firstContact", ""),
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
         "phone":                   phone_clean,
@@ -916,6 +919,227 @@ async def debug_test():
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.post("/test-chat")
+async def test_chat(request: Request):
+    """Browser test UI endpoint — processes a message without sending to WhatsApp.
+    Set mock=true to skip Anthropic API entirely (no credits used)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    sender  = (data.get("sender") or "test_ui_default@c.us").strip()
+    message = (data.get("message") or "").strip()
+    reset   = bool(data.get("reset", False))
+    mock    = bool(data.get("mock", True))
+
+    if reset:
+        clear_conversation(sender)
+        return JSONResponse({"ok": True, "reset": True})
+
+    if not message:
+        return JSONResponse({"ok": False, "error": "empty message"}, status_code=400)
+
+    api_key = config.ANTHROPIC_API_KEY if not mock else "mock"
+    result  = await get_reply(sender, message, api_key, mock_claude=mock)
+    _record_lead(sender, message, result, True)
+    return JSONResponse({"ok": True, **result})
+
+
+@app.get("/test-ui", response_class=HTMLResponse)
+async def test_ui():
+    """Browser-based chat tester — open http://localhost:3000/test-ui"""
+    return HTMLResponse(_TEST_UI_HTML)
+
+
+_TEST_UI_HTML = """<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>בוט דלתות מיכאל — בדיקות</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#e5ddd5;height:100vh;display:flex;flex-direction:column}
+#header{background:#075e54;color:#fff;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+#header h1{font-size:17px;font-weight:600;flex:1}
+#sender-wrap{display:flex;align-items:center;gap:6px;font-size:13px}
+#sender-input{padding:4px 8px;border-radius:4px;border:none;font-size:13px;width:180px;direction:ltr}
+#btn-reset{background:#128c7e;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:13px}
+#btn-reset:hover{background:#0d6f63}
+#mock-toggle{display:flex;align-items:center;gap:5px;font-size:12px;color:#d0ede9}
+#mock-toggle input{cursor:pointer}
+#chat{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:6px}
+.msg-row{display:flex;max-width:75%}
+.msg-row.user{align-self:flex-start;flex-direction:row-reverse}
+.msg-row.bot{align-self:flex-end}
+.bubble{padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.user .bubble{background:#dcf8c6;border-bottom-left-radius:2px}
+.bot .bubble{background:#fff;border-bottom-right-radius:2px}
+.bubble.mock{background:#fff3cd;border-right:3px solid #ffc107}
+.bubble.scripted{background:#e8f5e9;border-right:3px solid #4caf50}
+.bubble.handoff{background:#e3f2fd;border-right:3px solid #2196f3}
+.msg-time{font-size:10px;color:#999;margin-top:3px;text-align:left}
+.msg-label{font-size:10px;padding:1px 5px;border-radius:10px;margin-bottom:2px;display:inline-block;align-self:flex-end}
+.label-scripted{background:#c8e6c9;color:#1b5e20}
+.label-mock{background:#fff3cd;color:#856404}
+.label-claude{background:#e1f5fe;color:#01579b}
+.label-handoff{background:#e3f2fd;color:#0d47a1;font-weight:600}
+#meta{background:#f0f0f0;border-top:1px solid #ccc;padding:8px 16px;font-size:12px;color:#555;direction:ltr;min-height:28px;font-family:monospace}
+#input-area{background:#f0f0f0;padding:8px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+#msg-input{flex:1;padding:10px 14px;border-radius:20px;border:none;font-size:14px;font-family:inherit;resize:none;max-height:120px;outline:none;direction:rtl}
+#btn-send{background:#075e54;color:#fff;border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+#btn-send:hover{background:#128c7e}
+#btn-send:disabled{background:#aaa;cursor:not-allowed}
+.typing{color:#888;font-style:italic;font-size:13px;align-self:flex-end;padding:4px 12px}
+.system-msg{text-align:center;font-size:12px;color:#888;background:rgba(255,255,255,.6);padding:4px 12px;border-radius:10px;align-self:center}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>🚪 בוט דלתות מיכאל — ממשק בדיקות</h1>
+  <label id="mock-toggle"><input type="checkbox" id="mock-cb" checked> מוק (ללא קרדיטים)</label>
+  <div id="sender-wrap">
+    <span>לקוח:</span>
+    <input id="sender-input" value="test_1" placeholder="שם לקוח">
+  </div>
+  <button id="btn-reset">איפוס שיחה</button>
+</div>
+<div id="chat"></div>
+<div id="meta">מוכן לבדיקה</div>
+<div id="input-area">
+  <textarea id="msg-input" rows="1" placeholder="כתוב הודעה..."></textarea>
+  <button id="btn-send">➤</button>
+</div>
+
+<script>
+const chat    = document.getElementById('chat');
+const input   = document.getElementById('msg-input');
+const sendBtn = document.getElementById('btn-send');
+const meta    = document.getElementById('meta');
+const mockCb  = document.getElementById('mock-cb');
+
+function getSender(){
+  const v = document.getElementById('sender-input').value.trim() || 'test_1';
+  return v.replace(/[^a-zA-Z0-9_]/g,'_') + '@c.us';
+}
+
+function now(){
+  return new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'});
+}
+
+function addSystemMsg(txt){
+  const d=document.createElement('div');
+  d.className='system-msg';d.textContent=txt;
+  chat.appendChild(d);scrollDown();
+}
+
+function addMsg(text, side, type=''){
+  const row=document.createElement('div');
+  row.className='msg-row '+side;
+  let labelHtml='';
+  if(type==='scripted') labelHtml='<div class="msg-label label-scripted">📋 תסריט</div>';
+  else if(type==='mock')   labelHtml='<div class="msg-label label-mock">🤖 מוק</div>';
+  else if(type==='claude') labelHtml='<div class="msg-label label-claude">✨ קלוד</div>';
+  else if(type==='handoff')labelHtml='<div class="msg-label label-handoff">✅ הועבר לנציג</div>';
+  const bubbleClass='bubble'+(type?' '+type:'');
+  row.innerHTML=`
+    <div>
+      ${labelHtml}
+      <div class="${bubbleClass}">${escHtml(text)}</div>
+      <div class="msg-time">${now()}</div>
+    </div>`;
+  chat.appendChild(row);scrollDown();
+}
+
+function escHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function scrollDown(){chat.scrollTop=chat.scrollHeight;}
+
+function setMeta(obj){
+  const parts=[];
+  if(obj.summary) parts.push('📝 '+obj.summary);
+  if(obj.service_type) parts.push('🚪 '+obj.service_type);
+  if(obj.city) parts.push('📍 '+obj.city);
+  if(obj.full_name) parts.push('👤 '+obj.full_name);
+  if(obj.phone) parts.push('📞 '+obj.phone);
+  if(obj.preferred_contact_hours) parts.push('⏰ '+obj.preferred_contact_hours);
+  if(obj.handoff_to_human) parts.push('✅ HANDOFF');
+  meta.textContent = parts.length ? parts.join(' | ') : 'אין מטאדאטה';
+}
+
+async function send(){
+  const text=input.value.trim();
+  if(!text) return;
+  input.value='';input.style.height='';
+  sendBtn.disabled=true;
+
+  addMsg(text,'user');
+
+  const typing=document.createElement('div');
+  typing.className='typing';typing.textContent='נטלי מקלידה...';
+  chat.appendChild(typing);scrollDown();
+
+  try{
+    const resp=await fetch('/test-chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sender:getSender(),message:text,mock:mockCb.checked})
+    });
+    const data=await resp.json();
+    typing.remove();
+
+    if(!data.ok){meta.textContent='שגיאה: '+(data.error||'?');return;}
+
+    const isMock=data.reply_text&&data.reply_text.startsWith('🤖 [מוק');
+    const isHandoff=data.handoff_to_human;
+    const type = isHandoff?'handoff': isMock?'mock':'scripted_or_claude';
+
+    // Determine if this is a scripted scenario response (doesn't start with 🤖)
+    const finalType = isMock ? 'mock' : (isHandoff ? 'handoff' : (mockCb.checked ? 'scripted' : 'claude'));
+
+    addMsg(data.reply_text, 'bot', finalType);
+    if(data.reply_text_2){
+      setTimeout(()=>{
+        addMsg(data.reply_text_2,'bot', isMock?'mock':'scripted');
+      },400);
+    }
+    setMeta(data);
+    if(isHandoff) addSystemMsg('✅ הפרטים הועברו לנציג');
+  }catch(e){
+    typing.remove();
+    meta.textContent='שגיאת רשת: '+e.message;
+  }finally{
+    sendBtn.disabled=false;
+    input.focus();
+  }
+}
+
+document.getElementById('btn-reset').onclick=async()=>{
+  await fetch('/test-chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({sender:getSender(),reset:true})});
+  chat.innerHTML='';
+  meta.textContent='שיחה אופסה';
+  addSystemMsg('שיחה חדשה התחילה');
+};
+
+sendBtn.onclick=send;
+input.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}
+});
+input.addEventListener('input',()=>{
+  input.style.height='auto';
+  input.style.height=Math.min(input.scrollHeight,120)+'px';
+});
+
+addSystemMsg('ממשק בדיקות — הודעות לא נשלחות לוואטסאפ');
+</script>
+</body>
+</html>"""
 
 
 def _check_admin(admin: str) -> JSONResponse | None:

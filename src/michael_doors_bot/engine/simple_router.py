@@ -597,6 +597,7 @@ def _parse_response(raw: str, sender: str) -> dict:
         return {
             "reply_text":              reply_text,
             "reply_text_2":            reply_text_2,
+            "doors_count":             parsed.get("doors_count"),
             "handoff_to_human":        bool(parsed.get("handoff_to_human", False)),
             "summary":                 str(parsed.get("summary", "")),
             "preferred_contact_hours": parsed.get("preferred_contact_hours"),
@@ -620,7 +621,7 @@ def _parse_response(raw: str, sender: str) -> dict:
                 "summary": "Plain-text response (no JSON wrapper)",
                 "preferred_contact_hours": None, "needs_frame_removal": None,
                 "needs_installation": None, "full_name": None, "phone": None,
-                "service_type": None, "city": None,
+                "service_type": None, "city": None, "doors_count": None,
             }
         logger.warning("Non-JSON empty response | sender=%s — raw: %s", sender, raw[:120])
         return {
@@ -629,7 +630,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "summary": "Parse error — fallback reply sent",
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "phone": None,
-            "service_type": None, "city": None,
+            "service_type": None, "city": None, "doors_count": None,
         }
 
 
@@ -656,7 +657,7 @@ def _validate_history(sender: str) -> None:
         _conversations[sender] = valid
 
 
-async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> dict:
+async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock_claude: bool = False) -> dict:
     import time as _time
     user_message = _sanitize_input(user_message, sender)
 
@@ -735,7 +736,23 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str) -> d
                 "phone":                   None,
                 "service_type":            None,
                 "city":                    None,
+                "doors_count":             None,
             }
+
+    # Mock mode — skip Claude entirely (for UI testing without burning API credits)
+    if mock_claude:
+        turn = len(_conversations[sender])
+        mock_reply = f"🤖 [מוק סיבוב {turn}] קלוד היה עונה כאן על: ״{user_message[:40]}״"
+        _conversations[sender].append({"role": "assistant", "content": mock_reply})
+        _save_conversations()
+        return {
+            "reply_text": mock_reply, "reply_text_2": None,
+            "handoff_to_human": False,
+            "summary": f"Mock mode — turn {turn}",
+            "preferred_contact_hours": None, "needs_frame_removal": None,
+            "needs_installation": None, "full_name": None, "phone": None,
+            "service_type": None, "city": None, "doors_count": None,
+        }
 
     # Claude
     try:
