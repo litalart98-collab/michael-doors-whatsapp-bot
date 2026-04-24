@@ -29,6 +29,7 @@ from .engine.simple_router import (
 )
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
+from .providers.supabase_store import upsert_lead, save_followup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -651,6 +652,7 @@ async def _process_message(sender: str, text: str) -> None:
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
             lead = _record_lead(sender, text, result, config.TEST_MODE)
             await _maybe_send_to_sheets(lead, result, config.TEST_MODE)
+            await upsert_lead(lead)
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
             reply_text = result["reply_text"]
