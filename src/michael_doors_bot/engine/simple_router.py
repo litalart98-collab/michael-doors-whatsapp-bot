@@ -36,6 +36,8 @@ from .messages import (
     CONTACT_OPENER,
     STAGE3_QUESTION,
     FINAL_HANDOFF,
+    FINAL_HANDOFF_FEMALE,
+    FINAL_HANDOFF_MALE,
     QUESTION_TEMPLATES,
     ERROR_MSG as _ERR,
 )
@@ -941,10 +943,16 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  reply_text_2: null",
             ]
         elif action.template_key == "_farewell_dynamic":
+            gender = state.get("customer_gender_locked")
+            farewell_text = (
+                FINAL_HANDOFF_FEMALE if gender == "female" else
+                FINAL_HANDOFF_MALE   if gender == "male"   else
+                FINAL_HANDOFF
+            )
             lines += [
-                f'INSTRUCTION: Send farewell message in reply_text: {FINAL_HANDOFF!r}',
-                "  Adapt the sign-off only if gender/context warrants it.",
-                '  Use "אלייך" (double yud) for female, "אליך" (single yud) for male.',
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {farewell_text!r}',
+                "  ⛔ Do NOT change a single word. Do NOT add names, times, or any other text.",
+                "  ⛔ Do NOT write a custom farewell — use only the exact text above.",
                 "  Set handoff_to_human: true",
                 "  reply_text_2: null",
             ]

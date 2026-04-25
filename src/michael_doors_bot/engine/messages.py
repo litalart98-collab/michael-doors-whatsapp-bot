@@ -26,7 +26,9 @@ CONTACT_OPENER: str = (
 
 STAGE3_QUESTION: str = "יש עוד משהו ספציפי שחשוב לכם?"  # neutral/plural (gender unknown)
 
-FINAL_HANDOFF: str = "מעולה! נחזור אליכם בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
+FINAL_HANDOFF: str          = "מעולה! נחזור אליכם בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
+FINAL_HANDOFF_FEMALE: str   = "מעולה! נחזור אלייך בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
+FINAL_HANDOFF_MALE: str     = "מעולה! נחזור אליך בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
 
 # ── Phrasing templates ────────────────────────────────────────────────────────
 # Keyed by template_key from NextAction.
