@@ -1,5 +1,7 @@
 import os
 import logging
+from typing import Optional
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ async def upsert_lead(lead: dict) -> None:
 
 # ── Followup ──────────────────────────────────────────────────────────────────
 
-async def load_system_prompt() -> str | None:
+async def load_system_prompt() -> Optional[str]:
     if not _enabled():
         return None
     try:

@@ -10,6 +10,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -933,8 +934,8 @@ async def _supervised(name: str, coro_fn) -> None:
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-_poll_task: asyncio.Task | None = None
-_followup_task: asyncio.Task | None = None
+_poll_task: Optional[asyncio.Task] = None
+_followup_task: Optional[asyncio.Task] = None
 _bot_start_time: float = 0.0
 
 
@@ -1311,7 +1312,7 @@ addSystemMsg('ממשק בדיקות — הודעות לא נשלחות לווא�
 </html>"""
 
 
-def _check_admin(admin: str) -> JSONResponse | None:
+def _check_admin(admin: str) -> Optional[JSONResponse]:
     """Return 403 response if ADMIN_SECRET is set and token doesn't match, else None."""
     if config.ADMIN_SECRET and admin != config.ADMIN_SECRET:
         return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)

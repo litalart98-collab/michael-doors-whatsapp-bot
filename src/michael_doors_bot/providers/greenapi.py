@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from typing import Optional
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -12,7 +14,7 @@ class GreenAPIClient:
 
     async def send_message(self, chat_id: str, message: str) -> dict:
         url = f"{self._base}/sendMessage/{self._token}"
-        last_exc: Exception | None = None
+        last_exc: Optional[Exception] = None
         for attempt in range(1, 4):  # 3 attempts: delays 2s, 4s
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
@@ -27,7 +29,7 @@ class GreenAPIClient:
                     await asyncio.sleep(2 ** attempt)  # 2s, 4s
         raise last_exc  # type: ignore[misc]
 
-    async def receive_notification(self) -> dict | None:
+    async def receive_notification(self) -> Optional[dict]:
         """Return next notification body, or None if queue is empty.
         Raises on HTTP error so the poll loop's backoff counter increments."""
         url = f"{self._base}/receiveNotification/{self._token}"
