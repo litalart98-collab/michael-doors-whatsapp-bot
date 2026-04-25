@@ -900,6 +900,8 @@ async def health():
         "poll_task_alive": _poll_task is not None and not _poll_task.done(),
         "followup_task_alive": _followup_task is not None and not _followup_task.done(),
         "test_mode": config.TEST_MODE,
+        "admin_secret_set": bool(config.ADMIN_SECRET),
+        "admin_secret_len": len(config.ADMIN_SECRET),
     }
 
 
