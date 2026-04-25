@@ -20,7 +20,7 @@ jobs:
       - name: Call /reload on the live bot
         run: |
           ADMIN="${{ secrets.ADMIN_SECRET }}"
-          URL="https://michael-doors-bot.onrender.com/reload"
+          URL="https://michael-doors-whatsapp-bot.onrender.com/reload"
           if [ -n "$ADMIN" ]; then
             URL="${URL}?admin=${ADMIN}"
           fi
