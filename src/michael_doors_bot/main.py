@@ -1211,6 +1211,41 @@ async def diag(admin: str = Query(default="")):
     }
 
 
+@app.get("/test-ai", response_class=JSONResponse)
+async def test_ai(admin: str = Query(default="")):
+    """Fire a single real AI call and report which provider responded."""
+    if (denied := _check_admin(admin)):
+        return denied
+    from .engine import simple_router as _sr
+    t0 = time.time()
+    try:
+        result = await _sr._call_ai(
+            system="You are a test assistant. Reply with exactly: OK",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=10,
+            api_key=config.ANTHROPIC_API_KEY,
+            timeout=20.0,
+        )
+        elapsed = round(time.time() - t0, 2)
+        return {
+            "ok": True,
+            "provider_used": _ROUTER_DIAG.get("last_ai_provider"),
+            "response": result.strip()[:50],
+            "elapsed_s": elapsed,
+            "openrouter_key_set": _ROUTER_DIAG.get("openrouter_key_set"),
+            "openrouter_failures": _ROUTER_DIAG.get("openrouter_failures", 0),
+            "last_openrouter_error": _ROUTER_DIAG.get("last_openrouter_error"),
+        }
+    except Exception as exc:
+        elapsed = round(time.time() - t0, 2)
+        return JSONResponse({
+            "ok": False,
+            "error": str(exc)[:200],
+            "elapsed_s": elapsed,
+            "openrouter_key_set": _ROUTER_DIAG.get("openrouter_key_set"),
+        }, status_code=500)
+
+
 @app.get("/conversations", response_class=HTMLResponse)
 async def conversations(test: str = "false", format: str = "html", admin: str = Query(default="")):
     if (denied := _check_admin(admin)):

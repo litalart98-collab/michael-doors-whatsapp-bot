@@ -121,6 +121,13 @@ DIAG_STATE: dict = {
     "faq_count":            len(_faq_bank),
     "data_dir":             str(_DATA_DIR),
     "consistency_issues":   _consistency_issues,
+    # AI provider tracking — updated on every _call_ai() invocation
+    "ai_primary":           f"openrouter/{_OPENROUTER_MODEL}" if _cfg.OPENROUTER_API_KEY else f"claude/{_CLAUDE_MODEL}",
+    "ai_fallback":          f"claude/{_CLAUDE_MODEL}" if _cfg.OPENROUTER_API_KEY else "none",
+    "openrouter_key_set":   bool(_cfg.OPENROUTER_API_KEY),
+    "last_ai_provider":     None,   # filled after first real AI call
+    "openrouter_failures":  0,
+    "last_openrouter_error": None,
 }
 
 # Max raw input length — truncated before hitting Claude to prevent abuse
@@ -687,7 +694,8 @@ def _get_openrouter():
 
 
 async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, timeout: float = 50.0) -> str:
-    """Unified call — tries OpenRouter first, falls back to Claude on any error."""
+    """Unified call — tries OpenRouter/GPT-4.1-mini first, falls back to Claude on any error."""
+    global DIAG_STATE
     if _use_openrouter():
         try:
             client = _get_openrouter()
@@ -699,10 +707,14 @@ async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, t
             )
             content = response.choices[0].message.content or ""
             if content:
+                DIAG_STATE["last_ai_provider"] = f"openrouter/{_OPENROUTER_MODEL}"
+                DIAG_STATE["openrouter_failures"] = DIAG_STATE.get("openrouter_failures", 0)
                 return content
             raise ValueError("OpenRouter returned empty content")
         except Exception as or_exc:
             logger.warning("[OPENROUTER:FAIL] %s — falling back to Claude", or_exc)
+            DIAG_STATE["openrouter_failures"] = DIAG_STATE.get("openrouter_failures", 0) + 1
+            DIAG_STATE["last_openrouter_error"] = str(or_exc)[:200]
             # fall through to Claude below
 
     # Claude (primary when no OpenRouter key, or fallback after OpenRouter failure)
@@ -714,6 +726,7 @@ async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, t
         messages=messages,
         timeout=timeout,
     )
+    DIAG_STATE["last_ai_provider"] = f"claude/{_CLAUDE_MODEL}"
     return response.content[0].text
 
 
