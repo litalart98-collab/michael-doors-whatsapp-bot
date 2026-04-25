@@ -307,7 +307,7 @@ def _next_opening_time() -> str:
     return f"ביום {next_day} משעה {h_start}:00"
 
 
-def _build_system(user_msg: str) -> str:
+def _build_system(user_msg: str, sender: str = "") -> str:
     if not _SYSTEM_PROMPT:
         logger.error("System prompt is empty — Claude will have no instructions")
     greeting = _israel_greeting()
@@ -323,8 +323,11 @@ def _build_system(user_msg: str) -> str:
         ),
     ]
 
+    # Bypass hours check for test/admin phones
+    _is_bypass = sender and sender in _cfg.HOURS_BYPASS_PHONES
+
     # Fix 7: explicit out-of-hours instruction injected on every call when closed
-    if not is_working_hours():
+    if not is_working_hours() and not _is_bypass:
         next_open = _next_opening_time()
         parts.append(
             "## OUT-OF-HOURS — MANDATORY BEHAVIOUR\n"
@@ -679,6 +682,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "phone":                   parsed.get("phone"),
             "service_type":            parsed.get("service_type"),
             "city":                    parsed.get("city"),
+            "design_preference":       parsed.get("design_preference"),
         }
     except Exception:
         # Claude returned plain text instead of JSON — use it directly as the reply
@@ -694,6 +698,7 @@ def _parse_response(raw: str, sender: str) -> dict:
                 "preferred_contact_hours": None, "needs_frame_removal": None,
                 "needs_installation": None, "full_name": None, "phone": None,
                 "service_type": None, "city": None, "doors_count": None,
+                "design_preference": None,
             }
         logger.warning("Non-JSON empty response | sender=%s — raw: %s", sender, raw[:120])
         return {
@@ -703,6 +708,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "phone": None,
             "service_type": None, "city": None, "doors_count": None,
+            "design_preference": None,
         }
 
 
@@ -817,6 +823,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
                 "service_type":            None,
                 "city":                    None,
                 "doors_count":             None,
+                "design_preference":       None,
             }
 
     # Mock mode — skip AI entirely (for UI testing without burning API credits)
@@ -832,6 +839,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             "preferred_contact_hours": None, "needs_frame_removal": None,
             "needs_installation": None, "full_name": None, "phone": None,
             "service_type": None, "city": None, "doors_count": None,
+            "design_preference": None,
         }
 
     # AI call (OpenRouter/GPT-4.1-mini or Claude)
@@ -843,7 +851,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         for _attempt in range(3):
             try:
                 raw_text = await _call_ai(
-                    system=_build_system(user_message),
+                    system=_build_system(user_message, sender),
                     messages=_conversations[sender],
                     max_tokens=900,
                     api_key=anthropic_api_key,

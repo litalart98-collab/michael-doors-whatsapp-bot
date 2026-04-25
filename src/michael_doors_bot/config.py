@@ -49,6 +49,21 @@ DATA_DIR: str = os.getenv("DATA_DIR", "")
 # STRONGLY RECOMMENDED — without it, anyone can read all customer conversation data.
 ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "")
 
+# Comma-separated phone numbers that bypass business-hours check (e.g. for testing).
+# Format: "972501234567,972509876543"  (no @c.us suffix needed — normalised below)
+def _parse_bypass_phones(raw: str) -> set[str]:
+    phones = set()
+    for p in raw.split(","):
+        p = p.strip().replace("-", "").replace("+", "").replace("@c.us", "")
+        if not p:
+            continue
+        if p.startswith("0"):
+            p = "972" + p[1:]
+        phones.add(p + "@c.us")
+    return phones
+
+HOURS_BYPASS_PHONES: set[str] = _parse_bypass_phones(os.getenv("HOURS_BYPASS_PHONES", ""))
+
 # ── Production safety checks ──────────────────────────────────────────────────
 _PROD_WARNINGS: list[str] = []
 if not TEST_MODE:

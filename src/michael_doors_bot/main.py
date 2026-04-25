@@ -269,6 +269,10 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["service_type"] = result["service_type"]
     if result.get("city"):
         lead["city"] = result["city"]
+    if result.get("design_preference"):
+        lead["design_preference"] = result["design_preference"]
+    if result.get("doors_count"):
+        lead["doors_count"] = result["doors_count"]
     if result.get("handoff_to_human"):
         lead["handoff_to_human"] = True
         lead["handoff_time"] = datetime.utcnow().isoformat()
@@ -302,8 +306,20 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
     svc = lead.get("service_type", "")
+    dp  = lead.get("design_preference", "")
     cnt = lead.get("doors_count")
-    service_field = f"{svc} — {cnt} יחידות" if svc and cnt else svc
+    frame = lead.get("needs_frame_removal")
+    # Build service_field: "דלת כניסה מעוצבת — נפחות — כולל משקוף — 2 יחידות"
+    parts_svc = [svc] if svc else []
+    if dp and dp != "לא סוכם":
+        parts_svc.append(dp)
+    if frame is True:
+        parts_svc.append("כולל החלפת משקוף")
+    elif frame is False:
+        parts_svc.append("ללא החלפת משקוף")
+    if cnt:
+        parts_svc.append(f"{cnt} יחידות")
+    service_field = " — ".join(parts_svc) if parts_svc else ""
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
