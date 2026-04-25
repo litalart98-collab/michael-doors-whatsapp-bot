@@ -1,0 +1,41 @@
+name: Auto-reload bot after deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/prompts/systemPrompt.txt"
+      - "src/data/faqBank.json"
+      - "src/michael_doors_bot/engine/messages.py"
+      - "src/michael_doors_bot/engine/simple_router.py"
+      - "src/michael_doors_bot/main.py"
+
+jobs:
+  reload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Render to deploy (~3 min)
+        run: sleep 180
+
+      - name: Call /reload on the live bot
+        run: |
+          ADMIN="${{ secrets.ADMIN_SECRET }}"
+          URL="https://michael-doors-bot.onrender.com/reload"
+          if [ -n "$ADMIN" ]; then
+            URL="${URL}?admin=${ADMIN}"
+          fi
+
+          echo "Calling: $URL"
+          RESPONSE=$(curl -s -w "\n%{http_code}" "$URL")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "Status: $STATUS"
+          echo "Response: $BODY"
+
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: /reload returned HTTP $STATUS"
+            exit 1
+          fi
+
+          echo "✅ Bot reloaded successfully"
