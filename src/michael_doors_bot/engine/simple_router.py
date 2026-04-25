@@ -998,7 +998,7 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
         lines += [
             f"INSTRUCTION: The customer sent '{near_miss}' which has only {digit_count} digits — it looks like a phone number with a missing digit.",
             f"  Ask them to re-send their full phone number, mentioning '{near_miss}' as the number you received.",
-            f"  Example: \"נראה שחסרה ספרה במספר {near_miss}, תוכל לשלוח שוב?\"",
+            f"  Example (adapt gender per {gender_note}): \"נראה שחסרה ספרה במספר {near_miss}, תוכל/תוכלי/תוכלו לשלוח שוב?\"",
             "  Keep it short (1–2 lines). Do NOT ask for any other field.",
             f"  {gender_note}",
         ]
