@@ -849,8 +849,11 @@ def _state_summary_block(state: dict) -> str:
         "",
         f"Contact:   phone={v(state.get('phone'))}  name={v(state.get('full_name'))}  city={v(state.get('city'))}  callback={v(state.get('preferred_contact_hours'))}",
         "",
-        f"Entrance:  scope={v(state.get('entrance_scope'))}  style={v(state.get('entrance_style'))}  catalog_sent={v(state.get('entrance_catalog_sent'))}  model={v(state.get('entrance_model'))}",
-        f"Interior:  type={v(state.get('interior_project_type'))}  qty={v(state.get('interior_quantity'))}  style={v(state.get('interior_style'))}  catalog_sent={v(state.get('interior_catalog_sent'))}  model={v(state.get('interior_model'))}",
+        # For flat style: catalog is never needed — mark explicitly to prevent Claude hallucinating a URL
+        f"Entrance:  scope={v(state.get('entrance_scope'))}  style={v(state.get('entrance_style'))}"
+        + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('entrance_style') == 'flat' else f"  catalog_sent={v(state.get('entrance_catalog_sent'))}  model={v(state.get('entrance_model'))}"),
+        f"Interior:  type={v(state.get('interior_project_type'))}  qty={v(state.get('interior_quantity'))}  style={v(state.get('interior_style'))}"
+        + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('interior_style') == 'flat' else f"  catalog_sent={v(state.get('interior_catalog_sent'))}  model={v(state.get('interior_model'))}"),
         f"Mamad:     type={v(state.get('mamad_type'))}  scope={v(state.get('mamad_scope'))}",
         f"Showroom:  requested={v(state.get('showroom_requested'))}",
         "",
@@ -926,7 +929,9 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
             stage3_text = QUESTION_TEMPLATES.get(action.template_key, STAGE3_QUESTION)
             lines += [
                 f'INSTRUCTION: Send EXACTLY this text in reply_text: {stage3_text!r}',
-                "  Do NOT add any text before or after it.",
+                "  ⛔ Do NOT add ANY text before or after it.",
+                "  ⛔ Do NOT include any URLs, catalog links, or website addresses.",
+                "  ⛔ Catalog sending is handled by a SEPARATE action — never send a catalog here.",
                 "  reply_text_2: null",
             ]
         elif action.template_key in ("contact_opener", "contact_opener_showroom"):
