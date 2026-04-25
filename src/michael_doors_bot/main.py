@@ -1238,7 +1238,7 @@ async def test_ai():
         result = await _sr._call_ai(
             system="You are a test assistant. Reply with exactly: OK",
             messages=[{"role": "user", "content": "ping"}],
-            max_tokens=10,
+            max_tokens=100,
             api_key=config.ANTHROPIC_API_KEY,
             timeout=20.0,
         )
