@@ -1262,6 +1262,55 @@ async def reload_config(admin: str = Query(default="")):
     }
 
 
+@app.get("/test-sheets", response_class=JSONResponse)
+async def test_sheets(admin: str = Query(default="")):
+    """Send a test row to Google Sheets and report the result.
+    Use this to verify the webhook URL is correct after updating it in Render."""
+    if (denied := _check_admin(admin)):
+        return denied
+    if not config.GOOGLE_SHEETS_WEBHOOK_URL:
+        return JSONResponse({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK_URL is not set in environment"}, status_code=400)
+
+    url = config.GOOGLE_SHEETS_WEBHOOK_URL
+    # Show partial URL for debugging (hide token if present)
+    url_display = url[:60] + "..." if len(url) > 60 else url
+
+    test_row = {
+        "full_name":               "טסט בוט",
+        "city":                    "נתיבות",
+        "service_type":            "בדיקת חיבור — דלת כניסה מעוצבת",
+        "datetime":                datetime.utcnow().isoformat(),
+        "preferred_contact_hours": "בוקר",
+        "phone":                   "050-0000000",
+        "notes":                   "שורת טסט — אפשר למחוק",
+    }
+
+    import httpx
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            r = await client.post(url, json=test_row)
+        elapsed = round(time.time() - t0, 2)
+        success = r.status_code in (200, 201, 302)
+        return {
+            "ok": success,
+            "http_status": r.status_code,
+            "elapsed_s": elapsed,
+            "url_prefix": url_display,
+            "row_sent": test_row,
+            "response_body": r.text[:300] if r.text else None,
+            "note": "302 = Apps Script success (normal). 200/201 also OK." if success else "Unexpected status — check URL and Apps Script deployment",
+        }
+    except Exception as exc:
+        elapsed = round(time.time() - t0, 2)
+        return JSONResponse({
+            "ok": False,
+            "error": str(exc)[:300],
+            "elapsed_s": elapsed,
+            "url_prefix": url_display,
+        }, status_code=500)
+
+
 @app.get("/test-ai", response_class=JSONResponse)
 async def test_ai():
     """Fire a single real AI call and report which provider responded. No auth required."""
