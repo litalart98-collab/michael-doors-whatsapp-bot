@@ -727,9 +727,9 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
     _validate_history(sender)
 
     _COMPANY_PITCH = (
-        "אנחנו מציעים דלתות כניסה ופנים באיכות הגבוהה ביותר בשוק — "
-        "מגוון רחב של דגמים ועיצובים בהתאמה אישית, אחריות מקיפה של מעל שנתיים, "
-        "ואולם תצוגה מרשים בנתיבות שבו תוכלו להתרשם ולמצוא בדיוק את מה שמתאים לבית שלכם. 🚪✨"
+        "תודה שפניתם למיכאל דלתות 🚪\n"
+        "אנו מציעים דלתות כניסה ופנים בסטנדרט הגבוה ביותר — התקנה, מכירה ואחריות מעל שנתיים ✨\n"
+        "באולם התצוגה שלנו בנתיבות תוכלו להתרשם ממגוון רחב של דגמים 😊 (מומלץ לתאם פגישה מראש)"
     )
 
     # Scenario check on first message only.
@@ -744,18 +744,17 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         if scenario:
             logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
             greeting = _israel_greeting()
-            # Pulse 1: greeting + pitch
-            msg1 = (
-                f"היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊\n"
-                f"{_COMPANY_PITCH}"
-            )
-            # Pulse 2: actual response — strip duplicate opening line
+            # Pulse 1: company pitch (sent once per new conversation)
+            msg1 = _COMPANY_PITCH
+            # Pulse 2: actual response — strip legacy duplicate opening line if present,
+            # then inject the time-based greeting via {{GREETING}} placeholder
             msg2 = re.sub(
                 r"^היי, תודה שפניתם לדלתות מיכאל[^.\n]*\.?\n?",
                 "",
                 scenario["response"],
                 count=1,
             ).strip()
+            msg2 = msg2.replace("{{GREETING}}", greeting)
             # Store as one combined assistant turn so Claude sees clean history
             combined = msg1 + "\n\n" + msg2
             _conversations[sender].append({"role": "assistant", "content": combined})
@@ -831,8 +830,12 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
 
     # Always strip greeting/pitch from Claude responses — these lines belong only
     # in the scripted first-pulse (sent separately). Strip from any position in the text.
-    _GREETING_PAT = re.compile(r"היי,?\s*תודה שפניתם לדלתות מיכאל[^\n]*\n?", re.IGNORECASE)
-    _PITCH_PAT    = re.compile(r"אנחנו מציעים דלתות כניסה ופנים[^\n]*\n?", re.IGNORECASE)
+    _GREETING_PAT = re.compile(
+        r"(?:היי,?\s*)?תודה שפניתם (?:לדלתות מיכאל|למיכאל דלתות)[^\n]*\n?", re.IGNORECASE
+    )
+    _PITCH_PAT = re.compile(
+        r"(?:אנחנו|אנו) מציעים דלתות כניסה ופנים[^\n]*\n?", re.IGNORECASE
+    )
 
     def _strip_greeting(text: str) -> str:
         text = _GREETING_PAT.sub("", text).strip()
