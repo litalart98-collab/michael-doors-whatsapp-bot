@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import anthropic
+from .messages import SCENARIO_RESPONSES as _MSG, ERROR_MSG as _ERR
 
 logger = logging.getLogger(__name__)
 
@@ -388,188 +389,27 @@ def _is_greeting_only(m: str) -> bool:
     ))
 
 _SCENARIOS: dict[str, dict] = {
-    "greeting": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Greeting only — pitch + asking how to help",
-        "response": "היי, תודה שפניתם לדלתות מיכאל.\nבמה אפשר לעזור?",
-    },
-    "showroom_address": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer asking for showroom address — gave address, collecting contact",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אולם התצוגה שלנו נמצא בבעלי המלאכה 15, נתיבות 📍\n"
-            "שעות פעילות: א'–ה' 09:00–18:00 | ו' 09:00–13:00 | שבת סגור.\n"
-            "מומלץ לתאם פגישת ייעוץ מראש — רוצים שאקבע לכם זמן?"
-        ),
-    },
-    "showroom_hours": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer asking about hours — answered, offering to schedule visit",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "שעות הפעילות: א'–ה' 09:00–18:00 | ו' 09:00–13:00 | שבת סגור 😊\n"
-            "רוצים לתאם ביקור באולם התצוגה?"
-        ),
-    },
-    "repair": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer requesting repair — asking what the issue is",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אוי, אני ממש מצטערת לשמוע 💙 בואו נטפל בזה מיד.\n"
-            "מה בדיוק קורה עם הדלת?"
-        ),
-    },
-    "mamad": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer asking about ממ\"ד door — clarifying new or existing",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "שמחה לעזור! האם מדובר בממ\"ד חדש, או שיש ממ\"ד קיים שרוצים להחליף את דלתו?"
-        ),
-    },
-    "frame_removal": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer asking about frame removal — door type still unknown",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אשמח להבין האם מדובר בדלת כניסה או דלת פנים, כדי שנוכל לכוון אתכם נכון."
-        ),
-    },
-    "designed_doors": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer interested in designed/modern doors — door type not specified",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "כן, בהחלט, יש אצלנו מגוון דלתות מעוצבות ודגמים בסגנונות שונים.\n"
-            "אשמח להבין האם אתם מתעניינים בדלת כניסה או דלת פנים, כדי שנוכל לכוון אתכם נכון."
-        ),
-    },
-    "detailed_inquiry": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer specified entrance door with clear intent — asking about style next",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אתם מחפשים דלת חלקה או מעוצבת?"
-        ),
-    },
-    "detailed_inquiry_interior": {
-        "handoff_to_human": False, "needs_frame_removal": False,
-        "summary": "Customer specified interior door with clear intent — asking for project status",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "כדי שנוכל להכין עבורכם הצעת מחיר מדויקת — האם מדובר בהחלפה של דלתות פנים קיימות, בית בשיפוץ, או בית חדש ללא דלתות פנים כרגע?"
-        ),
-    },
-    "entrance_doors": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer browsing entrance doors — guiding toward style preference",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "כן, בהחלט, יש אצלנו מגוון דלתות כניסה בסגנונות שונים, כולל דגמים מודרניים ודלתות מעוצבות.\n"
-            "אתם מחפשים דלת כניסה מודרנית, קלאסית או מעוצבת?"
-        ),
-    },
-    "interior_doors": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer browsing interior doors — asking for project status",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "כן, בהחלט, יש אצלנו דלתות פנים במגוון סגנונות וצבעים.\n"
-            "כדי שנוכל להכין עבורכם הצעת מחיר מדויקת — האם מדובר בהחלפה של דלתות פנים קיימות, בית בשיפוץ, או בית חדש ללא דלתות פנים כרגע?"
-        ),
-    },
-    "vague_inquiry": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Quote request without door type — asking entrance vs interior",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "בכיף! כדי שנוכל לתת לכם הצעת מחיר מסודרת, אשמח לדעת במה אתם מתעניינים — "
-            "דלת כניסה, דלת פנים או משהו אחר?"
-        ),
-    },
-    "ambiguous": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Vague door inquiry — asking entrance vs interior",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אשמח להבין האם אתם מתעניינים בדלת כניסה או דלת פנים, כדי שנוכל לכוון אתכם נכון.\n"
-            "אחרי שתכתבו את הפרט הזה, נמשיך יחד בצורה מסודרת."
-        ),
-    },
-    "human_request": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Customer wants human agent — collecting name + phone",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "בשמחה 😊 אסדר שיחזרו אליכם — מה השם ומספר הטלפון שלכם?"
-        ),
-    },
-    "emergency": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Emergency — break-in or urgent door issue",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "איזה סיוט 💙 קודם כל — את/ה בסדר?\n"
-            "אני מעבירה אותך למנהל עכשיו — מה שמך ומה המספר שלך?"
-        ),
-    },
-    "contractor": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Contractor or large project — escalating to sales manager",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "פרויקט גדול — מנהל המכירות שלנו יטפל ישירות 🌟\n"
-            "מה השם, טלפון ועיר שלך?"
-        ),
-    },
-    "geographic": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Geographic coverage question — confirming service area",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אנחנו מגיעים לכל הארץ — דרום, שפלה, מרכז ועוד 😊\n"
-            "מה סוג הדלת שמחפשים — כניסה, פנים, או משהו אחר?"
-        ),
-    },
-    "sticker_only": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Sticker/emoji only — asking how to help",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "קיבלתי 😊 במה אפשר לעזור?"
-        ),
-    },
-    "warranty": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Warranty question — answered",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "אחריות מלאה על כל המוצרים וההתקנות שלנו — מעל שנתיים 😊\n"
-            "יש משהו ספציפי שמדאיג אותך, או שתרצה לשמוע על מוצר מסוים?"
-        ),
-    },
-    "installation_time": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Installation time question — collecting contact for sales manager",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "זמן ההתקנה תלוי בלוח הזמנים ובפרטי הפרויקט 😊\n"
-            "מנהל המכירות יסביר לך בדיוק — מה הטלפון שלך?"
-        ),
-    },
-    "colors": {
-        "handoff_to_human": False, "needs_frame_removal": None,
-        "summary": "Colors question — answered with range",
-        "response": (
-            "היי, תודה שפניתם לדלתות מיכאל.\n"
-            "יש לנו מגוון רחב של צבעים 😊\n"
-            "דלתות כניסה: לבן, שמנת, אפור, שחור, וכל גוון ממניפת אלידור.\n"
-            "דלתות פנים: לבן, שמנת, אפור, שחור, טורקיז ועוד.\n"
-            "על איזה דלת מדובר?"
-        ),
-    },
+    "greeting":                  {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Greeting only — pitch + asking how to help",                                          "response": _MSG["greeting"]},
+    "showroom_address":          {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking for showroom address — gave address, collecting contact",            "response": _MSG["showroom_address"]},
+    "showroom_hours":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about hours — answered, offering to schedule visit",                 "response": _MSG["showroom_hours"]},
+    "repair":                    {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer requesting repair — asking what the issue is",                              "response": _MSG["repair"]},
+    "mamad":                     {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about ממ\"ד door — clarifying new or existing",                      "response": _MSG["mamad"]},
+    "frame_removal":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about frame removal — door type still unknown",                      "response": _MSG["frame_removal"]},
+    "designed_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer interested in designed/modern doors — door type not specified",             "response": _MSG["designed_doors"]},
+    "detailed_inquiry":          {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer specified entrance door with clear intent — asking about style next",       "response": _MSG["detailed_inquiry"]},
+    "detailed_inquiry_interior": {"handoff_to_human": False, "needs_frame_removal": False, "summary": "Customer specified interior door with clear intent — asking for project status",     "response": _MSG["detailed_inquiry_interior"]},
+    "entrance_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer browsing entrance doors — guiding toward style preference",                 "response": _MSG["entrance_doors"]},
+    "interior_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer browsing interior doors — asking for project status",                       "response": _MSG["interior_doors"]},
+    "vague_inquiry":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Quote request without door type — asking entrance vs interior",                      "response": _MSG["vague_inquiry"]},
+    "ambiguous":                 {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Vague door inquiry — asking entrance vs interior",                                   "response": _MSG["ambiguous"]},
+    "human_request":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer wants human agent — collecting name + phone",                               "response": _MSG["human_request"]},
+    "emergency":                 {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Emergency — break-in or urgent door issue",                                          "response": _MSG["emergency"]},
+    "contractor":                {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Contractor or large project — escalating to sales manager",                         "response": _MSG["contractor"]},
+    "geographic":                {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Geographic coverage question — confirming service area",                             "response": _MSG["geographic"]},
+    "sticker_only":              {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Sticker/emoji only — asking how to help",                                            "response": _MSG["sticker_only"]},
+    "warranty":                  {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Warranty question — answered",                                                       "response": _MSG["warranty"]},
+    "installation_time":         {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Installation time question — collecting contact for sales manager",                  "response": _MSG["installation_time"]},
+    "colors":                    {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Colors question — answered with range",                                              "response": _MSG["colors"]},
 }
 
 
@@ -730,8 +570,8 @@ async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, t
     return response.content[0].text
 
 
-_PARSE_ERROR_REPLY = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
-_API_ERROR_REPLY   = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
+_PARSE_ERROR_REPLY = _ERR["parse_error"]
+_API_ERROR_REPLY   = _ERR["api_error"]
 
 # Set of all error reply texts — used by main.py to skip follow-up after a failure
 ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY])
