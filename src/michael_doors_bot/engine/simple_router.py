@@ -732,9 +732,9 @@ def _decide_next_action(state: dict) -> NextAction:
             return NextAction(5, "summary", "_summary_dynamic", False,
                               "stage 5: send summary and ask הכל נכון?")
 
-        # Stage 6: callback time
+        # Stage 6: callback time — is_fixed=True so Claude sends the exact template
         if not state.get("preferred_contact_hours"):
-            return NextAction(6, "preferred_contact_hours", _get_callback_key(state), False,
+            return NextAction(6, "preferred_contact_hours", _get_callback_key(state), True,
                               "stage 6: ask preferred callback time")
 
         # Stage 7: farewell + handoff
@@ -954,6 +954,14 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  ⛔ Do NOT change a single word. Do NOT add names, times, or any other text.",
                 "  ⛔ Do NOT write a custom farewell — use only the exact text above.",
                 "  Set handoff_to_human: true",
+                "  reply_text_2: null",
+            ]
+        elif action.template_key in (
+            "ask_callback_time_neutral", "ask_callback_time_female", "ask_callback_time_male"
+        ):
+            lines += [
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {template_text!r}',
+                "  ⛔ Do NOT rephrase, add names, or change a single word.",
                 "  reply_text_2: null",
             ]
         else:
