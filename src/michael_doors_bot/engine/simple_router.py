@@ -41,15 +41,25 @@ _SYSTEM_PROMPT: str = _load_system_prompt_sync()
 logger.info("[BOOT] System prompt loaded from file (%d chars)", len(_SYSTEM_PROMPT))
 
 async def _refresh_system_prompt() -> None:
+    """Reload system prompt from file (source of truth) and sync to Supabase."""
     global _SYSTEM_PROMPT
-    try:
-        from ..providers.supabase_store import load_system_prompt
-        text = await load_system_prompt()
-        if text:
-            _SYSTEM_PROMPT = text
-            logger.info("[SUPABASE] System prompt refreshed (%d chars)", len(text))
-    except Exception as e:
-        logger.warning("[SUPABASE] Could not refresh system prompt: %s", e)
+    # 1. Always reload from file — the repo file is the source of truth
+    fresh = _load_system_prompt_sync()
+    if fresh:
+        _SYSTEM_PROMPT = fresh
+        DIAG_STATE["system_prompt_loaded"] = True
+        DIAG_STATE["system_prompt_chars"] = len(fresh)
+        logger.info("[RELOAD] System prompt reloaded from file (%d chars)", len(fresh))
+        # 2. Push to Supabase so it stays in sync (for diagnostics / backup only)
+        try:
+            from ..providers.supabase_store import save_system_prompt
+            ok = await save_system_prompt(fresh)
+            if ok:
+                logger.info("[SUPABASE] System prompt synced to Supabase")
+        except Exception as e:
+            logger.warning("[SUPABASE] Could not sync system prompt: %s", e)
+    else:
+        logger.warning("[RELOAD] System prompt file was empty — keeping previous version")
 
 # ── FAQ bank — loaded from Supabase (fallback: file) ─────────────────────────
 def _load_faq_sync() -> list:
@@ -63,13 +73,22 @@ _faq_bank: list[dict] = _load_faq_sync()
 logger.info("[BOOT] FAQ bank loaded from file (%d entries)", len(_faq_bank))
 
 async def _refresh_faq() -> None:
+    """Reload FAQ from file first, then try Supabase override."""
     global _faq_bank
+    # Always reload from file
+    fresh_file = _load_faq_sync()
+    if fresh_file:
+        _faq_bank = fresh_file
+        DIAG_STATE["faq_count"] = len(fresh_file)
+        logger.info("[RELOAD] FAQ bank reloaded from file (%d entries)", len(fresh_file))
+    # Then try Supabase (may override with newer data)
     try:
         from ..providers.supabase_store import load_faq
         entries = await load_faq()
         if entries:
             _faq_bank = entries
-            logger.info("[SUPABASE] FAQ bank refreshed (%d entries)", len(entries))
+            DIAG_STATE["faq_count"] = len(entries)
+            logger.info("[SUPABASE] FAQ bank refreshed from Supabase (%d entries)", len(entries))
     except Exception as e:
         logger.warning("[SUPABASE] Could not refresh FAQ: %s", e)
 

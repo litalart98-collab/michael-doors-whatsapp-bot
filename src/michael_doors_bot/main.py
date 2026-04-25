@@ -1211,6 +1211,24 @@ async def diag(admin: str = Query(default="")):
     }
 
 
+@app.get("/reload", response_class=JSONResponse)
+async def reload_config(admin: str = Query(default="")):
+    """Reload system prompt and FAQ from disk immediately — no restart needed."""
+    if (denied := _check_admin(admin)):
+        return denied
+    t0 = time.time()
+    await _refresh_system_prompt()
+    await _refresh_faq()
+    elapsed = round(time.time() - t0, 2)
+    return {
+        "ok": True,
+        "reloaded_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "elapsed_s": elapsed,
+        "system_prompt_chars": _ROUTER_DIAG.get("system_prompt_chars"),
+        "faq_count": _ROUTER_DIAG.get("faq_count"),
+    }
+
+
 @app.get("/test-ai", response_class=JSONResponse)
 async def test_ai(admin: str = Query(default="")):
     """Fire a single real AI call and report which provider responded."""

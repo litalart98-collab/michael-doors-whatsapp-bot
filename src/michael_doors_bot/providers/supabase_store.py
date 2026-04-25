@@ -131,6 +131,24 @@ async def load_system_prompt() -> str | None:
         return None
 
 
+async def save_system_prompt(text: str) -> bool:
+    """Upsert system prompt text into bot_config table. Returns True on success."""
+    if not _enabled():
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(
+                f"{_URL}/rest/v1/bot_config",
+                headers={**_HEADERS, "Prefer": "resolution=merge-duplicates"},
+                json={"key": "system_prompt", "value": text},
+            )
+            r.raise_for_status()
+            return True
+    except Exception as e:
+        logger.warning("[SUPABASE] save_system_prompt failed: %s", e)
+        return False
+
+
 async def load_faq() -> list:
     if not _enabled():
         return []
