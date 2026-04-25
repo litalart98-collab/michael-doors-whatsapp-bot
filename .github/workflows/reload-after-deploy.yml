@@ -3,12 +3,6 @@ name: Auto-reload bot after deploy
 on:
   push:
     branches: [main]
-    paths:
-      - "src/prompts/systemPrompt.txt"
-      - "src/data/faqBank.json"
-      - "src/michael_doors_bot/engine/messages.py"
-      - "src/michael_doors_bot/engine/simple_router.py"
-      - "src/michael_doors_bot/main.py"
 
 jobs:
   reload:
@@ -38,4 +32,4 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Bot reloaded successfully"
+          echo "Bot reloaded successfully"
