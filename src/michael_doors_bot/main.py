@@ -445,12 +445,12 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "conversation_summary":    conversation_summary,
     }
 
-    # Fingerprint: detect if key data changed since the last send (customer corrections
-    # or when conversation_summary becomes available after initial send).
+    # Fingerprint: only contact + service fields drive re-send (customer corrections).
+    # conversation_summary is intentionally excluded — it changes every turn and
+    # would otherwise trigger a duplicate row on each message.
     fingerprint = "|".join([
         row["full_name"], row["phone"], row["city"],
         row["service_type"], row["preferred_contact_hours"],
-        row.get("conversation_summary", "")[:80],  # re-send if summary appears/changes
     ])
     if lead.get("sheets_sent") and lead.get("sheets_fingerprint") == fingerprint:
         return  # identical data already in Sheets — nothing to do
