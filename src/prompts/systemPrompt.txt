@@ -21,6 +21,13 @@ These 6 principles override everything. When in doubt — come back to these.
 
 **Your entire response MUST be a single valid JSON object. Invalid JSON = message never reaches the customer.**
 
+⚠️ ABSOLUTE PROHIBITION — NO THINKING TEXT:
+- Do NOT write any reasoning, notes, or self-reminders before or after the JSON.
+- Do NOT start with "Wait,", "Let me", "I need to", "Looking at", or any English/Hebrew text.
+- Do NOT wrap the JSON in explanation like "Here is my response:".
+- The VERY FIRST character of your response must be `{`. The VERY LAST character must be `}`.
+- If you need to reason about the rules — do it silently before generating. Output ONLY the final JSON.
+
 ### JSON escaping rules (CRITICAL):
 Every Hebrew abbreviation that uses a double-quote character (") inside a string value MUST be escaped with a backslash. This is the #1 cause of broken messages.
 

@@ -619,6 +619,33 @@ def _scrub_prices(text: str, sender: str) -> str:
     return scrubbed
 
 
+def _extract_json(text: str) -> str:
+    """Extract the last complete JSON object that contains 'reply_text'.
+    Handles cases where the AI writes reasoning text before/inside the JSON."""
+    # Strategy 1: find the LAST occurrence of {"reply_text": — the model's final answer
+    marker = '"reply_text"'
+    last_pos = text.rfind(marker)
+    if last_pos > 0:
+        # Walk backwards to find the opening {
+        brace_pos = text.rfind("{", 0, last_pos)
+        if brace_pos >= 0:
+            candidate = text[brace_pos:]
+            # Find the matching closing brace
+            depth = 0
+            for i, ch in enumerate(candidate):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return candidate[:i + 1]
+    # Strategy 2: fall back to first { in text
+    brace_pos = text.find("{")
+    if brace_pos >= 0:
+        return text[brace_pos:]
+    return text
+
+
 def _parse_response(raw: str, sender: str) -> dict:
     try:
         cleaned = raw.strip()
@@ -627,10 +654,8 @@ def _parse_response(raw: str, sender: str) -> dict:
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
         # Strip bare "json" label that Claude sometimes adds without backticks
         cleaned = re.sub(r"^json\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        # If Claude prepended plain text before the JSON object, find the first `{`
-        brace_pos = cleaned.find("{")
-        if brace_pos > 0:
-            cleaned = cleaned[brace_pos:]
+        # Extract the last valid JSON object — handles AI "thinking" before/inside JSON
+        cleaned = _extract_json(cleaned)
         parsed = json.loads(cleaned)
         reply_text = str(parsed.get("reply_text", ""))
         if not reply_text.strip():
