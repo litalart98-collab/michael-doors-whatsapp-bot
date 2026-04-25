@@ -53,7 +53,7 @@ SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
 CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 
-_BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתוב לי שוב בעוד רגע ואענה לך"
+_BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
 _NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
 
@@ -417,8 +417,8 @@ def _save_followup() -> None:
 _summary_attached: set[str] = set()
 
 _CLOSE_MSG = (
-    "ראיתי שלא חזרת, אז נסגור את הפנייה לעת עתה 😊\n"
-    "אם תרצה/י לחזור בכל שעה ולהתחיל שיחה חדשה — נשמח לעזור!\n"
+    "ראיתי שלא חזרתם, אז נסגור את הפנייה לעת עתה 😊\n"
+    "אם תרצו לחזור בכל שעה ולהתחיל שיחה חדשה — נשמח לעזור!\n"
     "דלתות מיכאל | 054-2787578"
 )
 
