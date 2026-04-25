@@ -142,8 +142,8 @@ DIAG_STATE: dict = {
     "data_dir":             str(_DATA_DIR),
     "consistency_issues":   _consistency_issues,
     # AI provider tracking — updated on every _call_ai() invocation
-    "ai_primary":           f"openrouter/{_OPENROUTER_MODEL}" if _cfg.OPENROUTER_API_KEY else f"claude/{_CLAUDE_MODEL}",
-    "ai_fallback":          f"claude/{_CLAUDE_MODEL}" if _cfg.OPENROUTER_API_KEY else "none",
+    "ai_primary":           f"openrouter/openai/gpt-4.1-mini" if _cfg.OPENROUTER_API_KEY else "claude/claude-sonnet-4-6",
+    "ai_fallback":          "claude/claude-sonnet-4-6" if _cfg.OPENROUTER_API_KEY else "none",
     "openrouter_key_set":   bool(_cfg.OPENROUTER_API_KEY),
     "last_ai_provider":     None,   # filled after first real AI call
     "openrouter_failures":  0,
