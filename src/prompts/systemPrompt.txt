@@ -454,9 +454,10 @@ Work through these in order, but skip items the customer already answered:
 **For entrance doors (דלת כניסה / דלת חוץ / דלת ראשית):**
 □ 1. Frame removal — "מדובר בדלת כולל החלפת משקוף, או דלת בלבד?"
      → Save as `needs_frame_removal`: true / false
-□ 2. Project status — "מדובר בבית חדש, שיפוץ, או החלפה של דלת קיימת?"
-     → Save as `project_status`: "בית חדש" / "שיפוץ" / "החלפה"
-□ 3. Style — "מחפשים דלת חלקה, או מעוצבת?"
+     → AUTOMATICALLY infer `project_status` from the answer — DO NOT ask separately:
+       - "כולל משקוף" / "עם משקוף" / "דלת ומשקוף" → `project_status`: "בית חדש"
+       - "דלת בלבד" / "בלי משקוף" / "רק דלת" → `project_status`: "החלפה"
+□ 2. Style — "מחפשים דלת חלקה, או מעוצבת?"
      → If "חלקה" → save `design_preference`: "חלקה". Proceed to Stage 2.5.
      → If "מעוצבת" (or undecided) → send ONE message with catalog link + model question:
        "הנה הקטלוג לדלתות כניסה מעוצבות: https://www.michaeldoors.co.il/catalog/entry-designed 😊 יש דגם ספציפי שתפס אתכם ושתרצו שנכלול בהצעה?"
