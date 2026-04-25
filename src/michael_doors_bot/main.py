@@ -284,6 +284,27 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["handoff_time"] = datetime.utcnow().isoformat()
     if result.get("summary"):
         lead["summary"] = result["summary"]
+    # v2 door detail fields (richer Sheets payload)
+    if result.get("active_topics"):
+        lead["active_topics"] = result["active_topics"]
+    if result.get("entrance_scope"):
+        lead["entrance_scope"] = result["entrance_scope"]
+    if result.get("entrance_style"):
+        lead["entrance_style"] = result["entrance_style"]
+    if result.get("entrance_model"):
+        lead["entrance_model"] = result["entrance_model"]
+    if result.get("interior_project_type"):
+        lead["interior_project_type"] = result["interior_project_type"]
+    if result.get("interior_quantity"):
+        lead["interior_quantity"] = result["interior_quantity"]
+    if result.get("interior_style"):
+        lead["interior_style"] = result["interior_style"]
+    if result.get("interior_model"):
+        lead["interior_model"] = result["interior_model"]
+    if result.get("mamad_type"):
+        lead["mamad_type"] = result["mamad_type"]
+    if result.get("mamad_scope"):
+        lead["mamad_scope"] = result["mamad_scope"]
 
     lead["messages"].append({"from": "customer", "text": user_msg, "time": datetime.utcnow().isoformat()})
     if result.get("reply_text"):
@@ -299,9 +320,9 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if not config.GOOGLE_SHEETS_WEBHOOK_URL:
         return
 
-    # Send as soon as name + phone + city + service_type are all present —
-    # no need to wait for handoff_to_human.
-    if not all(lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type")):
+    # Send only after ALL required contact fields AND callback time are collected.
+    # preferred_contact_hours = Stage 6; we never send before it completes.
+    if not all(lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type", "preferred_contact_hours")):
         return
 
     # Prefer callback phone given by customer; fall back to WhatsApp sender number
@@ -315,24 +336,90 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if len(phone_digits) == 10 and phone_digits.isdigit():
         phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
-    svc     = lead.get("service_type", "")
-    dp      = lead.get("design_preference", "")
-    cnt     = lead.get("doors_count")
-    frame   = lead.get("needs_frame_removal")
-    pstatus = lead.get("project_status", "")
-    # Build service_field: "דלת כניסה מעוצבת — נפחות — שיפוץ — כולל משקוף — 2 יחידות"
-    parts_svc = [svc] if svc else []
-    if dp and dp != "לא סוכם":
-        parts_svc.append(dp)
-    if pstatus:
-        parts_svc.append(pstatus)
-    if frame is True:
-        parts_svc.append("כולל החלפת משקוף")
-    elif frame is False:
-        parts_svc.append("ללא החלפת משקוף")
-    if cnt:
-        parts_svc.append(f"{cnt} יחידות")
-    service_field = " — ".join(parts_svc) if parts_svc else ""
+    # ── Build service_field from v2 door details ───────────────────────────────
+    active_topics = lead.get("active_topics") or []
+    parts_svc: list[str] = []
+
+    if "entrance_doors" in active_topics:
+        scope  = lead.get("entrance_scope")
+        style  = lead.get("entrance_style")
+        model  = lead.get("entrance_model")
+        lbl    = "דלת כניסה"
+        if style == "flat":
+            lbl += " חלקה"
+        elif style == "designed":
+            lbl += " מעוצבת"
+        if scope == "with_frame":
+            lbl += " כולל משקוף"
+        elif scope == "door_only":
+            lbl += " דלת בלבד"
+        if model and model not in ("undecided", "לא סוכם"):
+            lbl += f" — {model}"
+        parts_svc.append(lbl)
+
+    if "interior_doors" in active_topics:
+        qty     = lead.get("interior_quantity") or lead.get("doors_count")
+        style   = lead.get("interior_style")
+        project = lead.get("interior_project_type") or lead.get("project_status")
+        model   = lead.get("interior_model")
+        lbl     = "דלתות פנים"
+        if qty:
+            lbl += f" {qty} יח'"
+        if style == "flat":
+            lbl += " חלקות"
+        elif style == "designed":
+            lbl += " מעוצבות"
+        if project == "new":
+            lbl += " — בית חדש"
+        elif project == "renovation":
+            lbl += " — שיפוץ"
+        elif project == "replacement":
+            lbl += " — החלפה"
+        if model and model not in ("undecided", "לא סוכם"):
+            lbl += f" — {model}"
+        parts_svc.append(lbl)
+
+    if "mamad" in active_topics:
+        mamad_type  = lead.get("mamad_type")
+        mamad_scope = lead.get("mamad_scope")
+        lbl = 'דלת ממ"ד'
+        if mamad_type == "new":
+            lbl += " חדשה"
+        elif mamad_type == "replacement":
+            lbl += " — החלפה"
+        if mamad_scope == "with_frame":
+            lbl += " כולל משקוף"
+        elif mamad_scope == "door_only":
+            lbl += " דלת בלבד"
+        parts_svc.append(lbl)
+
+    if "repair" in active_topics:
+        parts_svc.append("תיקון")
+
+    if "showroom_meeting" in active_topics:
+        parts_svc.append("ביקור אולם תצוגה")
+
+    # Fallback to legacy fields for backward-compatibility
+    if not parts_svc:
+        svc     = lead.get("service_type", "")
+        dp      = lead.get("design_preference", "")
+        cnt     = lead.get("doors_count")
+        frame   = lead.get("needs_frame_removal")
+        pstatus = lead.get("project_status", "")
+        if svc:
+            parts_svc.append(svc)
+        if dp and dp != "לא סוכם":
+            parts_svc.append(dp)
+        if pstatus:
+            parts_svc.append(pstatus)
+        if frame is True:
+            parts_svc.append("כולל החלפת משקוף")
+        elif frame is False:
+            parts_svc.append("ללא החלפת משקוף")
+        if cnt:
+            parts_svc.append(f"{cnt} יחידות")
+
+    service_field = " | ".join(parts_svc) if parts_svc else lead.get("service_type", "")
 
     referral  = lead.get("referral_source", "")
     returning = lead.get("is_returning_customer")
@@ -342,6 +429,10 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if returning:
         notes_parts.append("לקוח חוזר")
 
+    # conversation_summary: prefer the full summary from _attach_summary (conv_summary),
+    # fall back to the per-turn "summary" field Claude writes.
+    conversation_summary = lead.get("conv_summary") or lead.get("summary", "")
+
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
@@ -350,12 +441,15 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
+        "conversation_summary":    conversation_summary,
     }
 
-    # Fingerprint: detect if key data changed since the last send (customer corrections).
+    # Fingerprint: detect if key data changed since the last send (customer corrections
+    # or when conversation_summary becomes available after initial send).
     fingerprint = "|".join([
         row["full_name"], row["phone"], row["city"],
         row["service_type"], row["preferred_contact_hours"],
+        row.get("conversation_summary", "")[:80],  # re-send if summary appears/changes
     ])
     if lead.get("sheets_sent") and lead.get("sheets_fingerprint") == fingerprint:
         return  # identical data already in Sheets — nothing to do

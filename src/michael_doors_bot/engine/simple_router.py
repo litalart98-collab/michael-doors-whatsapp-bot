@@ -1426,19 +1426,21 @@ def clear_conversation(sender: str) -> None:
 def _empty_return(reply_text: str, summary: str, state: dict | None = None) -> dict:
     """Build a minimal return dict compatible with main.py's expected keys."""
     s = state or {}
+    scope = s.get("entrance_scope")
     return {
         "reply_text":              reply_text,
         "reply_text_2":            None,
         "handoff_to_human":        False,
         "summary":                 summary,
         "preferred_contact_hours": s.get("preferred_contact_hours"),
-        "needs_frame_removal":     (True  if s.get("entrance_scope") == "with_frame" else
-                                    False if s.get("entrance_scope") == "door_only"  else None),
+        "needs_frame_removal":     (True  if scope == "with_frame" else
+                                    False if scope == "door_only"  else None),
         "needs_installation":      None,
         "full_name":               s.get("full_name"),
         "phone":                   s.get("phone"),
         "service_type":            s.get("service_type"),
         "city":                    s.get("city"),
+        # Legacy names kept for _record_lead compat
         "doors_count":             s.get("interior_quantity"),
         "design_preference":       (s.get("entrance_style") or s.get("interior_style")),
         "project_status":          s.get("interior_project_type"),
@@ -1446,6 +1448,16 @@ def _empty_return(reply_text: str, summary: str, state: dict | None = None) -> d
         "is_returning_customer":   s.get("is_returning_customer"),
         "active_topics":           s.get("active_topics", []),
         "current_active_topic":    s.get("current_active_topic"),
+        # v2 door detail fields (for richer Sheets payload)
+        "entrance_scope":          scope,
+        "entrance_style":          s.get("entrance_style"),
+        "entrance_model":          s.get("entrance_model"),
+        "interior_project_type":   s.get("interior_project_type"),
+        "interior_quantity":       s.get("interior_quantity"),
+        "interior_style":          s.get("interior_style"),
+        "interior_model":          s.get("interior_model"),
+        "mamad_type":              s.get("mamad_type"),
+        "mamad_scope":             s.get("mamad_scope"),
     }
 
 
@@ -1466,6 +1478,7 @@ def _structured_to_return(structured: dict, state: dict) -> dict:
         "phone":                   s.get("phone"),
         "service_type":            s.get("service_type"),
         "city":                    s.get("city"),
+        # Legacy names kept for _record_lead compat
         "doors_count":             s.get("interior_quantity"),
         "design_preference":       (s.get("entrance_style") or s.get("interior_style")),
         "project_status":          s.get("interior_project_type"),
@@ -1473,6 +1486,16 @@ def _structured_to_return(structured: dict, state: dict) -> dict:
         "is_returning_customer":   s.get("is_returning_customer"),
         "active_topics":           s.get("active_topics", []),
         "current_active_topic":    s.get("current_active_topic"),
+        # v2 door detail fields (for richer Sheets payload)
+        "entrance_scope":          scope,
+        "entrance_style":          s.get("entrance_style"),
+        "entrance_model":          s.get("entrance_model"),
+        "interior_project_type":   s.get("interior_project_type"),
+        "interior_quantity":       s.get("interior_quantity"),
+        "interior_style":          s.get("interior_style"),
+        "interior_model":          s.get("interior_model"),
+        "mamad_type":              s.get("mamad_type"),
+        "mamad_scope":             s.get("mamad_scope"),
     }
 
 
@@ -1685,6 +1708,83 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         logger.error("get_followup_message error | sender=%s | %s", sender, exc)
         _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
         _save_conversations()
+        return _FALLBACK
+
+
+# ── Closing intent detection ─────────────────────────────────────────────────
+def is_closing_intent(text: str, conv_turns: int) -> bool:
+    """
+    Return True if the customer's message looks like a goodbye/closing intent.
+    Only fires after at least 2 turns so first-message greetings aren't treated as closings.
+    """
+    if conv_turns < 2:
+        return False
+    stripped = text.strip()
+    # Short standalone farewell (≤30 chars covers "תודה", "ביי", "תודה רבה", "להתראות")
+    if len(stripped) <= 30 and re.search(
+        r'תודה|ביי|להתראות|יום טוב|לילה טוב|שבוע טוב|חג שמח|שנה טובה|עד הפעם|סיימנו|הבנתי תודה',
+        stripped, re.IGNORECASE
+    ):
+        return True
+    # Longer text that is explicitly a goodbye
+    if re.search(
+        r'^(?:אוקי\s+)?תודה(?:\s+רבה)?[.!]?\s*(?:ביי|להתראות|יום טוב)?$',
+        stripped, re.IGNORECASE
+    ):
+        return True
+    return False
+
+
+# ── Closing message (farewell AI reply) ───────────────────────────────────────
+async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
+    """Generate a warm farewell message when the customer closes the conversation."""
+    history = _conversations.get(sender, [])
+    _FALLBACK = "תודה שפניתם לדלתות מיכאל 😊 אם תרצו לחזור — אנחנו כאן! יום נפלא! 💙"
+    system = (
+        "אתה נציג מכירות ידידותי של דלתות מיכאל. "
+        "הלקוח מסיים את השיחה. כתוב הודעת פרידה קצרה (1–2 שורות), חמה ואנושית. "
+        "אם נמסרו פרטי קשר, ציין שנחזור בהקדם. "
+        "בעברית בלבד. ללא JSON."
+    )
+    try:
+        msg = await _call_ai(
+            system=system,
+            messages=(history[-4:] if history else [{"role": "user", "content": "להתראות"}]),
+            max_tokens=120,
+            api_key=anthropic_api_key,
+            timeout=15.0,
+        )
+        return msg.strip() or _FALLBACK
+    except Exception as exc:
+        logger.error("get_closing_message error | sender=%s | %s", sender, exc)
+        return _FALLBACK
+
+
+# ── Conversation summary (called at conversation close) ───────────────────────
+async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> str:
+    """Generate a concise summary of the completed conversation for the lead record."""
+    history = _conversations.get(sender, [])
+    _FALLBACK = "שיחה ללא סיכום"
+    if not history:
+        return _FALLBACK
+    system = (
+        "סכם את שיחת המכירה הבאה בנקודות קצרות (עברית):\n"
+        "• מה הלקוח חיפש (סוג דלת, כמות, עיצוב)\n"
+        "• פרטי קשר שנמסרו (שם, עיר, טלפון, זמן חזרה)\n"
+        "• שלב השיחה בו הסתיימה\n"
+        "3–6 שורות. ללא JSON."
+    )
+    try:
+        msg = await _call_ai(
+            system=system,
+            messages=history[-20:],
+            max_tokens=350,
+            api_key=anthropic_api_key,
+            timeout=20.0,
+        )
+        return msg.strip() or _FALLBACK
+    except Exception as exc:
+        logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
         return _FALLBACK
 
 
