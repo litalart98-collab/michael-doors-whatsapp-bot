@@ -394,10 +394,28 @@ def _merge_state(existing: dict, new_fields: dict) -> dict:
     return merged
 
 
-def _state_context_block(state: dict) -> str:
+def _compute_stage3_done(state: dict, history: list[dict]) -> bool:
+    """
+    Returns True if Stage 3 question has been sent AND the customer has replied after it.
+    Uses conversation history for authoritative ground-truth detection.
+    """
+    if state.get('stage3_done'):
+        return True
+    stage3_q = "יש עוד משהו ספציפי שחשוב לכם?"
+    found_stage3 = False
+    for msg in history:
+        if not found_stage3 and msg.get('role') == 'assistant' and stage3_q in msg.get('content', ''):
+            found_stage3 = True
+        elif found_stage3 and msg.get('role') == 'user':
+            return True  # Customer replied after Stage 3 question → done
+    return False
+
+
+def _state_context_block(state: dict, history: list[dict] | None = None) -> str:
     """
     Build a context block injected into every Claude call.
-    Shows Claude exactly which fields are already collected so it never re-asks them.
+    Shows Claude exactly which fields are already collected, which topic queue is active,
+    what the next required question is, and whether Stage 3 has been completed.
     """
     if not state:
         return ""
@@ -411,15 +429,15 @@ def _state_context_block(state: dict) -> str:
             return "✅ true"
         return f"✅ {val}"
 
-    phone = state.get('phone')
-    name  = state.get('full_name')
-    city  = state.get('city')
-    hours = state.get('preferred_contact_hours')
+    phone  = state.get('phone')
+    name   = state.get('full_name')
+    city   = state.get('city')
+    hours  = state.get('preferred_contact_hours')
     gender = state.get('customer_gender_locked')
-    nfr   = state.get('needs_frame_removal')
-    dp    = state.get('design_preference')
-    dc    = state.get('doors_count')
-    ps    = state.get('project_status')
+    nfr    = state.get('needs_frame_removal')
+    dp     = state.get('design_preference')
+    dc     = state.get('doors_count')
+    ps     = state.get('project_status')
 
     lines = [
         "## VERIFIED CONVERSATION STATE",
@@ -448,16 +466,132 @@ def _state_context_block(state: dict) -> str:
     else:
         lines.append("Gender: UNKNOWN — use neutral plural: לכם / אליכם / תוכלו / תשאירו.")
 
-    # Next contact field to ask
-    lines.append("")
-    if not phone:
-        lines.append("NEXT CONTACT FIELD: phone — ask \"מה מספר הטלפון?\"")
-    elif not name:
-        lines.append("NEXT CONTACT FIELD: full_name — ask \"על שם מי הפנייה?\"")
-    elif not city:
-        lines.append("NEXT CONTACT FIELD: city — ask \"באיזו עיר מדובר?\"")
+    # ── Topic queue status ────────────────────────────────────────────────────
+    active_topics = state.get('active_topics') or []
+
+    if active_topics:
+        lines.append("")
+        lines.append("Topic queue status:")
+        lines.append(f"  active_topics: [{', '.join(active_topics)}]")
+
+        # Walk topics in priority order and find the first incomplete one
+        topic_priority = ['entrance_doors', 'interior_doors', 'mamad', 'showroom_meeting']
+        current_topic = None
+        next_q_label = None
+
+        for topic in topic_priority:
+            if topic not in active_topics:
+                continue
+            if topic == 'entrance_doors':
+                lines.append("  entrance_doors queue:")
+                lines.append(f"    Step 1 needs_frame_removal: {tick(nfr)}")
+                lines.append(f"    Step 2 design_preference:   {tick(dp)}")
+                if nfr is None:
+                    current_topic = topic
+                    next_q_label = 'entrance Step 1: "האם מדובר בדלת כולל משקוף, או דלת בלבד?"'
+                    break
+                elif dp is None:
+                    current_topic = topic
+                    next_q_label = 'entrance Step 2: "דלת חלקה או מעוצבת?"'
+                    break
+                else:
+                    lines.append("    ✅ entrance_doors queue COMPLETE")
+            elif topic == 'interior_doors':
+                lines.append("  interior_doors queue:")
+                lines.append(f"    Step 1 project_status:    {tick(ps)}")
+                lines.append(f"    Step 2 doors_count:       {tick(dc)}")
+                lines.append(f"    Step 3 design_preference: {tick(dp)}")
+                if ps is None:
+                    current_topic = topic
+                    next_q_label = 'interior Step 1: "מדובר בבית חדש, שיפוץ, או החלפה של דלתות קיימות?"'
+                    break
+                elif dc is None:
+                    current_topic = topic
+                    next_q_label = 'interior Step 2: "כמה דלתות פנים בערך?"'
+                    break
+                elif dp is None:
+                    current_topic = topic
+                    next_q_label = 'interior Step 3: "הדלתות חלקות או מעוצבות?"'
+                    break
+                else:
+                    lines.append("    ✅ interior_doors queue COMPLETE")
+            elif topic == 'mamad':
+                lines.append("  mamad queue:")
+                lines.append(f"    Step 1 project_status:    {tick(ps)}")
+                lines.append(f"    Step 2 needs_frame_removal: {tick(nfr)}")
+                if ps is None:
+                    current_topic = topic
+                    next_q_label = 'mamad Step 1: "ממ\\"ד חדש, או יש ממ\\"ד קיים שרוצים להחליף את דלתו?"'
+                    break
+                elif nfr is None:
+                    current_topic = topic
+                    next_q_label = 'mamad Step 2: "האם מדובר בדלת כולל משקוף, או דלת בלבד?"'
+                    break
+                else:
+                    lines.append("    ✅ mamad queue COMPLETE")
+            elif topic == 'showroom_meeting':
+                lines.append("  showroom_meeting: ✅ no product fields required")
+
+        if current_topic:
+            lines.append(f"  current_active_topic: {current_topic} (IN PROGRESS)")
+            lines.append(f"  → NEXT REQUIRED QUESTION: {next_q_label}")
+            lines.append("  ⛔ Do NOT ask any question other than the one above.")
+            lines.append("  ⛔ Do NOT proceed to Stage 3 — topic queue is not complete yet.")
+        else:
+            # All queues complete
+            stage3_done = state.get('stage3_done', False)
+            if not stage3_done and history:
+                stage3_done = _compute_stage3_done(state, history)
+
+            lines.append("  current_active_topic: null")
+            lines.append("  ✅ ALL TOPIC QUEUES COMPLETE — Completion Guard passed.")
+
+            if not stage3_done:
+                lines.append("")
+                lines.append("→ CURRENT REQUIRED ACTION: Stage 3")
+                lines.append('  Send EXACTLY: "יש עוד משהו ספציפי שחשוב לכם?"')
+                lines.append("  ⛔ Do NOT add any text before or after this question.")
+                lines.append("  ⛔ Do NOT go to contact collection yet.")
+                lines.append("  ⛔ This message must be reply_text only (reply_text_2: null).")
+            else:
+                lines.append("  ✅ Stage 3 DONE — customer already replied to it.")
+                lines.append("")
+                lines.append("→ CURRENT REQUIRED ACTION: Stage 4 (contact collection)")
+                lines.append('  ⛔ Do NOT ask "יש עוד משהו ספציפי שחשוב לכם?" again — it is permanently closed.')
+                lines.append("")
+                # Check if Stage 4 contact opener has already been sent
+                _stage4_opener = "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת"
+                _opener_sent = history and any(
+                    m.get('role') == 'assistant' and _stage4_opener in m.get('content', '')
+                    for m in history
+                )
+                if not _opener_sent:
+                    lines.append("  Stage 4 opener NOT YET SENT — send it now:")
+                    lines.append('  → EXACT TEXT: "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת, אשמח לפרטים ליצירת קשר."')
+                    lines.append("  ⛔ Send this message ALONE — do NOT append any question to it.")
+                    lines.append("  ⛔ Wait for customer reply before asking for phone/name/city.")
+                else:
+                    if not phone:
+                        lines.append('  NEXT CONTACT FIELD: phone → ask "מה מספר הטלפון?"')
+                    elif not name:
+                        lines.append('  NEXT CONTACT FIELD: full_name → ask "על שם מי הפנייה?"')
+                    elif not city:
+                        lines.append('  NEXT CONTACT FIELD: city → ask "באיזו עיר מדובר?"')
+                    else:
+                        lines.append("  NEXT CONTACT FIELD: all collected → proceed to Stage 5 summary.")
     else:
-        lines.append("NEXT CONTACT FIELD: all collected — proceed to Stage 5 summary.")
+        # active_topics empty — no scenario was detected or first-turn scenario had no topic
+        lines.append("")
+        lines.append("active_topics: [] — detect topic from conversation history and set current_active_topic.")
+        lines.append("")
+        if not phone:
+            lines.append('NEXT CONTACT FIELD: phone — ask "מה מספר הטלפון?"')
+        elif not name:
+            lines.append('NEXT CONTACT FIELD: full_name — ask "על שם מי הפנייה?"')
+        elif not city:
+            lines.append('NEXT CONTACT FIELD: city — ask "באיזו עיר מדובר?"')
+        else:
+            lines.append("NEXT CONTACT FIELD: all collected — proceed to Stage 5 summary.")
 
     lines.append("")
     lines.append("If the customer's latest message contained contact info you haven't extracted above,")
@@ -604,7 +738,7 @@ def _next_opening_time() -> str:
     return f"ביום {next_day} משעה {h_start}:00"
 
 
-def _build_system(user_msg: str, sender: str = "", state: dict | None = None) -> str:
+def _build_system(user_msg: str, sender: str = "", state: dict | None = None, history: list[dict] | None = None) -> str:
     if not _SYSTEM_PROMPT:
         logger.error("System prompt is empty — Claude will have no instructions")
     greeting = _israel_greeting()
@@ -620,7 +754,7 @@ def _build_system(user_msg: str, sender: str = "", state: dict | None = None) ->
     ]
     # Inject verified conversation state so Claude never re-asks collected fields
     if state:
-        state_block = _state_context_block(state)
+        state_block = _state_context_block(state, history=history)
         if state_block:
             parts.append(state_block)
 
@@ -987,6 +1121,8 @@ def _parse_response(raw: str, sender: str) -> dict:
             "project_status":          parsed.get("project_status"),
             "referral_source":         parsed.get("referral_source"),
             "is_returning_customer":   parsed.get("is_returning_customer"),
+            "active_topics":           parsed.get("active_topics") or [],
+            "current_active_topic":    parsed.get("current_active_topic"),
         }
     except Exception:
         # Claude returned plain text instead of JSON — use it directly as the reply
@@ -1097,6 +1233,16 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         r"^(כן|לא|חלקה|מעוצבת|מודרנית|קלאסית|בית חדש|שיפוץ|החלפה|אולי|בסדר|אחלה|נכון|ברור|טוב)[.!?\s]*$",
         user_message.strip(), re.IGNORECASE
     ))
+
+    # Maps scenario key → active topic (for state initialisation)
+    _SCENARIO_TOPIC_MAP: dict[str, str] = {
+        "detailed_inquiry":          "entrance_doors",
+        "entrance_doors":            "entrance_doors",
+        "detailed_inquiry_interior": "interior_doors",
+        "interior_doors":            "interior_doors",
+        "mamad":                     "mamad",
+    }
+
     if len(_conversations[sender]) == 1 and not _looks_like_answer:
         scenario = _detect_scenario(user_message)
         if scenario:
@@ -1118,6 +1264,28 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             _conversations[sender].append({"role": "assistant", "content": combined})
             _save_conversations()
             asyncio.create_task(_supabase_save_conv(sender))
+
+            # ── Initialise conv_state for this sender on first message ────────
+            if sender not in _conv_state:
+                _conv_state[sender] = _empty_conv_state()
+            # Extract any fields from the first customer message
+            extracted_s1 = _extract_fields_from_message(user_message)
+            if extracted_s1:
+                logger.info("[STATE:EXTRACT:S1] sender=%s | extracted=%s", sender, extracted_s1)
+            _conv_state[sender] = _merge_state(_conv_state[sender], extracted_s1)
+            # Set active_topics from the detected scenario
+            scenario_key = next(
+                (k for k, v in _SCENARIOS.items() if v is scenario), None
+            )
+            if scenario_key and scenario_key in _SCENARIO_TOPIC_MAP:
+                detected_topic = _SCENARIO_TOPIC_MAP[scenario_key]
+                _conv_state[sender] = _merge_state(
+                    _conv_state[sender], {'active_topics': [detected_topic]}
+                )
+                logger.info("[STATE:TOPIC:S1] sender=%s | topic=%s", sender, detected_topic)
+            _save_conv_state()
+            # ─────────────────────────────────────────────────────────────────
+
             return {
                 "reply_text":              msg1,
                 "reply_text_2":            msg2,
@@ -1135,6 +1303,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
                 "project_status":          None,
                 "referral_source":         None,
                 "is_returning_customer":   None,
+                "active_topics":           _conv_state[sender].get('active_topics', []),
             }
 
     # Mock mode — skip AI entirely (for UI testing without burning API credits)
@@ -1169,14 +1338,21 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
     # Step 3: Merge extracted fields into existing state (never overwrite non-null)
     _conv_state[sender] = _merge_state(_conv_state[sender], extracted)
 
-    # Step 4: Save updated state to disk
+    # Step 4: Compute stage3_done from conversation history (reliable ground-truth)
+    _history_now = _conversations.get(sender, [])
+    if not _conv_state[sender].get('stage3_done') and _compute_stage3_done(_conv_state[sender], _history_now):
+        _conv_state[sender]['stage3_done'] = True
+        logger.info("[STATE:STAGE3] Stage 3 marked done | sender=%s", sender)
+
+    # Step 5: Save updated state to disk
     _save_conv_state()
 
     # Log the current known state for debugging
     s = _conv_state[sender]
     logger.info(
-        "[STATE:CURRENT] sender=%s | phone=%s | name=%s | city=%s | gender=%s",
-        sender, s.get('phone'), s.get('full_name'), s.get('city'), s.get('customer_gender_locked')
+        "[STATE:CURRENT] sender=%s | phone=%s | name=%s | city=%s | gender=%s | topics=%s | stage3=%s",
+        sender, s.get('phone'), s.get('full_name'), s.get('city'),
+        s.get('customer_gender_locked'), s.get('active_topics'), s.get('stage3_done')
     )
 
     # ── AI call (OpenRouter/GPT-4.1-mini or Claude) ───────────────────────────
@@ -1188,7 +1364,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         for _attempt in range(3):
             try:
                 raw_text = await _call_ai(
-                    system=_build_system(user_message, sender, state=_conv_state[sender]),
+                    system=_build_system(user_message, sender, state=_conv_state[sender], history=_conversations.get(sender, [])),
                     messages=_conversations[sender],
                     max_tokens=900,
                     api_key=anthropic_api_key,
@@ -1217,10 +1393,10 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
 
     structured = _parse_response(raw_text, sender)
 
-    # ── Step 5: Merge Claude's JSON output back into state ────────────────────
+    # ── Step 6: Merge Claude's JSON output back into state ───────────────────
     # Claude may have extracted additional fields we missed with regex (e.g. referral_source,
-    # service_type, active_topics, stage3_done). Merge them in — our pre-extracted values
-    # win for contact fields (phone/name/city) since they were already set above.
+    # service_type, active_topics). Merge them in — our pre-extracted values win for contact
+    # fields (phone/name/city) since they were already set above.
     claude_fields = {
         k: structured.get(k)
         for k in ('full_name', 'phone', 'city', 'preferred_contact_hours',
@@ -1233,14 +1409,28 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
     claude_gender = structured.get('customer_gender_locked')
     if claude_gender and not _conv_state[sender].get('customer_gender_locked'):
         claude_fields['customer_gender_locked'] = claude_gender
+    # active_topics from Claude — merge (union, append-only)
+    claude_topics = structured.get('active_topics') or []
+    if claude_topics:
+        claude_fields['active_topics'] = claude_topics
 
     _conv_state[sender] = _merge_state(_conv_state[sender], claude_fields)
+
+    # Re-compute stage3_done after merging (Claude may have replied with Stage 3 question this turn)
+    updated_history = _conversations.get(sender, [])
+    if not _conv_state[sender].get('stage3_done') and _compute_stage3_done(_conv_state[sender], updated_history):
+        _conv_state[sender]['stage3_done'] = True
+        logger.info("[STATE:STAGE3:POST] Stage 3 marked done after Claude reply | sender=%s", sender)
+
     _save_conv_state()
 
     # Patch the structured result to always reflect the authoritative state for contact fields
     for field in ('phone', 'full_name', 'city', 'preferred_contact_hours', 'customer_gender_locked'):
         if _conv_state[sender].get(field) is not None and structured.get(field) is None:
             structured[field] = _conv_state[sender][field]
+    # Always sync active_topics from authoritative state
+    if _conv_state[sender].get('active_topics'):
+        structured['active_topics'] = _conv_state[sender]['active_topics']
 
     # Always strip greeting/pitch from Claude responses — these lines belong only
     # in the scripted first-pulse (sent separately). Strip from any position in the text.
