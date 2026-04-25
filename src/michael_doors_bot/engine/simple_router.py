@@ -315,11 +315,10 @@ def _build_system(user_msg: str, sender: str = "") -> str:
         _SYSTEM_PROMPT,
         f"## Business context\n{_context_block()}",
         (
-            f"## Current time context\nGreeting to use: «{greeting}»\n"
-            f"CRITICAL: If there is NO prior assistant message in the conversation history — "
-            f"this is the first reply. You MUST embed the greeting inside the opening line, "
-            f"like this: 'היי, תודה שפניתם לדלתות מיכאל, {greeting} 😊'. "
-            "Never skip this on a first reply. Never repeat it after the first reply."
+            f"## Current time context\nCurrent greeting for this time of day: «{greeting}»\n"
+            f"Use this greeting in reply_text_2 on the FIRST reply only — per RULE 1.\n"
+            "On all subsequent replies (assistant message already exists in history): "
+            "do NOT include any time-based greeting."
         ),
     ]
 
@@ -933,7 +932,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     """15-min silence → personalized reminder that references the conversation topic."""
     history = _conversations.get(sender, [])
-    _FALLBACK = "היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
+    _FALLBACK = "היי, עדיין ממתינה לתגובה מכם 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
     if len(history) < 2:
         _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
         _save_conversations()
@@ -941,9 +940,9 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     system = (
         "אתה נציג מכירות של דלתות מיכאל. "
         "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים בסגנון הזה: "
-        "\"היי, עדיין ממתינה לתגובה ממך 😊 אם יש עוד שאלות לגבי [נושא ספציפי מהשיחה], אנחנו כאן!\". "
+        "\"היי, עדיין ממתינה לתגובה מכם 😊 אם יש עוד שאלות לגבי [נושא ספציפי מהשיחה], אנחנו כאן!\". "
         "החלף את [נושא ספציפי מהשיחה] בנושא האמיתי מהשיחה (סוג הדלת, השירות, הדגם שהוזכר). "
-        "אם אין נושא ספציפי — השתמש בניסוח הגנרי: \"היי, עדיין ממתינה לתגובה ממך 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!\". "
+        "אם אין נושא ספציפי — השתמש בניסוח הגנרי: \"היי, עדיין ממתינה לתגובה מכם 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!\". "
         "שפה ישירה ואנושית. בעברית בלבד. ללא JSON. ללא ברכות פתיחה נוספות."
     )
     try:
