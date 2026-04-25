@@ -284,6 +284,13 @@ _PHONE_RE = re.compile(
 
 _HEB_WORD_RE = re.compile(r'^[\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{0,35}$')
 
+# Common single Hebrew words that are never a person's name
+_NOT_A_NAME: frozenset[str] = frozenset({
+    'כן', 'לא', 'אולי', 'טוב', 'בסדר', 'אחלה', 'נהדר', 'מעולה', 'סבבה',
+    'ברור', 'אוקי', 'נכון', 'חלקה', 'חלקות', 'מעוצבת', 'מעוצבות',
+    'חדשה', 'חדש', 'שיפוץ', 'החלפה', 'תיקון', 'פנים', 'כניסה',
+})
+
 # ── Topic patterns ────────────────────────────────────────────────────────────
 _TOPIC_PATTERNS: dict[str, re.Pattern] = {
     "entrance_doors": re.compile(
@@ -362,24 +369,39 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             extracted['city'] = city_prep.group(1)
 
     # ── Name ──────────────────────────────────────────────────────────────────
+    # Strategy: when a phone number is present, remove it and any detected city
+    # from the message, then treat the remainder as the name candidate.
+    # This handles all orderings and comma/space separators:
+    #   "ליטל 0523989366"
+    #   "ליטל, אשקלון, 0523989366"
+    #   "0523989366 ליטל אשקלון"
+    #   "שמי דוד כהן, 052-1234567, תל אביב"
     if phone_match:
-        before = t[:phone_match.start()].strip()
-        before = re.sub(
-            r'^(?:שמי|קוראים לי|אני|שם שלי|השם שלי)\s*', '', before,
-            flags=re.IGNORECASE
-        ).strip()
-        if (before and _HEB_WORD_RE.match(before)
-                and before not in _ISRAELI_CITIES and len(before) >= 2):
-            extracted['full_name'] = before
-        if 'full_name' not in extracted:
-            after = t[phone_match.end():].strip()
-            if 'city' in extracted:
-                after = after.replace(extracted['city'], '').strip()
-            after = re.sub(r'^[,\s]+|[,\s]+$', '', after).strip()
-            if (after and _HEB_WORD_RE.match(after)
-                    and after not in _ISRAELI_CITIES and len(after) >= 2):
-                extracted['full_name'] = after
+        # Build remainder: everything except the phone number
+        remainder = (t[:phone_match.start()] + ' ' + t[phone_match.end():]).strip()
+
+        # Remove detected city from remainder
+        if 'city' in extracted:
+            remainder = remainder.replace(extracted['city'], '')
+
+        # Remove common name-introduction prefixes
+        remainder = re.sub(
+            r'^(?:שמי|קוראים לי|אני|שם שלי|השם שלי)\s*', '',
+            remainder, flags=re.IGNORECASE,
+        )
+
+        # Normalize: commas and punctuation → spaces, collapse whitespace
+        remainder = re.sub(r'[,،.!?;]+', ' ', remainder)
+        remainder = re.sub(r'\s+', ' ', remainder).strip()
+
+        if (remainder
+                and _HEB_WORD_RE.match(remainder)
+                and remainder not in _ISRAELI_CITIES
+                and remainder not in _NOT_A_NAME
+                and len(remainder) >= 2):
+            extracted['full_name'] = remainder
     else:
+        # No phone — try explicit name-introduction markers only
         name_m = re.match(
             r'^(?:שמי|קוראים לי|שם שלי|אני)\s+([\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{1,30})',
             t, re.IGNORECASE,
