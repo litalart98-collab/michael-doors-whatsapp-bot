@@ -1,0 +1,22 @@
+name: Keep bot alive (ping every 10 min)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes, 24/7
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping bot health endpoint
+        run: |
+          URL="https://michael-doors-whatsapp-bot.onrender.com/"
+          echo "Pinging: $URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "Bot is alive"
+          else
+            echo "WARNING: Bot returned HTTP $STATUS — may be restarting"
+          fi
