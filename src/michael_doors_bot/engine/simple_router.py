@@ -773,9 +773,11 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
         if _compute_stage3_done_from_history(history):
             state["stage3_done"] = True
 
-    # stage4_opener_sent — check for contact opener in history
+    # stage4_opener_sent — check for contact opener in history.
+    # Use the distinctive phrase that appears in ALL gender variants
+    # ("אליכם" / "אלייך" / "אליך" all differ, but this phrase is constant).
     if not state.get("stage4_opener_sent"):
-        opener_marker = "כדי שנציג יוכל לחזור אליכם"
+        opener_marker   = "אשמח לשם מלא, עיר ומספר טלפון"
         showroom_marker = "כדי שנציג יתאם איתכם אישית"
         for m in history:
             if m.get("role") == "assistant":
@@ -1163,11 +1165,14 @@ def _build_system(
         "'המחיר מותאם אישית לפי סוג ועיצוב — אשמח שתשאירו פרטים ונחזור עם הצעה מסודרת 😊'"
     )
 
-    faqs = _find_faqs(user_msg)
-    block = _faq_block(faqs)
-    if block:
-        parts.append(block)
-        logger.info("FAQ match: %s", ", ".join(f["id"] for f in faqs))
+    # Suppress FAQ for fixed-message actions — Claude must send EXACTLY the
+    # template text and must not append URLs or extra info from the knowledge base.
+    if not action.is_fixed:
+        faqs = _find_faqs(user_msg)
+        block = _faq_block(faqs)
+        if block:
+            parts.append(block)
+            logger.info("FAQ match: %s", ", ".join(f["id"] for f in faqs))
 
     # ── DECIDED ACTION block — injected LAST (highest recency in context) ─────
     parts.append(_build_action_block(action, state, is_first_message))
