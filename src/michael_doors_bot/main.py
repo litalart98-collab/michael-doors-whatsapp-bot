@@ -1230,10 +1230,8 @@ async def reload_config(admin: str = Query(default="")):
 
 
 @app.get("/test-ai", response_class=JSONResponse)
-async def test_ai(admin: str = Query(default="")):
-    """Fire a single real AI call and report which provider responded."""
-    if (denied := _check_admin(admin)):
-        return denied
+async def test_ai():
+    """Fire a single real AI call and report which provider responded. No auth required."""
     from .engine import simple_router as _sr
     t0 = time.time()
     try:
