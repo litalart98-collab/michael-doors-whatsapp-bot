@@ -284,6 +284,10 @@ _PHONE_RE = re.compile(
     r'(?!\d)'
 )
 
+# Near-miss: looks like a phone (starts with 05) but has only 8–9 digits total
+# (missing 1–2 digits). Does NOT overlap with valid 10-digit numbers.
+_NEAR_MISS_PHONE_RE = re.compile(r'(?<!\d)(0[5][0-9]{6,7})(?!\d)')
+
 _HEB_WORD_RE = re.compile(r'^[\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{0,35}$')
 
 # Common single Hebrew words that are never a person's name
@@ -356,6 +360,11 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         elif raw.startswith('+972'):
             raw = '0' + raw[4:]
         extracted['phone'] = raw
+    else:
+        # No valid phone found — check for near-miss (looks like a phone but too short)
+        nm = _NEAR_MISS_PHONE_RE.search(t)
+        if nm:
+            extracted['_near_miss_phone'] = nm.group(0)
 
     # ── City ──────────────────────────────────────────────────────────────────
     for city in _ISRAELI_CITIES:
@@ -521,6 +530,11 @@ def _merge_state(existing: dict, new_fields: dict) -> dict:
                 if t not in existing_list:
                     existing_list.append(t)
             merged['active_topics'] = existing_list
+
+        elif key == '_near_miss_phone':
+            # Only store a near-miss when we don't have a valid phone yet
+            if not merged.get('phone'):
+                merged[key] = value
 
         elif key == 'customer_gender_locked':
             if not merged.get('customer_gender_locked'):
@@ -976,6 +990,18 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 f'INSTRUCTION: Send EXACTLY: {template_text!r}',
                 "  reply_text_2: null",
             ]
+
+    # ── Near-miss phone — targeted correction ────────────────────────────────
+    elif action.field_to_ask == "phone" and state.get("_near_miss_phone"):
+        near_miss = state["_near_miss_phone"]
+        digit_count = len(re.sub(r'\D', '', near_miss))
+        lines += [
+            f"INSTRUCTION: The customer sent '{near_miss}' which has only {digit_count} digits — it looks like a phone number with a missing digit.",
+            f"  Ask them to re-send their full phone number, mentioning '{near_miss}' as the number you received.",
+            f"  Example: \"המספר שקיבלתי ({near_miss}) נראה חסר ספרה — תוכלו לשלוח את המספר המלא?\"",
+            "  Keep it short (1–2 lines). Do NOT ask for any other field.",
+            f"  {gender_note}",
+        ]
 
     # ── Dynamic questions ─────────────────────────────────────────────────────
     elif action.template_key == "_summary_dynamic":
@@ -1608,6 +1634,11 @@ async def get_reply(
     state = _merge_state(state, extracted)
     _conv_state[sender] = state
 
+    # Clear near-miss marker once a valid phone has been collected by regex
+    if state.get("phone") and state.get("_near_miss_phone"):
+        state["_near_miss_phone"] = None
+        logger.info("[NEAR_MISS:CLEAR] Valid phone collected via regex | sender=%s", sender)
+
     if extracted:
         logger.info("[EXTRACT:REGEX] sender=%s | %s", sender, {k: v for k, v in extracted.items() if k != "_new_topics"})
 
@@ -1668,6 +1699,11 @@ async def get_reply(
     claude_fields = _extract_claude_fields(structured)
     state = _merge_state(state, claude_fields)
     _conv_state[sender] = state
+
+    # Clear near-miss marker once a valid phone has been collected by Claude
+    if state.get("phone") and state.get("_near_miss_phone"):
+        state["_near_miss_phone"] = None
+        logger.info("[NEAR_MISS:CLEAR] Valid phone collected via Claude | sender=%s", sender)
 
     # ── Post-call: store reply in history, then re-advance stage flags ─────────
     history_content = structured["reply_text"]
