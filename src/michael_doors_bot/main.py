@@ -273,6 +273,8 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["design_preference"] = result["design_preference"]
     if result.get("doors_count"):
         lead["doors_count"] = result["doors_count"]
+    if result.get("project_status"):
+        lead["project_status"] = result["project_status"]
     if result.get("handoff_to_human"):
         lead["handoff_to_human"] = True
         lead["handoff_time"] = datetime.utcnow().isoformat()
@@ -305,14 +307,17 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if len(phone_digits) == 10 and phone_digits.isdigit():
         phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
-    svc = lead.get("service_type", "")
-    dp  = lead.get("design_preference", "")
-    cnt = lead.get("doors_count")
-    frame = lead.get("needs_frame_removal")
-    # Build service_field: "דלת כניסה מעוצבת — נפחות — כולל משקוף — 2 יחידות"
+    svc    = lead.get("service_type", "")
+    dp     = lead.get("design_preference", "")
+    cnt    = lead.get("doors_count")
+    frame  = lead.get("needs_frame_removal")
+    pstatus = lead.get("project_status", "")
+    # Build service_field: "דלת כניסה מעוצבת — נפחות — שיפוץ — כולל משקוף — 2 יחידות"
     parts_svc = [svc] if svc else []
     if dp and dp != "לא סוכם":
         parts_svc.append(dp)
+    if pstatus:
+        parts_svc.append(pstatus)
     if frame is True:
         parts_svc.append("כולל החלפת משקוף")
     elif frame is False:
