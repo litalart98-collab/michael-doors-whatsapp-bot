@@ -294,12 +294,16 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
 
 
 async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None:
+    """Send lead to Google Sheets as soon as all 4 required fields are collected.
+    Re-sends automatically if the customer corrects any detail (fingerprint change)."""
     if not config.GOOGLE_SHEETS_WEBHOOK_URL:
         return
-    if not result.get("handoff_to_human"):
+
+    # Send as soon as name + phone + city + service_type are all present —
+    # no need to wait for handoff_to_human.
+    if not all(lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type")):
         return
-    if lead.get("sheets_sent"):
-        return
+
     # Prefer callback phone given by customer; fall back to WhatsApp sender number
     raw_phone = lead.get("callback_phone") or lead.get("phone", "")
     # Normalize to Israeli format: "972529330102@c.us" → "052-9330102"
@@ -311,10 +315,10 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if len(phone_digits) == 10 and phone_digits.isdigit():
         phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
 
-    svc    = lead.get("service_type", "")
-    dp     = lead.get("design_preference", "")
-    cnt    = lead.get("doors_count")
-    frame  = lead.get("needs_frame_removal")
+    svc     = lead.get("service_type", "")
+    dp      = lead.get("design_preference", "")
+    cnt     = lead.get("doors_count")
+    frame   = lead.get("needs_frame_removal")
     pstatus = lead.get("project_status", "")
     # Build service_field: "דלת כניסה מעוצבת — נפחות — שיפוץ — כולל משקוף — 2 יחידות"
     parts_svc = [svc] if svc else []
@@ -329,13 +333,15 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if cnt:
         parts_svc.append(f"{cnt} יחידות")
     service_field = " — ".join(parts_svc) if parts_svc else ""
-    referral = lead.get("referral_source", "")
+
+    referral  = lead.get("referral_source", "")
     returning = lead.get("is_returning_customer")
     notes_parts = []
     if referral:
         notes_parts.append(f"הופנה ע\"י: {referral}")
     if returning:
         notes_parts.append("לקוח חוזר")
+
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
@@ -345,18 +351,36 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
     }
+
+    # Fingerprint: detect if key data changed since the last send (customer corrections).
+    fingerprint = "|".join([
+        row["full_name"], row["phone"], row["city"],
+        row["service_type"], row["preferred_contact_hours"],
+    ])
+    if lead.get("sheets_sent") and lead.get("sheets_fingerprint") == fingerprint:
+        return  # identical data already in Sheets — nothing to do
+
+    # If this is an update (correction), mark it clearly in the notes column.
+    is_update = bool(lead.get("sheets_sent"))
+    if is_update:
+        update_note = "עדכון פרטים"
+        row["notes"] = (update_note + (" | " + row["notes"] if row["notes"] else "")).strip()
+
     sender_id = lead.get("phone", "")
     try:
         await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
-        # Only mark as sent after confirmed success
         lead["sheets_sent"] = True
+        lead["sheets_fingerprint"] = fingerprint
         if sender_id:
             fresh = _load_leads(is_test)
             if sender_id in fresh:
                 fresh[sender_id]["sheets_sent"] = True
+                fresh[sender_id]["sheets_fingerprint"] = fingerprint
                 _save_leads(fresh, is_test)
+        action = "UPDATED" if is_update else "APPENDED"
+        logger.info("[SHEETS:%s] phone=%s", action, row.get("phone"))
     except Exception as exc:
-        _record_error("send_fail", sender_id, f"sheets initial: {exc}")
+        _record_error("send_fail", sender_id, f"sheets: {exc}")
         _queue_sheets_retry(row, is_test, sender_id, exc)
 
 
