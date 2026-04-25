@@ -38,6 +38,9 @@ from .messages import (
     FINAL_HANDOFF,
     FINAL_HANDOFF_FEMALE,
     FINAL_HANDOFF_MALE,
+    FINAL_HANDOFF_SERVICE,
+    FINAL_HANDOFF_SERVICE_FEMALE,
+    FINAL_HANDOFF_SERVICE_MALE,
     QUESTION_TEMPLATES,
     ERROR_MSG as _ERR,
 )
@@ -253,6 +256,29 @@ def _is_v2_state(state: dict) -> bool:
 
 # ── Topic priority order ──────────────────────────────────────────────────────
 _TOPIC_PRIORITY = ["entrance_doors", "interior_doors", "mamad", "showroom_meeting", "repair"]
+
+# Topics that result in a price quote (vs. service / showroom visit)
+_PURCHASE_TOPICS: frozenset[str] = frozenset({"entrance_doors", "interior_doors", "mamad"})
+
+
+def _get_farewell_text(state: dict) -> str:
+    """
+    Return the correct farewell string based on active topics and customer gender.
+    - Purchase topics (entrance/interior/mamad) → "הצעת מחיר מסודרת"
+    - Service/info topics (repair/showroom)     → "כל הפרטים"
+    """
+    gender = state.get("customer_gender_locked")
+    active = set(state.get("active_topics") or [])
+    is_purchase = bool(active & _PURCHASE_TOPICS)
+
+    if is_purchase:
+        if gender == "female": return FINAL_HANDOFF_FEMALE
+        if gender == "male":   return FINAL_HANDOFF_MALE
+        return FINAL_HANDOFF
+    else:
+        if gender == "female": return FINAL_HANDOFF_SERVICE_FEMALE
+        if gender == "male":   return FINAL_HANDOFF_SERVICE_MALE
+        return FINAL_HANDOFF_SERVICE
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -988,15 +1014,10 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  reply_text_2: null",
             ]
         elif action.template_key == "_farewell_dynamic":
-            gender = state.get("customer_gender_locked")
-            farewell_text = (
-                FINAL_HANDOFF_FEMALE if gender == "female" else
-                FINAL_HANDOFF_MALE   if gender == "male"   else
-                FINAL_HANDOFF
-            )
+            farewell_text = _get_farewell_text(state)
             lines += [
                 f'INSTRUCTION: Send EXACTLY this text in reply_text: {farewell_text!r}',
-                "  ⛔ Do NOT change a single word. Do NOT add names, times, or any other text.",
+                "  ⛔ Do NOT change a single word. Do NOT add names, times, blessings, or any other text.",
                 "  ⛔ Do NOT write a custom farewell — use only the exact text above.",
                 "  Set handoff_to_human: true",
                 "  reply_text_2: null",
@@ -1728,6 +1749,15 @@ async def get_reply(
     if state.get("phone") and state.get("_near_miss_phone"):
         state["_near_miss_phone"] = None
         logger.info("[NEAR_MISS:CLEAR] Valid phone collected via Claude | sender=%s", sender)
+
+    # ── Stage 7 safety: hard-override farewell text ───────────────────────────
+    # Claude sometimes adds names, blessings, or times around the farewell.
+    # Overriding here guarantees the customer always receives the exact template.
+    if action.field_to_ask == "farewell":
+        structured["reply_text"] = _get_farewell_text(state)
+        structured["reply_text_2"] = None
+        structured["handoff_to_human"] = True
+        logger.info("[FAREWELL:OVERRIDE] sender=%s | text=%s", sender, structured["reply_text"])
 
     # ── Post-call: store reply in history, then re-advance stage flags ─────────
     history_content = structured["reply_text"]

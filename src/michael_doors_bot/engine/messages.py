@@ -26,9 +26,15 @@ CONTACT_OPENER: str = (
 
 STAGE3_QUESTION: str = "האם יש עוד משהו נוסף שנוכל לעזור לכם?"  # neutral/plural (gender unknown)
 
+# ── Purchase farewell (entrance / interior / mamad — a price quote will be sent) ──
 FINAL_HANDOFF: str          = "מעולה! נחזור אליכם בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
 FINAL_HANDOFF_FEMALE: str   = "מעולה! נחזור אלייך בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
 FINAL_HANDOFF_MALE: str     = "מעולה! נחזור אליך בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
+
+# ── Service farewell (repair / showroom — no price quote) ─────────────────────
+FINAL_HANDOFF_SERVICE: str          = "מעולה! נחזור אליכם בהקדם עם כל הפרטים 😊 יום נפלא! 💙"
+FINAL_HANDOFF_SERVICE_FEMALE: str   = "מעולה! נחזור אלייך בהקדם עם כל הפרטים 😊 יום נפלא! 💙"
+FINAL_HANDOFF_SERVICE_MALE: str     = "מעולה! נחזור אליך בהקדם עם כל הפרטים 😊 יום נפלא! 💙"
 
 # ── Phrasing templates ────────────────────────────────────────────────────────
 # Keyed by template_key from NextAction.
