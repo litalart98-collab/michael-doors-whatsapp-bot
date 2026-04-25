@@ -412,7 +412,9 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
                 and len(remainder) >= 2):
             extracted['full_name'] = remainder
     else:
-        # No phone — try explicit name-introduction markers only
+        # No phone in this message — try two strategies:
+
+        # 1) Explicit name-introduction markers (always)
         name_m = re.match(
             r'^(?:שמי|קוראים לי|שם שלי|אני)\s+([\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{1,30})',
             t, re.IGNORECASE,
@@ -421,6 +423,22 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             candidate = name_m.group(1).strip()
             if candidate not in _ISRAELI_CITIES:
                 extracted['full_name'] = candidate
+
+        # 2) Loose match: when phone is already in state and name is still missing,
+        #    a short Hebrew-only message is very likely just the customer's name.
+        #    Accepts first name alone (e.g. "ליטל" or "דוד כהן").
+        elif (
+            not extracted.get('full_name')
+            and (state or {}).get('phone')
+            and not (state or {}).get('full_name')
+        ):
+            plain = re.match(r'^([\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{1,30})$', t.strip())
+            if plain:
+                candidate = plain.group(1).strip()
+                if (candidate not in _ISRAELI_CITIES
+                        and candidate not in _NOT_A_NAME
+                        and len(candidate) >= 2):
+                    extracted['full_name'] = candidate
 
     # ── Gender ────────────────────────────────────────────────────────────────
     if re.search(r'מחפשת|צריכה\b|מתעניינת|שמחה\b|מרוצה\b|מעוניינת|רציתי|קניתי\b|הגעתי\b', t):
@@ -791,7 +809,7 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
     # Use the distinctive phrase that appears in ALL gender variants
     # ("אליכם" / "אלייך" / "אליך" all differ, but this phrase is constant).
     if not state.get("stage4_opener_sent"):
-        opener_marker   = "אשמח לשם מלא, עיר ומספר טלפון"
+        opener_marker   = "אשמח לשם, עיר ומספר טלפון"
         showroom_marker = "כדי שנציג יתאם איתכם אישית"
         for m in history:
             if m.get("role") == "assistant":
