@@ -696,9 +696,15 @@ def _decide_next_action(state: dict) -> NextAction:
         # repair-only skips Stage 3
         is_repair_only = (active == ["repair"])
 
-        # Stage 3: pre-contact wrap-up
+        # Stage 3: pre-contact wrap-up (gender-aware)
         if not state.get("stage3_done") and not is_repair_only:
-            return NextAction(3, "stage3_question", "stage3_question", True,
+            gender = state.get("customer_gender_locked")
+            stage3_key = (
+                "stage3_question_female" if gender == "female" else
+                "stage3_question_male"   if gender == "male"   else
+                "stage3_question"
+            )
+            return NextAction(3, "stage3_question", stage3_key, True,
                               "stage 3: ask if anything else before contact collection")
 
         # Stage 4: contact opener
@@ -743,11 +749,12 @@ def _decide_next_action(state: dict) -> NextAction:
 # ── Stage advancement (reads history, updates state flags) ────────────────────
 
 def _compute_stage3_done_from_history(history: list[dict]) -> bool:
-    """True if Stage 3 question has been sent AND customer replied after it."""
-    stage3_q = STAGE3_QUESTION  # "יש עוד משהו ספציפי שחשוב לכם?"
+    """True if Stage 3 question has been sent AND customer replied after it.
+    Detects all gender variants by matching the shared substring."""
+    _STAGE3_MARKER = "יש עוד משהו ספציפי שחשוב"  # present in all three variants
     found = False
     for msg in history:
-        if not found and msg.get("role") == "assistant" and stage3_q in msg.get("content", ""):
+        if not found and msg.get("role") == "assistant" and _STAGE3_MARKER in msg.get("content", ""):
             found = True
         elif found and msg.get("role") == "user":
             return True
@@ -911,9 +918,10 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
 
     # ── Fixed messages (non-first) ────────────────────────────────────────────
     elif action.is_fixed:
-        if action.template_key == "stage3_question":
+        if action.template_key in ("stage3_question", "stage3_question_female", "stage3_question_male"):
+            stage3_text = QUESTION_TEMPLATES.get(action.template_key, STAGE3_QUESTION)
             lines += [
-                f'INSTRUCTION: Send EXACTLY this text in reply_text: {STAGE3_QUESTION!r}',
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {stage3_text!r}',
                 "  Do NOT add any text before or after it.",
                 "  reply_text_2: null",
             ]

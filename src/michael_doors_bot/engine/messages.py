@@ -24,7 +24,7 @@ CONTACT_OPENER: str = (
     "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת, אשמח לשם מלא, עיר ומספר טלפון."
 )
 
-STAGE3_QUESTION: str = "יש עוד משהו ספציפי שחשוב לכם?"
+STAGE3_QUESTION: str = "יש עוד משהו ספציפי שחשוב לכם?"  # neutral/plural (gender unknown)
 
 FINAL_HANDOFF: str = "מעולה! נחזור אליכם בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
 
@@ -54,6 +54,10 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "ask_name":                  "על שם מי הפנייה?",
     "ask_city":                  "באיזו עיר מדובר?",
 
+    # Stage 3 gender variants
+    "stage3_question_female":    "יש עוד משהו ספציפי שחשוב לך?",
+    "stage3_question_male":      "יש עוד משהו ספציפי שחשוב לך?",
+
     # Callback time (gender-specific variants)
     "ask_callback_time_neutral": "מתי נוח שנחזור אליכם?",
     "ask_callback_time_female":  "מתי נוח שנחזור אלייך?",
@@ -71,8 +75,8 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "interior_catalog":          "הנה הקטלוג לדלתות פנים: https://www.michaeldoors.co.il/catalog/interior-smooth 😊",
 
     # Model/style follow-up (after catalog is sent)
-    "ask_entrance_model":        "יש דגם ספציפי שתפס אתכם ושתרצו שנכלול בהצעה?",
-    "ask_interior_model":        "יש סגנון ספציפי שתפס אתכם ושתרצו שנכלול בהצעה?",
+    "ask_entrance_model":        "יש דגם ספציפי שתפס אותכם ושתרצו שנכלול בהצעה?",
+    "ask_interior_model":        "יש סגנון ספציפי שתפס אותכם ושתרצו שנכלול בהצעה?",
 
     # Mamad scope (same wording as entrance scope but different field)
     "ask_mamad_scope":           "האם מדובר בדלת כולל משקוף, או דלת בלבד?",
