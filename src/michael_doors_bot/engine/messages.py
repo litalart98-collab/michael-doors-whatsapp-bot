@@ -24,7 +24,7 @@ CONTACT_OPENER: str = (
     "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת, אשמח לשם מלא, עיר ומספר טלפון."
 )
 
-STAGE3_QUESTION: str = "יש עוד משהו ספציפי שחשוב לכם?"  # neutral/plural (gender unknown)
+STAGE3_QUESTION: str = "האם יש עוד משהו נוסף שנוכל לעזור לכם?"  # neutral/plural (gender unknown)
 
 FINAL_HANDOFF: str          = "מעולה! נחזור אליכם בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
 FINAL_HANDOFF_FEMALE: str   = "מעולה! נחזור אלייך בהקדם עם הצעת מחיר מסודרת 😊 יום נפלא! 💙"
@@ -57,8 +57,8 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "ask_city":                  "באיזו עיר מדובר?",
 
     # Stage 3 gender variants
-    "stage3_question_female":    "יש עוד משהו ספציפי שחשוב לך?",
-    "stage3_question_male":      "יש עוד משהו ספציפי שחשוב לך?",
+    "stage3_question_female":    "האם יש עוד משהו נוסף שנוכל לעזור לך?",
+    "stage3_question_male":      "האם יש עוד משהו נוסף שנוכל לעזור לך?",
 
     # Callback time (gender-specific variants)
     "ask_callback_time_neutral": "מתי נוח שנחזור אליכם?",

@@ -767,7 +767,7 @@ def _decide_next_action(state: dict) -> NextAction:
 def _compute_stage3_done_from_history(history: list[dict]) -> bool:
     """True if Stage 3 question has been sent AND customer replied after it.
     Detects all gender variants by matching the shared substring."""
-    _STAGE3_MARKER = "יש עוד משהו ספציפי שחשוב"  # present in all three variants
+    _STAGE3_MARKER = "יש עוד משהו נוסף שנוכל"  # present in all three variants
     found = False
     for msg in history:
         if not found and msg.get("role") == "assistant" and _STAGE3_MARKER in msg.get("content", ""):
@@ -941,11 +941,17 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
     elif action.is_fixed:
         if action.template_key in ("stage3_question", "stage3_question_female", "stage3_question_male"):
             stage3_text = QUESTION_TEMPLATES.get(action.template_key, STAGE3_QUESTION)
+            flat_note = (
+                "  ⛔ entrance_style=flat — there is NO catalog for flat doors. Do NOT invent or send any URL."
+                if state.get("entrance_style") == "flat" or state.get("interior_style") == "flat"
+                else ""
+            )
             lines += [
                 f'INSTRUCTION: Send EXACTLY this text in reply_text: {stage3_text!r}',
                 "  ⛔ Do NOT add ANY text before or after it.",
-                "  ⛔ Do NOT include any URLs, catalog links, or website addresses.",
+                "  ⛔ Do NOT include any URLs, catalog links, or website addresses — not even michaeldoors.co.il.",
                 "  ⛔ Catalog sending is handled by a SEPARATE action — never send a catalog here.",
+                *(([flat_note]) if flat_note else []),
                 "  reply_text_2: null",
             ]
         elif action.template_key in ("contact_opener", "contact_opener_showroom"):
