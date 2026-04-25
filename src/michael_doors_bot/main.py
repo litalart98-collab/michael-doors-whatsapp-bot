@@ -275,6 +275,10 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["doors_count"] = result["doors_count"]
     if result.get("project_status"):
         lead["project_status"] = result["project_status"]
+    if result.get("referral_source"):
+        lead["referral_source"] = result["referral_source"]
+    if result.get("is_returning_customer") is not None:
+        lead["is_returning_customer"] = result["is_returning_customer"]
     if result.get("handoff_to_human"):
         lead["handoff_to_human"] = True
         lead["handoff_time"] = datetime.utcnow().isoformat()
@@ -325,6 +329,13 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     if cnt:
         parts_svc.append(f"{cnt} יחידות")
     service_field = " — ".join(parts_svc) if parts_svc else ""
+    referral = lead.get("referral_source", "")
+    returning = lead.get("is_returning_customer")
+    notes_parts = []
+    if referral:
+        notes_parts.append(f"הופנה ע\"י: {referral}")
+    if returning:
+        notes_parts.append("לקוח חוזר")
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
@@ -332,6 +343,7 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "datetime":                lead.get("firstContact", ""),
         "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
         "phone":                   phone_clean,
+        "notes":                   " | ".join(notes_parts),
     }
     sender_id = lead.get("phone", "")
     try:

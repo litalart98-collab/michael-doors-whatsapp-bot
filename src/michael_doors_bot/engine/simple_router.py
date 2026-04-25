@@ -684,6 +684,8 @@ def _parse_response(raw: str, sender: str) -> dict:
             "city":                    parsed.get("city"),
             "design_preference":       parsed.get("design_preference"),
             "project_status":          parsed.get("project_status"),
+            "referral_source":         parsed.get("referral_source"),
+            "is_returning_customer":   parsed.get("is_returning_customer"),
         }
     except Exception:
         # Claude returned plain text instead of JSON — use it directly as the reply
@@ -700,6 +702,7 @@ def _parse_response(raw: str, sender: str) -> dict:
                 "needs_installation": None, "full_name": None, "phone": None,
                 "service_type": None, "city": None, "doors_count": None,
                 "design_preference": None, "project_status": None,
+                "referral_source": None, "is_returning_customer": None,
             }
         logger.warning("Non-JSON empty response | sender=%s — raw: %s", sender, raw[:120])
         return {
@@ -710,6 +713,7 @@ def _parse_response(raw: str, sender: str) -> dict:
             "needs_installation": None, "full_name": None, "phone": None,
             "service_type": None, "city": None, "doors_count": None,
             "design_preference": None, "project_status": None,
+            "referral_source": None, "is_returning_customer": None,
         }
 
 
@@ -826,6 +830,8 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
                 "doors_count":             None,
                 "design_preference":       None,
                 "project_status":          None,
+                "referral_source":         None,
+                "is_returning_customer":   None,
             }
 
     # Mock mode — skip AI entirely (for UI testing without burning API credits)
@@ -843,6 +849,8 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             "service_type": None, "city": None, "doors_count": None,
             "design_preference": None,
             "project_status": None,
+            "referral_source": None,
+            "is_returning_customer": None,
         }
 
     # AI call (OpenRouter/GPT-4.1-mini or Claude)
