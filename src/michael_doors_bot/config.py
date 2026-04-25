@@ -47,7 +47,7 @@ DATA_DIR: str = os.getenv("DATA_DIR", "")
 
 # Admin secret for /diag and /conversations endpoints.
 # STRONGLY RECOMMENDED — without it, anyone can read all customer conversation data.
-ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "")
+ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "").strip()
 
 # Comma-separated phone numbers that bypass business-hours check (e.g. for testing).
 # Format: "972501234567,972509876543"  (no @c.us suffix needed — normalised below)
