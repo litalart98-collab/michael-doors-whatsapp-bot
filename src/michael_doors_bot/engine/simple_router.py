@@ -1,161 +1,163 @@
 """
-Scenario classifier + Claude service.
-Scenario classifier runs only on the first message of a conversation.
-All subsequent messages go directly to Claude.
+simple_router.py — State-machine-based conversation engine.
+
+Architecture:
+  Python decides WHAT to ask next (via _decide_next_action).
+  Claude decides HOW to phrase it (using DECIDED ACTION block in system prompt).
+
+Pipeline (per incoming message):
+  1.  Extract fields from customer message (regex layer)
+  2.  Detect new topics from message
+  3.  Merge extracted fields + topics into state
+  4.  Apply buffered style to current topic (_apply_style_to_topic)
+  5.  Advance stage flags (_advance_stage) — reads history, updates state
+  6.  Decide next action (_decide_next_action) — pure state function
+  7.  Build system prompt with DECIDED ACTION block injected at the end
+  8.  Call AI (OpenRouter/GPT-4.1-mini primary, Claude fallback)
+  9.  Parse Claude's JSON response (extracted_* fields)
+  10. Merge Claude's extracted fields into state
+  11. Re-advance stage flags (catch new history entries)
+  12. Save state + conversations to disk + Supabase
+  13. Return result dict
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
-from .messages import SCENARIO_RESPONSES as _MSG, ERROR_MSG as _ERR
+
+from .messages import (
+    PITCH,
+    CONTACT_OPENER,
+    STAGE3_QUESTION,
+    FINAL_HANDOFF,
+    QUESTION_TEMPLATES,
+    ERROR_MSG as _ERR,
+)
 
 logger = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_ROOT         = Path(__file__).parent.parent.parent.parent
-_PROMPT_PATH  = _ROOT / "src" / "prompts" / "systemPrompt.txt"
-_FAQ_PATH     = _ROOT / "src" / "data" / "faqBank.json"
+_ROOT        = Path(__file__).parent.parent.parent.parent
+_PROMPT_PATH = _ROOT / "src" / "prompts" / "systemPrompt.txt"
+_FAQ_PATH    = _ROOT / "src" / "data" / "faqBank.json"
 
-# DATA_DIR can point to a Render Persistent Disk (e.g. /data) so conversations
-# survive service restarts.  Falls back to project root if not configured.
-from .. import config as _cfg  # noqa: E402 (module-level import after Path setup)
+from .. import config as _cfg  # noqa: E402
 _DATA_DIR       = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
 _CONV_PATH      = _DATA_DIR / "conversations.json"
 _LAST_SEEN_PATH = _DATA_DIR / "last_seen.json"
 
-# Inactivity gap after which conversation history is reset (customer is treated as new)
-_SESSION_GAP = 24 * 3600  # seconds
+_SESSION_GAP = 24 * 3600  # seconds before treating customer as new
 
-# ── System prompt — loaded from Supabase (fallback: file) ────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
 def _load_system_prompt_sync() -> str:
     try:
         return _PROMPT_PATH.read_text(encoding="utf-8")
     except Exception as e:
-        logger.critical("[BOOT] FATAL: Failed to load system prompt from file: %s", e)
+        logger.critical("[BOOT] FATAL: Failed to load system prompt: %s", e)
         return ""
 
 _SYSTEM_PROMPT: str = _load_system_prompt_sync()
-logger.info("[BOOT] System prompt loaded from file (%d chars)", len(_SYSTEM_PROMPT))
+logger.info("[BOOT] System prompt loaded (%d chars)", len(_SYSTEM_PROMPT))
+
 
 async def _refresh_system_prompt() -> None:
-    """Reload system prompt from file (source of truth) and sync to Supabase."""
     global _SYSTEM_PROMPT
-    # 1. Always reload from file — the repo file is the source of truth
     fresh = _load_system_prompt_sync()
     if fresh:
         _SYSTEM_PROMPT = fresh
         DIAG_STATE["system_prompt_loaded"] = True
         DIAG_STATE["system_prompt_chars"] = len(fresh)
-        logger.info("[RELOAD] System prompt reloaded from file (%d chars)", len(fresh))
-        # 2. Push to Supabase so it stays in sync (for diagnostics / backup only)
+        logger.info("[RELOAD] System prompt reloaded (%d chars)", len(fresh))
         try:
             from ..providers.supabase_store import save_system_prompt
             ok = await save_system_prompt(fresh)
             if ok:
-                logger.info("[SUPABASE] System prompt synced to Supabase")
+                logger.info("[SUPABASE] System prompt synced")
         except Exception as e:
             logger.warning("[SUPABASE] Could not sync system prompt: %s", e)
     else:
-        logger.warning("[RELOAD] System prompt file was empty — keeping previous version")
+        logger.warning("[RELOAD] System prompt file was empty — keeping previous")
 
-# ── FAQ bank — loaded from Supabase (fallback: file) ─────────────────────────
+# ── FAQ bank ──────────────────────────────────────────────────────────────────
 def _load_faq_sync() -> list:
     try:
         return json.loads(_FAQ_PATH.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.error("[BOOT] Failed to load FAQ bank from file: %s", e)
+        logger.error("[BOOT] Failed to load FAQ bank: %s", e)
         return []
 
 _faq_bank: list[dict] = _load_faq_sync()
-logger.info("[BOOT] FAQ bank loaded from file (%d entries)", len(_faq_bank))
+logger.info("[BOOT] FAQ bank loaded (%d entries)", len(_faq_bank))
+
 
 async def _refresh_faq() -> None:
-    """Reload FAQ from file first, then try Supabase override."""
     global _faq_bank
-    # Always reload from file
     fresh_file = _load_faq_sync()
     if fresh_file:
         _faq_bank = fresh_file
         DIAG_STATE["faq_count"] = len(fresh_file)
-        logger.info("[RELOAD] FAQ bank reloaded from file (%d entries)", len(fresh_file))
-    # Then try Supabase (may override with newer data)
+        logger.info("[RELOAD] FAQ bank reloaded (%d entries)", len(fresh_file))
     try:
         from ..providers.supabase_store import load_faq
         entries = await load_faq()
         if entries:
             _faq_bank = entries
             DIAG_STATE["faq_count"] = len(entries)
-            logger.info("[SUPABASE] FAQ bank refreshed from Supabase (%d entries)", len(entries))
+            logger.info("[SUPABASE] FAQ bank refreshed (%d entries)", len(entries))
     except Exception as e:
         logger.warning("[SUPABASE] Could not refresh FAQ: %s", e)
 
-# ── Fix 8: FAQ / system-prompt consistency check ─────────────────────────────
+
 def _check_content_consistency() -> list[str]:
-    """Compare key facts between system prompt and FAQ bank.
-    Returns a list of discrepancy descriptions (empty = all consistent)."""
     issues: list[str] = []
     if not _SYSTEM_PROMPT or not _faq_bank:
         return issues
-
-    # Phone numbers
     prompt_phones = set(re.findall(r'0\d{2}-\d{7}', _SYSTEM_PROMPT))
     faq_phones: set[str] = set()
     for entry in _faq_bank:
         faq_phones.update(re.findall(r'0\d{2}-\d{7}', entry.get("answer", "")))
     conflict = faq_phones - prompt_phones
     if conflict:
-        issues.append(f"Phone number mismatch — FAQ contains {conflict} not in system prompt {prompt_phones}")
-
-    # Showroom address (street + number)
+        issues.append(f"Phone mismatch — FAQ has {conflict}, prompt has {prompt_phones}")
     prompt_addr = set(re.findall(r'בעלי המלאכה\s+\d+', _SYSTEM_PROMPT))
     faq_addr: set[str] = set()
     for entry in _faq_bank:
         faq_addr.update(re.findall(r'בעלי המלאכה\s+\d+', entry.get("answer", "")))
     if faq_addr and prompt_addr and faq_addr != prompt_addr:
         issues.append(f"Address mismatch — FAQ: {faq_addr}, prompt: {prompt_addr}")
-
-    # Friday closing hour
-    prompt_fri = set(re.findall(r'ו[׳\']?\s+(?:עד\s+)?(\d{1,2}):00', _SYSTEM_PROMPT))
-    faq_fri: set[str] = set()
-    for entry in _faq_bank:
-        faq_fri.update(re.findall(r'ו[׳\']?\s+(?:עד\s+)?(\d{1,2}):00', entry.get("answer", "")))
-    if faq_fri and prompt_fri and faq_fri != prompt_fri:
-        issues.append(f"Friday hours mismatch — FAQ: {faq_fri}:00, prompt: {prompt_fri}:00")
-
     return issues
-
 
 _consistency_issues = _check_content_consistency()
 for _issue in _consistency_issues:
-    logger.critical("[CONSISTENCY] System prompt / FAQ mismatch: %s", _issue)
+    logger.critical("[CONSISTENCY] %s", _issue)
 if not _consistency_issues and _faq_bank:
     logger.info("[BOOT] Content consistency check passed (%d FAQ entries)", len(_faq_bank))
 
-# ── Diagnostics state (read by main.py /diag endpoint) ───────────────────────
+# ── Diagnostics ───────────────────────────────────────────────────────────────
 DIAG_STATE: dict = {
-    "system_prompt_loaded": bool(_SYSTEM_PROMPT),
-    "system_prompt_chars":  len(_SYSTEM_PROMPT),
-    "faq_count":            len(_faq_bank),
-    "data_dir":             str(_DATA_DIR),
-    "consistency_issues":   _consistency_issues,
-    # AI provider tracking — updated on every _call_ai() invocation
-    "ai_primary":           f"openrouter/openai/gpt-4.1-mini" if _cfg.OPENROUTER_API_KEY else "claude/claude-sonnet-4-6",
-    "ai_fallback":          "claude/claude-sonnet-4-6" if _cfg.OPENROUTER_API_KEY else "none",
-    "openrouter_key_set":   bool(_cfg.OPENROUTER_API_KEY),
-    "last_ai_provider":     None,   # filled after first real AI call
-    "openrouter_failures":  0,
+    "system_prompt_loaded":  bool(_SYSTEM_PROMPT),
+    "system_prompt_chars":   len(_SYSTEM_PROMPT),
+    "faq_count":             len(_faq_bank),
+    "data_dir":              str(_DATA_DIR),
+    "consistency_issues":    _consistency_issues,
+    "ai_primary":            f"openrouter/openai/gpt-4.1-mini" if _cfg.OPENROUTER_API_KEY else "claude/claude-sonnet-4-6",
+    "ai_fallback":           "claude/claude-sonnet-4-6" if _cfg.OPENROUTER_API_KEY else "none",
+    "openrouter_key_set":    bool(_cfg.OPENROUTER_API_KEY),
+    "last_ai_provider":      None,
+    "openrouter_failures":   0,
     "last_openrouter_error": None,
 }
 
-# Max raw input length — truncated before hitting Claude to prevent abuse
 _MAX_INPUT_CHARS = 2000
 
-# ── Conversation history (in-memory, also persisted to disk) ──────────────────
+# ── Conversation history ──────────────────────────────────────────────────────
 _conversations: dict[str, list[dict]] = {}
-
 try:
     _conversations = json.loads(_CONV_PATH.read_text(encoding="utf-8"))
 except Exception:
@@ -169,10 +171,10 @@ def _save_conversations() -> None:
         pass
 
 
-# ── Per-sender structured conversation state ──────────────────────────────────
-# Stores verified field values extracted from the conversation.
-# Updated BEFORE every Claude call so Claude always sees the correct state.
-# Never lost between turns — fields accumulate until the session resets.
+# ══════════════════════════════════════════════════════════════════════════════
+# CONVERSATION STATE — NEW SCHEMA (v2 — state-machine based)
+# ══════════════════════════════════════════════════════════════════════════════
+
 _conv_state: dict[str, dict] = {}
 _STATE_PATH = _DATA_DIR / "conv_state.json"
 
@@ -192,29 +194,73 @@ def _save_conv_state() -> None:
 
 
 def _empty_conv_state() -> dict:
+    """Return a fresh v2 conversation state dict."""
     return {
-        "full_name": None,
-        "phone": None,
-        "city": None,
+        # ── Stage flags ──
+        "stage3_done":         False,  # True after Stage3 q sent AND customer replied
+        "stage4_opener_sent":  False,  # True after contact-opener message sent
+        "summary_sent":        False,  # True after Stage5 summary sent
+
+        # ── Topic tracking ──
+        "active_topics":       [],     # append-only list of detected topics
+        "current_active_topic": None,  # first incomplete topic in priority order
+
+        # ── Entrance door fields ──
+        "entrance_scope":        None,   # "with_frame" | "door_only"
+        "entrance_style":        None,   # "flat" | "designed" | "undecided"
+        "entrance_catalog_sent": False,
+        "entrance_model":        None,   # model name | "undecided"
+
+        # ── Interior door fields ──
+        "interior_project_type": None,   # "new" | "renovation" | "replacement"
+        "interior_quantity":     None,   # int
+        "interior_style":        None,   # "flat" | "designed" | "undecided"
+        "interior_catalog_sent": False,
+        "interior_model":        None,
+
+        # ── Mamad fields ──
+        "mamad_type":  None,   # "new" | "replacement"
+        "mamad_scope": None,   # "with_frame" | "door_only"
+
+        # ── Showroom ──
+        "showroom_requested": False,
+
+        # ── Style buffer ──
+        "_raw_style": None,  # temporary until topic is known
+
+        # ── Contact fields ──
+        "full_name":             None,
+        "phone":                 None,
+        "city":                  None,
         "preferred_contact_hours": None,
-        "service_type": None,
-        "project_status": None,
-        "needs_frame_removal": None,
-        "doors_count": None,
-        "design_preference": None,
-        "customer_gender_locked": None,
-        "active_topics": [],
-        "stage3_done": False,   # True once Stage 3 question has been sent AND answered
+
+        # ── Customer metadata ──
+        "customer_gender_locked": None,  # None | "female" | "male"
+        "service_type":           None,
+        "referral_source":        None,
+        "is_returning_customer":  None,
+
+        # ── Schema version (for migration guard) ──
+        "_v": 2,
     }
 
 
-# ── Known Israeli cities for city extraction ──────────────────────────────────
+def _is_v2_state(state: dict) -> bool:
+    return state.get("_v") == 2
+
+
+# ── Topic priority order ──────────────────────────────────────────────────────
+_TOPIC_PRIORITY = ["entrance_doors", "interior_doors", "mamad", "showroom_meeting", "repair"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIELD EXTRACTION — REGEX LAYER
+# ══════════════════════════════════════════════════════════════════════════════
+
 _ISRAELI_CITIES: set[str] = {
-    # Primary service area
     "נתיבות", "באר שבע", "אשקלון", "אשדוד", "אופקים", "שדרות", "רהט", "דימונה",
     "קריית גת", "קריית מלאכי", "ערד", "אילת", "מצפה רמון", "ירוחם", "עומר",
-    "להבים", "מיתר", "כסייפה", "חורה", "תל שבע", "רהט", "לקיה",
-    # Major cities
+    "להבים", "מיתר", "כסייפה", "חורה", "תל שבע", "לקיה",
     "תל אביב", "ירושלים", "חיפה", "ראשון לציון", "פתח תקווה", "נתניה",
     "בני ברק", "חולון", "רמת גן", "מודיעין", "כפר סבא", "הרצליה",
     "רחובות", "בת ים", "בית שמש", "עפולה", "נהריה", "טבריה", "לוד",
@@ -225,10 +271,9 @@ _ISRAELI_CITIES: set[str] = {
     "אום אל פחם", "שפרעם", "גבעתיים", "אריאל", "מעלה אדומים",
     "מודיעין עילית", "ביתר עילית", "בית שאן", "יוקנעם", "קצרין",
     "אלעד", "גבעת שמואל", "אור עקיבא", "נס ציונה", "גבעת ברנר",
-    "ב\"ש", "ת\"א",   # shorthands
+    'ב"ש', 'ת"א',
 }
 
-# Regex: Israeli phone numbers (0-prefix or 972-prefix, with optional separators)
 _PHONE_RE = re.compile(
     r'(?<!\d)'
     r'(\+?972[-\s]?|0)'
@@ -237,18 +282,61 @@ _PHONE_RE = re.compile(
     r'(?!\d)'
 )
 
-# Hebrew word pattern (used for name validation)
 _HEB_WORD_RE = re.compile(r'^[\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{0,35}$')
 
+# ── Topic patterns ────────────────────────────────────────────────────────────
+_TOPIC_PATTERNS: dict[str, re.Pattern] = {
+    "entrance_doors": re.compile(
+        r"דלת כניסה|דלתות כניסה"
+        r"|דלת חוץ|דלתות חוץ"
+        r"|דלת חיצונית|דלתות חיצוניות"
+        r"|דלת ראשית|דלתות ראשיות"
+        r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"
+        r"|כניסה לבית|כניסה לדירה|כניסה לבניין"
+        r"|נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|קלאסי|אומנויות|סביליה",
+        re.IGNORECASE,
+    ),
+    "interior_doors": re.compile(
+        r"דלת פנים|דלתות פנים"
+        r"|דלת לחדר|דלת חדר|דלתות חדר"
+        r"|דלת שינה|דלת שירותים|דלת אמבטיה|דלת מטבח|דלת סלון"
+        r"|דלתות פנימיות|פולימר",
+        re.IGNORECASE,
+    ),
+    "mamad": re.compile(
+        r'ממ"ד|ממד|מרחב מוגן|חדר ביטחון|דלת ממד',
+        re.IGNORECASE,
+    ),
+    "showroom_meeting": re.compile(
+        r"לבוא לאולם|תיאום ביקור|לראות מקרוב|מתי אפשר לבוא"
+        r"|לקבוע פגישה|לבוא לחנות|רוצה להגיע|אפשר לקבוע פגישה"
+        r"|אולם תצוגה|אולם התצוגה",
+        re.IGNORECASE,
+    ),
+    "repair": re.compile(
+        r"תיקון|תקלה|בעיה בדלת|הדלת לא נסגרת|הדלת לא נפתחת"
+        r"|הדלת תקועה|ציר שבור|מנעול שבור|ידית שבורה"
+        r"|פריצה|פרצו|שוד|חירום|עזרה דחופה"
+        r"|התפרקה|נשברה|שירות לדלת",
+        re.IGNORECASE,
+    ),
+}
 
-def _extract_fields_from_message(text: str) -> dict:
+
+def _detect_topics_from_message(msg: str) -> list[str]:
+    """Return list of topics detected in a message."""
+    return [topic for topic, pat in _TOPIC_PATTERNS.items() if pat.search(msg)]
+
+
+def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     """
-    Extract structured fields from a single customer message using regex.
-    Returns only non-null values for fields that were confidently found.
-    This runs BEFORE the Claude call so the extracted values are authoritative.
+    Regex extraction of structured fields from a customer message.
+    Returns only fields that were confidently found.
+    Uses state.current_active_topic to route style answers to the correct field.
     """
     extracted: dict = {}
     t = text.strip()
+    current_topic = (state or {}).get("current_active_topic")
 
     # ── Phone ─────────────────────────────────────────────────────────────────
     phone_match = _PHONE_RE.search(t)
@@ -265,42 +353,36 @@ def _extract_fields_from_message(text: str) -> dict:
         if city in t:
             extracted['city'] = city
             break
-    # Also detect "מאשקלון", "בנתיבות" etc. (preposition + city)
     if 'city' not in extracted:
-        city_prep = re.search(r'(?:מ|ב|ל|ו)(נתיבות|באר שבע|אשקלון|אשדוד|אופקים|שדרות|ירושלים|תל אביב|חיפה|ראשון לציון|פתח תקווה|נתניה|רחובות)', t)
+        city_prep = re.search(
+            r'(?:מ|ב|ל|ו)(נתיבות|באר שבע|אשקלון|אשדוד|אופקים|שדרות'
+            r'|ירושלים|תל אביב|חיפה|ראשון לציון|פתח תקווה|נתניה|רחובות)',
+            t)
         if city_prep:
             extracted['city'] = city_prep.group(1)
 
-    # ── Name — Hebrew word(s) adjacent to phone number ────────────────────────
+    # ── Name ──────────────────────────────────────────────────────────────────
     if phone_match:
-        # Text before the phone number
         before = t[:phone_match.start()].strip()
-        # Remove common name-introduction prefixes
-        before = re.sub(r'^(?:שמי|קוראים לי|אני|שם שלי|השם שלי)\s*', '', before, flags=re.IGNORECASE).strip()
-        # Valid name: 2–4 Hebrew words, no digits, not a city
-        if (before
-                and _HEB_WORD_RE.match(before)
-                and before not in _ISRAELI_CITIES
-                and len(before) >= 2):
+        before = re.sub(
+            r'^(?:שמי|קוראים לי|אני|שם שלי|השם שלי)\s*', '', before,
+            flags=re.IGNORECASE
+        ).strip()
+        if (before and _HEB_WORD_RE.match(before)
+                and before not in _ISRAELI_CITIES and len(before) >= 2):
             extracted['full_name'] = before
-
         if 'full_name' not in extracted:
-            # Check after phone (e.g. "0523989366 ליטל")
             after = t[phone_match.end():].strip()
-            # Strip city from after_phone so it doesn't get picked up as name
             if 'city' in extracted:
                 after = after.replace(extracted['city'], '').strip()
             after = re.sub(r'^[,\s]+|[,\s]+$', '', after).strip()
-            if (after
-                    and _HEB_WORD_RE.match(after)
-                    and after not in _ISRAELI_CITIES
-                    and len(after) >= 2):
+            if (after and _HEB_WORD_RE.match(after)
+                    and after not in _ISRAELI_CITIES and len(after) >= 2):
                 extracted['full_name'] = after
     else:
-        # No phone — look for explicit name markers
         name_m = re.match(
             r'^(?:שמי|קוראים לי|שם שלי|אני)\s+([\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{1,30})',
-            t, re.IGNORECASE
+            t, re.IGNORECASE,
         )
         if name_m:
             candidate = name_m.group(1).strip()
@@ -313,313 +395,576 @@ def _extract_fields_from_message(text: str) -> dict:
     elif re.search(r'מחפש\b|צריך\b|מתעניין\b|שמח\b|מעוניין\b', t):
         extracted['customer_gender_locked'] = 'male'
 
-    # ── doors_count ───────────────────────────────────────────────────────────
+    # ── Entrance / mamad scope ────────────────────────────────────────────────
+    if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
+        scope_val = "with_frame"
+        if current_topic == "mamad":
+            extracted['mamad_scope'] = scope_val
+        else:
+            extracted['entrance_scope'] = scope_val
+    elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
+        scope_val = "door_only"
+        if current_topic == "mamad":
+            extracted['mamad_scope'] = scope_val
+        else:
+            extracted['entrance_scope'] = scope_val
+
+    # ── Style ─────────────────────────────────────────────────────────────────
+    # Route to topic-specific field based on current active topic; buffer if unknown
+    if re.search(r'\bחלקה\b|\bחלקות\b', t, re.IGNORECASE):
+        style_val = "flat"
+        if current_topic == "entrance_doors":
+            extracted['entrance_style'] = style_val
+        elif current_topic == "interior_doors":
+            extracted['interior_style'] = style_val
+        else:
+            extracted['_raw_style'] = style_val
+    elif re.search(r'\bמעוצבת\b|\bמעוצבות\b', t, re.IGNORECASE):
+        style_val = "designed"
+        if current_topic == "entrance_doors":
+            extracted['entrance_style'] = style_val
+        elif current_topic == "interior_doors":
+            extracted['interior_style'] = style_val
+        else:
+            extracted['_raw_style'] = style_val
+
+    # ── Interior project type ─────────────────────────────────────────────────
+    if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
+        extracted['interior_project_type'] = 'new'
+    elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים', t, re.IGNORECASE):
+        extracted['interior_project_type'] = 'renovation'
+    elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה|קיימות', t, re.IGNORECASE):
+        extracted['interior_project_type'] = 'replacement'
+
+    # ── Mamad type ────────────────────────────────────────────────────────────
+    if re.search(r'ממ.?ד חדש|מרחב מוגן חדש', t, re.IGNORECASE):
+        extracted['mamad_type'] = 'new'
+    elif re.search(r'ממ.?ד קיים|להחליף.*ממ.?ד|ממ.?ד.*להחליף', t, re.IGNORECASE):
+        extracted['mamad_type'] = 'replacement'
+
+    # ── Interior quantity ─────────────────────────────────────────────────────
     count_m = re.search(r'(\d+)\s*דלתות', t)
     if count_m:
-        extracted['doors_count'] = int(count_m.group(1))
+        extracted['interior_quantity'] = int(count_m.group(1))
 
-    # ── needs_frame_removal ───────────────────────────────────────────────────
-    if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
-        extracted['needs_frame_removal'] = True
-    elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
-        extracted['needs_frame_removal'] = False
+    # ── Showroom requested ────────────────────────────────────────────────────
+    if re.search(
+        r'לבוא לאולם|לבקר|לבוא אליכם|לקבוע פגישה|ביקור באולם|מתי אפשר לבוא'
+        r'|אפשר להגיע|רוצה להגיע|לראות מקרוב',
+        t, re.IGNORECASE
+    ):
+        extracted['showroom_requested'] = True
 
-    # ── design_preference ─────────────────────────────────────────────────────
-    if re.search(r'\bחלקה\b', t, re.IGNORECASE):
-        extracted['design_preference'] = 'חלקה'
-    elif re.search(r'\bמעוצבת\b', t, re.IGNORECASE):
-        extracted['design_preference'] = 'מעוצבת'
-
-    # ── project_status ────────────────────────────────────────────────────────
-    if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
-        extracted['project_status'] = 'בית חדש'
-    elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים', t, re.IGNORECASE):
-        extracted['project_status'] = 'שיפוץ'
-    elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה|קיימת', t, re.IGNORECASE):
-        extracted['project_status'] = 'החלפה'
-
-    # ── preferred_contact_hours ───────────────────────────────────────────────
+    # ── Preferred contact hours ───────────────────────────────────────────────
     hours_m = re.search(r'אחרי\s*(\d{1,2})', t)
     if hours_m:
         h = int(hours_m.group(1))
         if h < 12:
-            h += 12  # "אחרי 5" → 17:00
+            h += 12
         extracted['preferred_contact_hours'] = f'אחרי {h:02d}:00'
-    elif re.search(r'בוקר\b', t) and re.search(r'בין\s*(\d)', t):
-        extracted['preferred_contact_hours'] = 'בבוקר'
     elif re.search(r'בכל שעה|בכל זמן|לא משנה', t, re.IGNORECASE):
         extracted['preferred_contact_hours'] = 'בכל שעה'
 
     return extracted
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# STATE MERGING
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _merge_state(existing: dict, new_fields: dict) -> dict:
     """
-    Merge new_fields into the existing state dict.
-    RULE: never overwrite a non-null/non-False value with null.
-    gender_locked is set once and never changed.
-    active_topics is a union (append-only).
+    Merge new_fields into existing state dict.
+    Rules:
+    - Never overwrite a non-null field with null.
+    - gender_locked: set once, never changed.
+    - active_topics: union (append-only).
+    - Boolean flags: only update False→True, never True→False.
+    - _new_topics key: appended to active_topics, then dropped.
     """
     merged = dict(existing)
+
     for key, value in new_fields.items():
-        # Skip null/empty new values — existing wins
         if value is None:
             continue
         if isinstance(value, str) and not value.strip():
             continue
 
-        if key == 'active_topics':
+        if key == '_new_topics':
             existing_list = merged.get('active_topics') or []
-            if isinstance(value, list):
-                for item in value:
-                    if item not in existing_list:
-                        existing_list.append(item)
+            topics = value if isinstance(value, list) else [value]
+            for t in topics:
+                if t not in existing_list:
+                    existing_list.append(t)
             merged['active_topics'] = existing_list
 
         elif key == 'customer_gender_locked':
-            # Lock once — never change after first detection
             if not merged.get('customer_gender_locked'):
                 merged[key] = value
 
-        elif key == 'needs_frame_removal':
-            # False is a valid value — only skip if existing is already set
-            if merged.get(key) is None:
-                merged[key] = value
+        elif key in ('stage3_done', 'stage4_opener_sent', 'summary_sent',
+                     'entrance_catalog_sent', 'interior_catalog_sent',
+                     'showroom_requested'):
+            # Boolean flags — only update False→True
+            if value and not merged.get(key):
+                merged[key] = True
 
         else:
-            # For all other fields: new value wins if it's non-null
+            # All other fields: only update if currently None
             if merged.get(key) is None:
                 merged[key] = value
 
     return merged
 
 
-def _compute_stage3_done(state: dict, history: list[dict]) -> bool:
-    """
-    Returns True if Stage 3 question has been sent AND the customer has replied after it.
-    Uses conversation history for authoritative ground-truth detection.
-    """
-    if state.get('stage3_done'):
+# ══════════════════════════════════════════════════════════════════════════════
+# NEXT ACTION DECISION — STATE MACHINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class NextAction:
+    stage:        int   # 1–7
+    field_to_ask: str   # logical field name
+    template_key: str   # key into QUESTION_TEMPLATES (or special value)
+    is_fixed:     bool  # True = send template verbatim, no rephrasing
+    context:      str   # human-readable description for logs / action block
+
+
+def _topic_complete(topic: str, state: dict) -> bool:
+    """Return True when all required fields for the given topic are collected."""
+    if topic == "entrance_doors":
+        scope = state.get("entrance_scope")
+        style = state.get("entrance_style")
+        if scope is None or style is None:
+            return False
+        if style == "flat":
+            return True
+        # designed or undecided → need catalog sent + model collected
+        return state.get("entrance_model") is not None
+
+    if topic == "interior_doors":
+        if state.get("interior_project_type") is None:
+            return False
+        if state.get("interior_quantity") is None:
+            return False
+        style = state.get("interior_style")
+        if style is None:
+            return False
+        if style == "flat":
+            return True
+        return state.get("interior_model") is not None
+
+    if topic == "mamad":
+        return (
+            state.get("mamad_type") is not None
+            and state.get("mamad_scope") is not None
+        )
+
+    if topic == "showroom_meeting":
+        # Only complete when customer explicitly requested showroom (fix 2)
+        return bool(state.get("showroom_requested"))
+
+    if topic == "repair":
+        # Repair has no product fields — always "complete" for queue purposes
+        # (goes straight to contact collection)
         return True
-    stage3_q = "יש עוד משהו ספציפי שחשוב לכם?"
-    found_stage3 = False
-    for msg in history:
-        if not found_stage3 and msg.get('role') == 'assistant' and stage3_q in msg.get('content', ''):
-            found_stage3 = True
-        elif found_stage3 and msg.get('role') == 'user':
-            return True  # Customer replied after Stage 3 question → done
+
     return False
 
 
-def _state_context_block(state: dict, history: list[dict] | None = None) -> str:
+def _compute_current_topic(state: dict) -> str | None:
+    """Return the first incomplete topic in priority order (fix 1)."""
+    active = state.get("active_topics") or []
+    for topic in _TOPIC_PRIORITY:
+        if topic in active and not _topic_complete(topic, state):
+            return topic
+    return None
+
+
+def _next_topic_action(topic: str, state: dict) -> NextAction | None:
+    """Return the next required NextAction for the given topic."""
+    if topic == "entrance_doors":
+        if state.get("entrance_scope") is None:
+            return NextAction(2, "entrance_scope", "ask_entrance_scope", False,
+                              "entrance: ask scope (with_frame or door_only)")
+        if state.get("entrance_style") is None:
+            return NextAction(2, "entrance_style", "ask_entrance_style", False,
+                              "entrance: ask style (flat or designed)")
+        if state.get("entrance_style") in ("designed", "undecided"):
+            if not state.get("entrance_catalog_sent"):
+                return NextAction(2, "entrance_catalog", "entrance_catalog", True,
+                                  "entrance: send catalog URL (fixed message)")
+            if state.get("entrance_model") is None:
+                return NextAction(2, "entrance_model", "ask_entrance_model", False,
+                                  "entrance: ask specific model preference")
+        return None  # complete
+
+    if topic == "interior_doors":
+        if state.get("interior_project_type") is None:
+            return NextAction(2, "interior_project_type", "ask_interior_project_type", False,
+                              "interior: ask project type (new/renovation/replacement)")
+        if state.get("interior_quantity") is None:
+            return NextAction(2, "interior_quantity", "ask_interior_quantity", False,
+                              "interior: ask quantity")
+        if state.get("interior_style") is None:
+            return NextAction(2, "interior_style", "ask_interior_style", False,
+                              "interior: ask style (flat or designed)")
+        if state.get("interior_style") in ("designed", "undecided"):
+            if not state.get("interior_catalog_sent"):
+                return NextAction(2, "interior_catalog", "interior_catalog", True,
+                                  "interior: send catalog URL (fixed message)")
+            if state.get("interior_model") is None:
+                return NextAction(2, "interior_model", "ask_interior_model", False,
+                                  "interior: ask specific model/style preference")
+        return None
+
+    if topic == "mamad":
+        if state.get("mamad_type") is None:
+            return NextAction(2, "mamad_type", "ask_mamad_type", False,
+                              "mamad: ask type (new or replacing existing)")
+        if state.get("mamad_scope") is None:
+            return NextAction(2, "mamad_scope", "ask_mamad_scope", False,
+                              "mamad: ask scope (with_frame or door_only)")
+        return None
+
+    if topic == "showroom_meeting":
+        # showroom_meeting: just needs the customer to confirm they want to visit
+        # (showroom_requested is set by detection); queue will complete once True
+        return None
+
+    if topic == "repair":
+        # repair: no product questions — skips directly to contact
+        return None
+
+    return None
+
+
+def _get_callback_key(state: dict) -> str:
+    gender = state.get("customer_gender_locked")
+    if gender == "female":
+        return "ask_callback_time_female"
+    if gender == "male":
+        return "ask_callback_time_male"
+    return "ask_callback_time_neutral"
+
+
+def _decide_next_action(state: dict) -> NextAction:
     """
-    Build a context block injected into every Claude call.
-    Shows Claude exactly which fields are already collected, which topic queue is active,
-    what the next required question is, and whether Stage 3 has been completed.
+    Pure state machine — decide the next action based solely on conversation state.
+    Called after _advance_stage() has updated all flags.
+    Fix 3: always returns something (safe fallback if nothing matched).
     """
-    if not state:
-        return ""
+    try:
+        active = state.get("active_topics") or []
+        current_topic = state.get("current_active_topic")
 
-    def tick(val) -> str:
-        if val is None:
-            return "❌ NOT YET COLLECTED"
-        if val is False:
-            return "✅ false"
-        if val is True:
-            return "✅ true"
-        return f"✅ {val}"
-
-    phone  = state.get('phone')
-    name   = state.get('full_name')
-    city   = state.get('city')
-    hours  = state.get('preferred_contact_hours')
-    gender = state.get('customer_gender_locked')
-    nfr    = state.get('needs_frame_removal')
-    dp     = state.get('design_preference')
-    dc     = state.get('doors_count')
-    ps     = state.get('project_status')
-
-    lines = [
-        "## VERIFIED CONVERSATION STATE",
-        "These values were extracted by the pre-processing layer. They are authoritative.",
-        "⚠️  Do NOT ask the customer for any field marked ✅ — it is already known.",
-        "",
-        "Contact fields:",
-        f"  phone:                   {tick(phone)}",
-        f"  full_name:               {tick(name)}",
-        f"  city:                    {tick(city)}",
-        f"  preferred_contact_hours: {tick(hours)}",
-        "",
-        "Product fields:",
-        f"  needs_frame_removal: {tick(nfr)}",
-        f"  design_preference:   {tick(dp)}",
-        f"  doors_count:         {tick(dc)}",
-        f"  project_status:      {tick(ps)}",
-        "",
-    ]
-
-    # Gender — explicit instruction
-    if gender == 'female':
-        lines.append("Gender: FEMALE — use לך / אלייך / תוכלי / תשאירי / תרצי in every reply.")
-    elif gender == 'male':
-        lines.append("Gender: MALE — use לך / אליך / תוכל / תשאיר / תרצה in every reply.")
-    else:
-        lines.append("Gender: UNKNOWN — use neutral plural: לכם / אליכם / תוכלו / תשאירו.")
-
-    # ── Topic queue status ────────────────────────────────────────────────────
-    active_topics = state.get('active_topics') or []
-
-    if active_topics:
-        lines.append("")
-        lines.append("Topic queue status:")
-        lines.append(f"  active_topics: [{', '.join(active_topics)}]")
-
-        # Walk topics in priority order and find the first incomplete one
-        topic_priority = ['entrance_doors', 'interior_doors', 'mamad', 'showroom_meeting']
-        current_topic = None
-        next_q_label = None
-
-        for topic in topic_priority:
-            if topic not in active_topics:
-                continue
-            if topic == 'entrance_doors':
-                lines.append("  entrance_doors queue:")
-                lines.append(f"    Step 1 needs_frame_removal: {tick(nfr)}")
-                lines.append(f"    Step 2 design_preference:   {tick(dp)}")
-                if nfr is None:
-                    current_topic = topic
-                    next_q_label = 'entrance Step 1: "האם מדובר בדלת כולל משקוף, או דלת בלבד?"'
-                    break
-                elif dp is None:
-                    current_topic = topic
-                    next_q_label = 'entrance Step 2: "דלת חלקה או מעוצבת?"'
-                    break
-                else:
-                    lines.append("    ✅ entrance_doors queue COMPLETE")
-            elif topic == 'interior_doors':
-                lines.append("  interior_doors queue:")
-                lines.append(f"    Step 1 project_status:    {tick(ps)}")
-                lines.append(f"    Step 2 doors_count:       {tick(dc)}")
-                lines.append(f"    Step 3 design_preference: {tick(dp)}")
-                if ps is None:
-                    current_topic = topic
-                    next_q_label = 'interior Step 1: "מדובר בבית חדש, שיפוץ, או החלפה של דלתות קיימות?"'
-                    break
-                elif dc is None:
-                    current_topic = topic
-                    next_q_label = 'interior Step 2: "כמה דלתות פנים בערך?"'
-                    break
-                elif dp is None:
-                    current_topic = topic
-                    next_q_label = 'interior Step 3: "הדלתות חלקות או מעוצבות?"'
-                    break
-                else:
-                    lines.append("    ✅ interior_doors queue COMPLETE")
-            elif topic == 'mamad':
-                lines.append("  mamad queue:")
-                lines.append(f"    Step 1 project_status:    {tick(ps)}")
-                lines.append(f"    Step 2 needs_frame_removal: {tick(nfr)}")
-                if ps is None:
-                    current_topic = topic
-                    next_q_label = 'mamad Step 1: "ממ\\"ד חדש, או יש ממ\\"ד קיים שרוצים להחליף את דלתו?"'
-                    break
-                elif nfr is None:
-                    current_topic = topic
-                    next_q_label = 'mamad Step 2: "האם מדובר בדלת כולל משקוף, או דלת בלבד?"'
-                    break
-                else:
-                    lines.append("    ✅ mamad queue COMPLETE")
-            elif topic == 'showroom_meeting':
-                lines.append("  showroom_meeting: ✅ no product fields required")
+        # ── Stage 2: topic qualification ──────────────────────────────────────
+        if not active:
+            # No topics detected yet
+            return NextAction(2, "topic_detection", "ask_topic_clarification", False,
+                              "no topics detected — ask what type of door they need")
 
         if current_topic:
-            lines.append(f"  current_active_topic: {current_topic} (IN PROGRESS)")
-            lines.append(f"  → NEXT REQUIRED QUESTION: {next_q_label}")
-            lines.append("  ⛔ Do NOT ask any question other than the one above.")
-            lines.append("  ⛔ Do NOT proceed to Stage 3 — topic queue is not complete yet.")
-        else:
-            # All queues complete
-            stage3_done = state.get('stage3_done', False)
-            if not stage3_done and history:
-                stage3_done = _compute_stage3_done(state, history)
+            action = _next_topic_action(current_topic, state)
+            if action:
+                return action
 
-            lines.append("  current_active_topic: null")
-            lines.append("  ✅ ALL TOPIC QUEUES COMPLETE — Completion Guard passed.")
+        # ── All topic queues complete ─────────────────────────────────────────
 
-            if not stage3_done:
-                lines.append("")
-                lines.append("→ CURRENT REQUIRED ACTION: Stage 3")
-                lines.append('  Send EXACTLY: "יש עוד משהו ספציפי שחשוב לכם?"')
-                lines.append("  ⛔ Do NOT add any text before or after this question.")
-                lines.append("  ⛔ Do NOT go to contact collection yet.")
-                lines.append("  ⛔ This message must be reply_text only (reply_text_2: null).")
-            else:
-                lines.append("  ✅ Stage 3 DONE — customer already replied to it.")
-                lines.append("")
-                lines.append("→ CURRENT REQUIRED ACTION: Stage 4 (contact collection)")
-                lines.append('  ⛔ Do NOT ask "יש עוד משהו ספציפי שחשוב לכם?" again — it is permanently closed.')
-                lines.append("")
-                # Check if Stage 4 contact opener has already been sent
-                _stage4_opener = "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת"
-                _opener_sent = history and any(
-                    m.get('role') == 'assistant' and _stage4_opener in m.get('content', '')
-                    for m in history
-                )
-                if not _opener_sent:
-                    lines.append("  Stage 4 opener NOT YET SENT — send it now:")
-                    lines.append('  → EXACT TEXT: "כדי שנציג יוכל לחזור אליכם עם התאמה מסודרת, אשמח לפרטים ליצירת קשר."')
-                    lines.append("  ⛔ Send this message ALONE — do NOT append any question to it.")
-                    lines.append("  ⛔ Wait for customer reply before asking for phone/name/city.")
-                else:
-                    if not phone:
-                        lines.append('  NEXT CONTACT FIELD: phone → ask "מה מספר הטלפון?"')
-                    elif not name:
-                        lines.append('  NEXT CONTACT FIELD: full_name → ask "על שם מי הפנייה?"')
-                    elif not city:
-                        lines.append('  NEXT CONTACT FIELD: city → ask "באיזו עיר מדובר?"')
-                    else:
-                        lines.append("  NEXT CONTACT FIELD: all collected → proceed to Stage 5 summary.")
+        # repair-only skips Stage 3
+        is_repair_only = (active == ["repair"])
+
+        # Stage 3: pre-contact wrap-up
+        if not state.get("stage3_done") and not is_repair_only:
+            return NextAction(3, "stage3_question", "stage3_question", True,
+                              "stage 3: ask if anything else before contact collection")
+
+        # Stage 4: contact opener
+        if not state.get("stage4_opener_sent"):
+            opener_key = (
+                "contact_opener_showroom"
+                if "showroom_meeting" in active
+                else "contact_opener"
+            )
+            return NextAction(4, "contact_opener", opener_key, True,
+                              "stage 4: send contact-collection opener (no question appended)")
+
+        # Stage 4: collect contact fields one at a time
+        if not state.get("phone"):
+            return NextAction(4, "phone", "ask_phone", False, "stage 4: ask phone")
+        if not state.get("full_name"):
+            return NextAction(4, "full_name", "ask_name", False, "stage 4: ask name")
+        if not state.get("city"):
+            return NextAction(4, "city", "ask_city", False, "stage 4: ask city")
+
+        # Stage 5: summary + confirmation
+        if not state.get("summary_sent"):
+            return NextAction(5, "summary", "_summary_dynamic", False,
+                              "stage 5: send summary and ask הכל נכון?")
+
+        # Stage 6: callback time
+        if not state.get("preferred_contact_hours"):
+            return NextAction(6, "preferred_contact_hours", _get_callback_key(state), False,
+                              "stage 6: ask preferred callback time")
+
+        # Stage 7: farewell + handoff
+        return NextAction(7, "farewell", "_farewell_dynamic", True,
+                          "stage 7: send farewell message, set handoff_to_human=true")
+
+    except Exception as exc:
+        logger.error("[DECIDE:ERR] Unexpected error in _decide_next_action: %s", exc)
+        # Fix 3: final fallback — always return something safe
+        return NextAction(2, "fallback", "ask_safe_fallback", False,
+                          "fallback: unexpected state — ask safe clarification")
+
+
+# ── Stage advancement (reads history, updates state flags) ────────────────────
+
+def _compute_stage3_done_from_history(history: list[dict]) -> bool:
+    """True if Stage 3 question has been sent AND customer replied after it."""
+    stage3_q = STAGE3_QUESTION  # "יש עוד משהו ספציפי שחשוב לכם?"
+    found = False
+    for msg in history:
+        if not found and msg.get("role") == "assistant" and stage3_q in msg.get("content", ""):
+            found = True
+        elif found and msg.get("role") == "user":
+            return True
+    return False
+
+
+def _advance_stage(state: dict, history: list[dict]) -> None:
+    """
+    Update all stage flags based on conversation history.
+    Called before _decide_next_action() and again after the AI reply is stored.
+    """
+    # stage3_done
+    if not state.get("stage3_done"):
+        if _compute_stage3_done_from_history(history):
+            state["stage3_done"] = True
+
+    # stage4_opener_sent — check for contact opener in history
+    if not state.get("stage4_opener_sent"):
+        opener_marker = "כדי שנציג יוכל לחזור אליכם"
+        showroom_marker = "כדי שנציג יתאם איתכם אישית"
+        for m in history:
+            if m.get("role") == "assistant":
+                content = m.get("content", "")
+                if opener_marker in content or showroom_marker in content:
+                    state["stage4_opener_sent"] = True
+                    break
+
+    # summary_sent — check for summary marker
+    if not state.get("summary_sent"):
+        for m in history:
+            if m.get("role") == "assistant" and "הכל נכון?" in m.get("content", ""):
+                state["summary_sent"] = True
+                break
+
+    # entrance_catalog_sent
+    if not state.get("entrance_catalog_sent"):
+        for m in history:
+            if m.get("role") == "assistant" and "catalog/entry-designed" in m.get("content", ""):
+                state["entrance_catalog_sent"] = True
+                break
+
+    # interior_catalog_sent
+    if not state.get("interior_catalog_sent"):
+        for m in history:
+            if m.get("role") == "assistant" and "catalog/interior-smooth" in m.get("content", ""):
+                state["interior_catalog_sent"] = True
+                break
+
+    # Update current_active_topic (fix 1: always first incomplete topic by priority)
+    state["current_active_topic"] = _compute_current_topic(state)
+
+
+# ── Style buffer routing ──────────────────────────────────────────────────────
+
+def _apply_style_to_topic(state: dict) -> None:
+    """Route buffered _raw_style to the correct topic-specific field."""
+    raw = state.get("_raw_style")
+    if raw is None:
+        return
+    current = state.get("current_active_topic")
+    if current == "entrance_doors" and state.get("entrance_style") is None:
+        state["entrance_style"] = raw
+        state["_raw_style"] = None
+        logger.info("[STYLE:APPLY] entrance_style = %s (from buffer)", raw)
+    elif current == "interior_doors" and state.get("interior_style") is None:
+        state["interior_style"] = raw
+        state["_raw_style"] = None
+        logger.info("[STYLE:APPLY] interior_style = %s (from buffer)", raw)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SYSTEM PROMPT BUILDING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _state_summary_block(state: dict) -> str:
+    """
+    Build a concise state summary block injected into every Claude call.
+    Shows Claude all collected fields so it never re-asks them.
+    """
+    def v(val) -> str:
+        if val is None:   return "null"
+        if val is False:  return "false"
+        if val is True:   return "true"
+        return str(val)
+
+    lines = [
+        "## COLLECTED STATE — DO NOT RE-ASK ANY FIELD MARKED AS SET",
+        "",
+        f"Contact:   phone={v(state.get('phone'))}  name={v(state.get('full_name'))}  city={v(state.get('city'))}  callback={v(state.get('preferred_contact_hours'))}",
+        "",
+        f"Entrance:  scope={v(state.get('entrance_scope'))}  style={v(state.get('entrance_style'))}  catalog_sent={v(state.get('entrance_catalog_sent'))}  model={v(state.get('entrance_model'))}",
+        f"Interior:  type={v(state.get('interior_project_type'))}  qty={v(state.get('interior_quantity'))}  style={v(state.get('interior_style'))}  catalog_sent={v(state.get('interior_catalog_sent'))}  model={v(state.get('interior_model'))}",
+        f"Mamad:     type={v(state.get('mamad_type'))}  scope={v(state.get('mamad_scope'))}",
+        f"Showroom:  requested={v(state.get('showroom_requested'))}",
+        "",
+        f"Topics:    {state.get('active_topics', [])}",
+        f"Current:   {v(state.get('current_active_topic'))}",
+        f"Stage3done={v(state.get('stage3_done'))}  Opener_sent={v(state.get('stage4_opener_sent'))}  Summary_sent={v(state.get('summary_sent'))}",
+        "",
+    ]
+    gender = state.get("customer_gender_locked")
+    if gender == "female":
+        lines.append("Gender: FEMALE → use לך / אלייך / תוכלי / תשאירי in every reply.")
+    elif gender == "male":
+        lines.append("Gender: MALE → use לך / אליך / תוכל / תשאיר in every reply.")
     else:
-        # active_topics empty — no scenario was detected or first-turn scenario had no topic
-        lines.append("")
-        lines.append("active_topics: [] — detect topic from conversation history and set current_active_topic.")
-        lines.append("")
-        if not phone:
-            lines.append('NEXT CONTACT FIELD: phone — ask "מה מספר הטלפון?"')
-        elif not name:
-            lines.append('NEXT CONTACT FIELD: full_name — ask "על שם מי הפנייה?"')
-        elif not city:
-            lines.append('NEXT CONTACT FIELD: city — ask "באיזו עיר מדובר?"')
-        else:
-            lines.append("NEXT CONTACT FIELD: all collected — proceed to Stage 5 summary.")
-
-    lines.append("")
-    lines.append("If the customer's latest message contained contact info you haven't extracted above,")
-    lines.append("extract ALL fields from it now, add them to your JSON output, and use the updated state.")
-
+        lines.append("Gender: UNKNOWN → use neutral plural: לכם / אליכם / תוכלו / תשאירו.")
     return "\n".join(lines)
 
 
-# ── Last-seen timestamps (tracks last customer message time per sender) ────────
-# Used to detect 24h+ gaps and reset conversation to a clean slate.
-_last_seen: dict[str, float] = {}
+def _build_action_block(action: NextAction, state: dict, is_first_message: bool) -> str:
+    """
+    Build the DECIDED ACTION block that tells Claude exactly what to do this turn.
+    This is the authoritative directive — Claude must follow it.
+    """
+    template_text = QUESTION_TEMPLATES.get(action.template_key, "")
+    # For special dynamic keys, template_text will be empty — the action block describes what to do
 
-try:
-    _last_seen = json.loads(_LAST_SEEN_PATH.read_text(encoding="utf-8"))
-except Exception:
-    pass
+    gender = state.get("customer_gender_locked")
+    gender_note = (
+        "Gender: FEMALE → לך/אלייך/תוכלי/תשאירי" if gender == "female" else
+        "Gender: MALE → לך/אליך/תוכל/תשאיר"     if gender == "male"   else
+        "Gender: UNKNOWN → neutral plural: לכם/אליכם/תוכלו"
+    )
 
+    lines = [
+        "## DECIDED ACTION — MANDATORY (Python state machine decided this)",
+        f"Stage={action.stage}  Field={action.field_to_ask}",
+        f"Description: {action.context}",
+        "",
+    ]
 
-def _save_last_seen() -> None:
-    try:
-        _LAST_SEEN_PATH.write_text(json.dumps(_last_seen), encoding="utf-8")
-    except Exception:
-        pass
+    # ── First message ─────────────────────────────────────────────────────────
+    if is_first_message:
+        lines += [
+            "FIRST MESSAGE RULES:",
+            f'  reply_text:   company pitch — EXACT TEXT: {PITCH!r}',
+            "  reply_text_2: your actual response to the customer's message.",
+            "",
+        ]
+        if action.is_fixed and template_text:
+            lines += [
+                f"  For reply_text_2, send EXACTLY: {template_text!r}",
+                "  Do NOT add any other text.",
+            ]
+        elif action.template_key == "ask_topic_clarification" and not state.get("active_topics"):
+            lines += [
+                "  For reply_text_2: customer hasn't stated a specific need.",
+                "  Greet warmly + invite them to share what they're looking for.",
+                "  Use time-based greeting from business context above.",
+                f"  {gender_note}",
+            ]
+        else:
+            lines += [
+                f"  For reply_text_2, ask: {template_text!r}",
+                f"  {gender_note}",
+            ]
+        lines += [
+            "  ⛔ reply_text must be EXACTLY the pitch text — no changes.",
+        ]
 
+    # ── Fixed messages (non-first) ────────────────────────────────────────────
+    elif action.is_fixed:
+        if action.template_key == "stage3_question":
+            lines += [
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {STAGE3_QUESTION!r}',
+                "  Do NOT add any text before or after it.",
+                "  reply_text_2: null",
+            ]
+        elif action.template_key in ("contact_opener", "contact_opener_showroom"):
+            opener = QUESTION_TEMPLATES.get(action.template_key, CONTACT_OPENER)
+            lines += [
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {opener!r}',
+                "  ⛔ Do NOT append any question to the opener — send it ALONE.",
+                "  ⛔ Wait for customer reply before asking phone/name/city.",
+                "  reply_text_2: null",
+            ]
+        elif action.template_key in ("entrance_catalog", "interior_catalog"):
+            lines += [
+                f'INSTRUCTION: Send EXACTLY this text in reply_text: {template_text!r}',
+                "  ⛔ Send the catalog URL ALONE — no question appended.",
+                "  ⛔ Wait for customer reply, then ask about specific model.",
+                "  reply_text_2: null",
+            ]
+        elif action.template_key == "_farewell_dynamic":
+            lines += [
+                f'INSTRUCTION: Send farewell message in reply_text: {FINAL_HANDOFF!r}',
+                "  Adapt the sign-off only if gender/context warrants it.",
+                '  Use "אלייך" (double yud) for female, "אליך" (single yud) for male.',
+                "  Set handoff_to_human: true",
+                "  reply_text_2: null",
+            ]
+        else:
+            lines += [
+                f'INSTRUCTION: Send EXACTLY: {template_text!r}',
+                "  reply_text_2: null",
+            ]
 
-# Senders explicitly reset via clear_conversation — next get_reply call starts fresh
-# regardless of _last_seen or any residual disk state. In-memory only (intentional).
-_force_fresh: set[str] = set()
+    # ── Dynamic questions ─────────────────────────────────────────────────────
+    elif action.template_key == "_summary_dynamic":
+        name = (state.get("full_name") or "לקוח/ה").split()[0]
+        topic_label = state.get("service_type") or str(state.get("active_topics", []))
+        lines += [
+            "INSTRUCTION: Stage 5 — Send a summary and ask for confirmation.",
+            f"  Open with a warm line using the customer's first name: {name}",
+            "  Format (one field per line, no extras):",
+            f"    נושא הפנייה: {topic_label}",
+            f"    שם: {state.get('full_name')}",
+            f"    עיר: {state.get('city')}",
+            f"    טלפון: {state.get('phone')}",
+            '  Close with ONLY: "הכל נכון?"',
+            "  handoff_to_human: false (wait for customer confirmation)",
+            "  reply_text_2: null",
+        ]
+    else:
+        lines += [
+            f"INSTRUCTION: Ask this question in reply_text (adapt wording naturally):",
+            f"  Template: {template_text!r}",
+            "",
+            "Rules:",
+            "  - Ask ONLY this one question. Zero other questions.",
+            "  - 1–3 lines max. WhatsApp style.",
+            "  - A brief warm acknowledgment of the customer's last message is allowed",
+            "    (max 1 line), then ask the question directly.",
+            f"  - {gender_note}",
+        ]
+
+    # ── Fields already collected ──────────────────────────────────────────────
+    collected = []
+    if state.get("phone"):
+        collected.append(f"phone={state['phone']}")
+    if state.get("full_name"):
+        collected.append(f"name={state['full_name']}")
+    if state.get("city"):
+        collected.append(f"city={state['city']}")
+    if collected:
+        lines.append(f"\n⛔ Already collected (never re-ask): {', '.join(collected)}")
+
+    return "\n".join(lines)
 
 
 # ── Business context ──────────────────────────────────────────────────────────
@@ -629,23 +974,22 @@ _BUSINESS = {
     "products": [
         "Entrance doors (smooth & designed): Nefachim, Panoramic, Greek, Mercury, Eden, Eden Brass series",
         "Interior doors: smooth, grooves, squares, arc, cross styles",
-        "Hardware & handles: 15+ models, classic/hi-tech/synagogue styles",
+        "Hardware & handles",
+        "Mamad (security room) doors",
         "Institutional & warehouse doors",
-        "Synagogue doors (custom)",
     ],
     "hours": {"start": 9, "end": 18, "tz": "Asia/Jerusalem", "days": "א'–ה'", "fri_end": 13, "closed": "שבת וחגים"},
 }
 
 
 def is_working_hours() -> bool:
-    """Return True when the business is currently open (exported for use in main.py)."""
     from datetime import datetime
     import zoneinfo
     now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
-    hour, weekday = now.hour, now.weekday()  # 0=Mon … 5=Sat … 6=Sun (Israel: 4=Fri, 5=Sat)
-    if weekday == 5:  # Saturday — closed
+    hour, weekday = now.hour, now.weekday()
+    if weekday == 5:
         return False
-    if weekday == 4:  # Friday — half day
+    if weekday == 4:
         return _BUSINESS["hours"]["start"] <= hour < _BUSINESS["hours"]["fri_end"]
     return _BUSINESS["hours"]["start"] <= hour < _BUSINESS["hours"]["end"]
 
@@ -673,23 +1017,9 @@ def _context_block() -> str:
         f"Business: {_BUSINESS['name']}",
         f"Phone: {_BUSINESS['phone']}",
         f"Products: {', '.join(_BUSINESS['products'])}",
-        f"Hours: Sun–Thu 09:00–18:00 | Fri 09:00–13:00 | Sat closed",
+        "Hours: Sun–Thu 09:00–18:00 | Fri 09:00–13:00 | Sat closed",
         f"Current time status: {status}",
     ])
-
-
-# ── FAQ helpers ───────────────────────────────────────────────────────────────
-def _find_faqs(user_msg: str) -> list[dict]:
-    msg = user_msg.lower()
-    matched = [e for e in _faq_bank if any(kw.lower() in msg for kw in e.get("keywords", []))]
-    return matched[:3]
-
-
-def _faq_block(faqs: list[dict]) -> str | None:
-    if not faqs:
-        return None
-    lines = [f"[{f['category']}] {f['answer']}" for f in faqs]
-    return "## מידע רלוונטי מבסיס הידע (לשימוש כהפניה בלבד — אל תעתיק את הניסוח)\n" + "\n".join(lines)
 
 
 def _israel_greeting() -> str:
@@ -707,38 +1037,51 @@ def _israel_greeting() -> str:
 
 
 def _next_opening_time() -> str:
-    """Return a human-readable Hebrew string for when the business next opens."""
     from datetime import datetime, timedelta
     import zoneinfo
     now = datetime.now(zoneinfo.ZoneInfo(_BUSINESS["hours"]["tz"]))
-    wd = now.weekday()  # 0=Mon…4=Fri, 5=Sat, 6=Sun
+    wd = now.weekday()
     hour = now.hour
     h_start = _BUSINESS["hours"]["start"]
     h_end   = _BUSINESS["hours"]["end"]
     h_fri   = _BUSINESS["hours"]["fri_end"]
-
-    # Still today (weekday, before closing)
     if wd < 4 and hour < h_end:
         return f"היום עד {h_end}:00"
-    # Friday, still open
     if wd == 4 and hour < h_fri:
         return f"היום עד {h_fri}:00"
-    # Friday after closing → Sunday
     if wd == 4 and hour >= h_fri:
         return f"ביום ראשון משעה {h_start}:00"
-    # Saturday → Sunday
     if wd == 5:
         return f"ביום ראשון משעה {h_start}:00"
-    # Sunday (wd=6) — open today if before h_end
     if wd == 6 and hour < h_end:
         return f"היום עד {h_end}:00"
-    # Weekday evening (after closing) → tomorrow morning
     tomorrow_he = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
     next_day = tomorrow_he[(wd + 1) % 7]
     return f"ביום {next_day} משעה {h_start}:00"
 
 
-def _build_system(user_msg: str, sender: str = "", state: dict | None = None, history: list[dict] | None = None) -> str:
+# ── FAQ helpers ───────────────────────────────────────────────────────────────
+def _find_faqs(user_msg: str) -> list[dict]:
+    msg = user_msg.lower()
+    matched = [e for e in _faq_bank if any(kw.lower() in msg for kw in e.get("keywords", []))]
+    return matched[:3]
+
+
+def _faq_block(faqs: list[dict]) -> str | None:
+    if not faqs:
+        return None
+    lines = [f"[{f['category']}] {f['answer']}" for f in faqs]
+    return "## מידע רלוונטי מבסיס הידע (לשימוש כהפניה בלבד — אל תעתיק את הניסוח)\n" + "\n".join(lines)
+
+
+def _build_system(
+    user_msg: str,
+    sender: str,
+    state: dict,
+    history: list[dict],
+    action: NextAction,
+    is_first_message: bool,
+) -> str:
     if not _SYSTEM_PROMPT:
         logger.error("System prompt is empty — Claude will have no instructions")
     greeting = _israel_greeting()
@@ -747,45 +1090,31 @@ def _build_system(user_msg: str, sender: str = "", state: dict | None = None, hi
         f"## Business context\n{_context_block()}",
         (
             f"## Current time context\nCurrent greeting for this time of day: «{greeting}»\n"
-            f"Use this greeting in reply_text_2 on the FIRST reply only — per RULE 1.\n"
-            "On all subsequent replies (assistant message already exists in history): "
-            "do NOT include any time-based greeting."
+            "Use this greeting in reply_text_2 on the FIRST reply only.\n"
+            "On all subsequent replies: do NOT include any time-based greeting."
         ),
+        _state_summary_block(state),
     ]
-    # Inject verified conversation state so Claude never re-asks collected fields
-    if state:
-        state_block = _state_context_block(state, history=history)
-        if state_block:
-            parts.append(state_block)
 
-    # Bypass hours check for test/admin phones
     _is_bypass = sender and sender in _cfg.HOURS_BYPASS_PHONES
-
-    # Fix 7: explicit out-of-hours instruction injected on every call when closed
     if not is_working_hours() and not _is_bypass:
         next_open = _next_opening_time()
         parts.append(
             "## OUT-OF-HOURS — MANDATORY BEHAVIOUR\n"
             f"The business is currently CLOSED. Next opening: {next_open}.\n"
-            "You MUST acknowledge this in your reply. Include ALL of the following:\n"
-            f"1. We are not available right now but received the message.\n"
+            "Acknowledge this in your reply. Include:\n"
+            "1. We are not available right now but received the message.\n"
             f"2. We will call back {next_open}.\n"
-            f"3. The customer can also call directly: 054-2787578.\n"
-            "Still collect the 4 mandatory fields (שם, עיר, טלפון, שעה מועדפת) — "
-            "a sales manager will review the lead in the morning.\n"
-            "Do NOT promise immediate assistance."
+            "3. Customer can call directly: 054-2787578.\n"
+            "Still collect name/phone/city — sales manager reviews leads in the morning."
         )
 
-    # Fix 5: reinforce price policy on every single call — injected last so it's
-    # not buried and harder for Claude to ignore
     parts.append(
         "## ABSOLUTE RULE — PRICE/DELIVERY DISCLOSURE FORBIDDEN\n"
         "NEVER state, estimate, hint at, or compare any price, price range, cost, or delivery time. "
-        "This includes: specific amounts, 'around X', 'starting from X', 'up to X', "
-        "'cheaper than', 'roughly X ₪', ranges like 'X–Y ₪', or spelled-out numbers. "
-        "This rule overrides every other instruction in this prompt. "
-        "If asked about price, respond with exactly: "
-        "'המחיר מותאם אישית לפי סוג ועיצוב — מעולה! כדי שנוכל לחזור אליכם עם הצעת מחיר מסודרת, אשמח שתשאירו שם מלא, מספר טלפון ועיר מגורים 😊'"
+        "This rule overrides every other instruction. "
+        "If asked about price: "
+        "'המחיר מותאם אישית לפי סוג ועיצוב — אשמח שתשאירו פרטים ונחזור עם הצעה מסודרת 😊'"
     )
 
     faqs = _find_faqs(user_msg)
@@ -793,179 +1122,22 @@ def _build_system(user_msg: str, sender: str = "", state: dict | None = None, hi
     if block:
         parts.append(block)
         logger.info("FAQ match: %s", ", ".join(f["id"] for f in faqs))
+
+    # ── DECIDED ACTION block — injected LAST (highest recency in context) ─────
+    parts.append(_build_action_block(action, state, is_first_message))
+
     return "\n\n".join(parts)
 
 
-# ── Scenario classifier ───────────────────────────────────────────────────────
-def _has_entrance(m: str)     -> bool: return bool(re.search(
-    r"דלת כניסה|דלתות כניסה"
-    r"|דלת חוץ|דלתות חוץ"                          # colloquial: "דלת חוץ" = entrance door
-    r"|דלת חיצונית|דלתות חיצוניות"                 # formal synonym
-    r"|דלת ראשית|דלתות ראשיות|וראשית\b|וכניסה\b"  # "main door" — also bare "וראשית" mid-sentence
-    r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"   # iron/steel = typically entrance
-    r"|כניסה לבית|כניסה לדירה|כניסה לבניין",       # "entrance to house/apartment/building"
-    m))
-def _has_interior(m: str)     -> bool: return bool(re.search(
-    r"דלת פנים|דלתות פנים|פולימר"
-    r"|דלת לחדר|דלת חדר|דלתות חדר"                 # "door to room"
-    r"|דלת שירותים|דלת לשירותים"                   # bathroom door
-    r"|דלת אמבטיה|דלת לאמבטיה"                    # bathroom door
-    r"|דלת מטבח|דלת למטבח"                         # kitchen door
-    r"|דלת שינה|דלת לשינה|דלת חדר שינה"           # bedroom door
-    r"|דלת סלון|דלת לסלון",                        # living room door
-    m))
-def _has_specific_product(m: str) -> bool:
-    """True when the message names a specific entrance door series or interior door material.
-    Used in _detect_scenario to bypass scripted responses for entrance models only."""
-    return bool(re.search(
-        # Entrance door series (system prompt RULE 2)
-        r"נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|אומנויות|סביליה"
-        # Interior door materials — these are NOT bypassed (see _detect_scenario)
-        r"|פולימר|אלון|אגוז|MDF|HDF",
-        m, re.IGNORECASE,
-    ))
-def _has_door_type(m: str)    -> bool: return _has_entrance(m) or _has_interior(m)
-def _has_style(m: str)        -> bool: return bool(re.search(r"מודרנ|מעוצב|מעוצבת|קלאסי|קלאסית|חלקה|פשוטה", m))
-def _is_question(m: str)      -> bool: return bool(re.search(r"\?|יש לכם|האם |אפשר ", m))
-def _has_frame_removal(m: str) -> bool:
-    return bool(re.search(r"פירוק משקוף|עם פירוק|בלי פירוק|להוציא משקוף|להחליף משקוף|ללא פירוק", m))
-def _has_intent(m: str)       -> bool:
-    return bool(re.search(
-        r"מתעניין|מתעניינת|מעוניין|מעוניינת|רוצה|צריך|צריכה"
-        r"|מחפש|מחפשת|מחפשים|מעניין אותי|מעניין אותנו|אשמח|מעוניינים"
-        r"|להזמין|לקנות|לרכוש"                          # to order/buy/purchase
-        r"|רוצה לדעת|מעניין אותו|מעניין אותה"           # want to know / he/she is interested
-        r"|מעניין\b",                                    # standalone "interested"
-        m))
+# ══════════════════════════════════════════════════════════════════════════════
+# AI CALLING
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _is_greeting_only(m: str) -> bool:
-    return bool(re.match(
-        r"^(שלום|היי|הי|בוקר טוב|בוקר אור|ערב טוב|צהריים טובים|צהריים טוב|לילה טוב"
-        r"|אהלן|טוב|מה שלומכם|מה נשמע|מה קורה|מה קורה שם|ספריד|חחח|אוקי|אחלה|נהדר|מצוין)[.!,\s]*$",
-        m.strip(), re.IGNORECASE
-    ))
-
-_SCENARIOS: dict[str, dict] = {
-    "greeting":                  {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Greeting only — pitch + asking how to help",                                          "response": _MSG["greeting"]},
-    "showroom_address":          {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking for showroom address — gave address, collecting contact",            "response": _MSG["showroom_address"]},
-    "showroom_hours":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about hours — answered, offering to schedule visit",                 "response": _MSG["showroom_hours"]},
-    "repair":                    {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer requesting repair — asking what the issue is",                              "response": _MSG["repair"]},
-    "mamad":                     {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about ממ\"ד door — clarifying new or existing",                      "response": _MSG["mamad"]},
-    "frame_removal":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer asking about frame removal — door type still unknown",                      "response": _MSG["frame_removal"]},
-    "designed_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer interested in designed/modern doors — door type not specified",             "response": _MSG["designed_doors"]},
-    "detailed_inquiry":          {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer specified entrance door with clear intent — asking about style next",       "response": _MSG["detailed_inquiry"]},
-    "detailed_inquiry_interior": {"handoff_to_human": False, "needs_frame_removal": False, "summary": "Customer specified interior door with clear intent — asking for project status",     "response": _MSG["detailed_inquiry_interior"]},
-    "entrance_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer browsing entrance doors — guiding toward style preference",                 "response": _MSG["entrance_doors"]},
-    "interior_doors":            {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer browsing interior doors — asking for project status",                       "response": _MSG["interior_doors"]},
-    "vague_inquiry":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Quote request without door type — asking entrance vs interior",                      "response": _MSG["vague_inquiry"]},
-    "ambiguous":                 {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Vague door inquiry — asking entrance vs interior",                                   "response": _MSG["ambiguous"]},
-    "human_request":             {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Customer wants human agent — collecting name + phone",                               "response": _MSG["human_request"]},
-    "emergency":                 {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Emergency — break-in or urgent door issue",                                          "response": _MSG["emergency"]},
-    "contractor":                {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Contractor or large project — escalating to sales manager",                         "response": _MSG["contractor"]},
-    "geographic":                {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Geographic coverage question — confirming service area",                             "response": _MSG["geographic"]},
-    "sticker_only":              {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Sticker/emoji only — asking how to help",                                            "response": _MSG["sticker_only"]},
-    "warranty":                  {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Warranty question — answered",                                                       "response": _MSG["warranty"]},
-    "installation_time":         {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Installation time question — collecting contact for sales manager",                  "response": _MSG["installation_time"]},
-    "colors":                    {"handoff_to_human": False, "needs_frame_removal": None,  "summary": "Colors question — answered with range",                                              "response": _MSG["colors"]},
-}
-
-
-def _detect_scenario(msg: str) -> dict | None:
-    if _is_greeting_only(msg):
-        return _SCENARIOS["greeting"]
-    if re.search(r"כתובת|איפה אתם|איפה האולם|איפה החנות|המיקום שלכם|מיקום|להגיע אליכם|איך מגיעים", msg):
-        return _SCENARIOS["showroom_address"]
-    if re.search(r"שעות פעילות|שעות הפעילות|שעות פתיחה|שעות הפתיחה|מתי פתוח|מתי אתם פתוחים|מתי אפשר להגיע|לקבוע פגישה|תיאום פגישה|אולם תצוגה|אולם התצוגה|מה השעות|עד מתי פתוחים|מתי סגורים", msg):
-        return _SCENARIOS["showroom_hours"]
-    # Single emoji / sticker only
-    if re.match(r"^[\U00010000-\U0010ffff\U00002600-\U000027BF\U0001F300-\U0001FAFF\s]+$", msg.strip()) and len(msg.strip()) <= 4:
-        return _SCENARIOS["sticker_only"]
-    # Emergency
-    if re.search(r"פריצה|פרצו|שוד|חירום|עזרה דחופה|דחוף מאוד|דלת שבורה.*עכשיו|עכשיו.*דלת שבורה", msg):
-        return _SCENARIOS["emergency"]
-    # Human / agent request
-    if re.search(r"נציג אנושי|נציג אמיתי|לדבר עם מישהו|לדבר עם אדם|לדבר עם נציג|שיחזרו אלי|תחזרו אלי|אדם אמיתי|בן אדם", msg):
-        return _SCENARIOS["human_request"]
-    # Contractor / large project
-    if re.search(r"קבלן|פרויקט גדול|הרבה דלתות|עשרות דלתות|\d{2,} דלתות|בניין שלם|בניין חדש.*דלתות|דלתות.*בניין", msg):
-        return _SCENARIOS["contractor"]
-    # Geographic coverage
-    if re.search(r"אתם מגיעים|אתם עובדים|מגיעים ל|תל אביב.*אתם|ירושלים.*אתם|חיפה.*אתם|אתם.*צפון|אתם.*מרכז|כיסוי גיאוגרפי|איזור השירות|עד איפה", msg):
-        return _SCENARIOS["geographic"]
-    # Warranty
-    if re.search(r"אחריות|גארנטי|warranty|כמה שנים|כמה זמן אחריות|מה האחריות", msg):
-        return _SCENARIOS["warranty"]
-    # Installation time
-    if re.search(r"כמה זמן לוקח|זמן התקנה|מתי יתקינו|תוך כמה זמן|זמן אספקה|מתי אפשר להתקין|כמה זמן עד|זמן המתנה", msg):
-        return _SCENARIOS["installation_time"]
-    # Colors
-    if re.search(r"באיזה צבעים|איזה צבעים|צבעים יש|מה הצבעים|צבע.*דלת|דלת.*צבע|צבע אפשרי|גוונים", msg):
-        return _SCENARIOS["colors"]
-    if re.search(
-        r"תיקון|תקלה|התקנתם|הותקנה|שירות לדלת"
-        r"|בעיה בדלת|בעיה.*דלת|דלת.*בעיה"
-        r"|הדלת לא נסגרת|הדלת לא נפתחת|הדלת תקועה|הדלת נפלה"
-        r"|ציר שבור|ציר.*דלת|דלת.*ציר"              # hinge issues
-        r"|מנעול שבור|בעיה במנעול|מנעול לא|לא נועל|לא נועלת"  # lock issues
-        r"|ידית שבורה|ידית לא"                       # handle issues
-        r"|התפרקה|התפרק|נשברה|נשבר"                 # came apart / broke
-        r"|אחריות",
-        msg,
-    ):
-        return _SCENARIOS["repair"]
-    if re.search(r"ממ\"ד|ממד|דלת ממד|דלת ממ״ד|חדר ביטחון|מרחב מוגן", msg):
-        return _SCENARIOS["mamad"]
-    if _has_frame_removal(msg) and not _has_door_type(msg):
-        return _SCENARIOS["frame_removal"]
-    if _has_style(msg) and not _has_door_type(msg):
-        return _SCENARIOS["designed_doors"]
-    # Both door types in same message → Claude handles (greeting + proper dual response)
-    if _has_entrance(msg) and _has_interior(msg):
-        return None
-    # Specific entrance-door model name (נפחות/פנורמי/יווני/מרקורי/עדן…) → Claude
-    # handles with a model-specific reply per RULE 7 of the system prompt.
-    # Interior door materials (פולימר, אלון, MDF…) are intentionally NOT bypassed —
-    # they follow the normal interior door scenario flow below.
-    if _has_specific_product(msg) and not _has_interior(msg):
-        return None
-    if _has_entrance(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
-        return _SCENARIOS["detailed_inquiry"]
-    if _has_interior(msg) and _has_intent(msg) and not _has_style(msg) and not _is_question(msg):
-        return _SCENARIOS["detailed_inquiry_interior"]
-    if _has_entrance(msg):
-        return _SCENARIOS["entrance_doors"]
-    if _has_interior(msg):
-        return _SCENARIOS["interior_doors"]
-    if re.search(
-        r"הצעת מחיר|כמה עולה|כמה זה עולה|כמה עולים"
-        r"|כמה יעלה|כמה יעלו|כמה זה יעלה|כמה יעלה לי|כמה יעלה לנו"  # future tense price
-        r"|כמה לשים דלת|כמה לקנות דלת|כמה עולה לשים|כמה עולה להתקין"  # installation price
-        r"|כמה זה|כמה ה|תעריף|מה העלות"             # colloquial "how much is it" / rates
-        r"|מחיר|אפשר הצעה|מחיר.*דלת|דלת.*מחיר",
-        msg,
-    ):
-        return _SCENARIOS["vague_inquiry"]
-    if re.search(
-        r"מחפש דלת|מחפשת דלת|מחפשים דלת|מתעניין|מתעניינת|מתעניינים"
-        r"|מעוניין|מעוניינת|מעוניינים|דלת לבית|דלת לדירה|צריך דלת|צריכה דלת"
-        r"|אשמח למידע|אפשר פרטים|פרטים על|רוצה לדעת|ספרו לי"
-        r"|מה יש לכם|מה אתם מוכרים|מה אפשר|מה השירותים|מה המוצרים"
-        r"|להזמין דלת|לקנות דלת|לרכוש דלת"          # order/buy a door
-        r"|דלת לחנות|דלת למשרד|דלת למחסן|דלת למוסד"  # commercial doors
-        r"|יש לכם דלת|האם יש לכם",                   # "do you have X"
-        msg,
-    ):
-        return _SCENARIOS["ambiguous"]
-    return None
-
-
-# ── AI client (Claude or OpenRouter/GPT-4.1-mini) ─────────────────────────────
 _claude: anthropic.AsyncAnthropic | None = None
-_openrouter = None  # openai.AsyncOpenAI instance, created lazily
+_openrouter = None
 
 _OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 _CLAUDE_MODEL     = "claude-sonnet-4-6"
-_HAIKU_MODEL      = "claude-haiku-4-5-20251001"
 
 
 def _use_openrouter() -> bool:
@@ -991,7 +1163,6 @@ def _get_openrouter():
 
 
 async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, timeout: float = 50.0) -> str:
-    """Unified call — tries OpenRouter/GPT-4.1-mini first, falls back to Claude on any error."""
     global DIAG_STATE
     if _use_openrouter():
         try:
@@ -1005,16 +1176,13 @@ async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, t
             content = response.choices[0].message.content or ""
             if content:
                 DIAG_STATE["last_ai_provider"] = f"openrouter/{_OPENROUTER_MODEL}"
-                DIAG_STATE["openrouter_failures"] = DIAG_STATE.get("openrouter_failures", 0)
                 return content
             raise ValueError("OpenRouter returned empty content")
         except Exception as or_exc:
             logger.warning("[OPENROUTER:FAIL] %s — falling back to Claude", or_exc)
             DIAG_STATE["openrouter_failures"] = DIAG_STATE.get("openrouter_failures", 0) + 1
             DIAG_STATE["last_openrouter_error"] = str(or_exc)[:200]
-            # fall through to Claude below
 
-    # Claude (primary when no OpenRouter key, or fallback after OpenRouter failure)
     client = _get_claude(api_key)
     response = await client.messages.create(
         model=_CLAUDE_MODEL,
@@ -1027,18 +1195,16 @@ async def _call_ai(system: str, messages: list, max_tokens: int, api_key: str, t
     return response.content[0].text
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RESPONSE PARSING
+# ══════════════════════════════════════════════════════════════════════════════
+
 _PARSE_ERROR_REPLY = _ERR["parse_error"]
 _API_ERROR_REPLY   = _ERR["api_error"]
-
-# Set of all error reply texts — used by main.py to skip follow-up after a failure
 ERROR_REPLIES: frozenset[str] = frozenset([_PARSE_ERROR_REPLY, _API_ERROR_REPLY])
 
-# Max conversation turns kept in memory (40 = ~20 back-and-forth exchanges)
 _MAX_HISTORY = 40
 
-
-# Matches explicit shekel amounts: "500 ₪", "₪1,200", "1500 שקל", "כ-3000 ש\"ח"
-# Does NOT match "מחיר מותאם אישית" or similar non-numeric phrases.
 _PRICE_RE = re.compile(
     r'(?:כ[-–]?|מ[-–]?|ב[-–]?|עד\s)?'
     r'\d[\d,\.]*\s*(?:₪|ש["\']?ח\b|שקל\b)'
@@ -1048,27 +1214,20 @@ _PRICE_RE = re.compile(
 
 
 def _scrub_prices(text: str, sender: str) -> str:
-    """Replace any explicit price amount with a safe placeholder."""
     if not _PRICE_RE.search(text):
         return text
     scrubbed = _PRICE_RE.sub("מחיר מותאם אישית", text)
-    logger.warning("[PRICE:BLOCKED] Claude disclosed price — scrubbed | sender=%s | original=%s",
-                   sender, text[:100])
+    logger.warning("[PRICE:BLOCKED] scrubbed | sender=%s | original=%s", sender, text[:100])
     return scrubbed
 
 
 def _extract_json(text: str) -> str:
-    """Extract the last complete JSON object that contains 'reply_text'.
-    Handles cases where the AI writes reasoning text before/inside the JSON."""
-    # Strategy 1: find the LAST occurrence of {"reply_text": — the model's final answer
     marker = '"reply_text"'
     last_pos = text.rfind(marker)
     if last_pos > 0:
-        # Walk backwards to find the opening {
         brace_pos = text.rfind("{", 0, last_pos)
         if brace_pos >= 0:
             candidate = text[brace_pos:]
-            # Find the matching closing brace
             depth = 0
             for i, ch in enumerate(candidate):
                 if ch == "{":
@@ -1077,7 +1236,6 @@ def _extract_json(text: str) -> str:
                     depth -= 1
                     if depth == 0:
                         return candidate[:i + 1]
-    # Strategy 2: fall back to first { in text
     brace_pos = text.find("{")
     if brace_pos >= 0:
         return text[brace_pos:]
@@ -1087,83 +1245,117 @@ def _extract_json(text: str) -> str:
 def _parse_response(raw: str, sender: str) -> dict:
     try:
         cleaned = raw.strip()
-        # Strip markdown code fences: ```json ... ``` or ``` ... ```
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-        # Strip bare "json" label that Claude sometimes adds without backticks
         cleaned = re.sub(r"^json\s*", "", cleaned, flags=re.IGNORECASE).strip()
-        # Extract the last valid JSON object — handles AI "thinking" before/inside JSON
         cleaned = _extract_json(cleaned)
-        parsed = json.loads(cleaned)
+        parsed  = json.loads(cleaned)
+
         reply_text = str(parsed.get("reply_text", ""))
         if not reply_text.strip():
-            logger.warning("Empty reply_text in parsed response | sender=%s", sender)
             reply_text = _PARSE_ERROR_REPLY
         reply_text = _scrub_prices(reply_text, sender)
+
         reply_text_2_raw = parsed.get("reply_text_2")
         reply_text_2 = str(reply_text_2_raw).strip() if reply_text_2_raw else None
         if reply_text_2:
             reply_text_2 = _scrub_prices(reply_text_2, sender)
+
         return {
-            "reply_text":              reply_text,
-            "reply_text_2":            reply_text_2,
-            "doors_count":             parsed.get("doors_count"),
-            "handoff_to_human":        bool(parsed.get("handoff_to_human", False)),
-            "summary":                 str(parsed.get("summary", "")),
-            "preferred_contact_hours": parsed.get("preferred_contact_hours"),
-            "needs_frame_removal":     parsed.get("needs_frame_removal"),
-            "needs_installation":      parsed.get("needs_installation"),
-            "full_name":               parsed.get("full_name"),
-            "phone":                   parsed.get("phone"),
-            "service_type":            parsed.get("service_type"),
-            "city":                    parsed.get("city"),
-            "design_preference":       parsed.get("design_preference"),
-            "project_status":          parsed.get("project_status"),
-            "referral_source":         parsed.get("referral_source"),
-            "is_returning_customer":   parsed.get("is_returning_customer"),
-            "active_topics":           parsed.get("active_topics") or [],
-            "current_active_topic":    parsed.get("current_active_topic"),
+            "reply_text":     reply_text,
+            "reply_text_2":   reply_text_2,
+            "handoff_to_human": bool(parsed.get("handoff_to_human", False)),
+            "summary":        str(parsed.get("summary", "")),
+
+            # Claude's extracted fields (new v2 schema)
+            "extracted_full_name":             parsed.get("extracted_full_name"),
+            "extracted_phone":                 parsed.get("extracted_phone"),
+            "extracted_city":                  parsed.get("extracted_city"),
+            "extracted_preferred_contact_hours": parsed.get("extracted_preferred_contact_hours"),
+            "extracted_entrance_scope":        parsed.get("extracted_entrance_scope"),
+            "extracted_entrance_style":        parsed.get("extracted_entrance_style"),
+            "extracted_entrance_model":        parsed.get("extracted_entrance_model"),
+            "extracted_interior_project_type": parsed.get("extracted_interior_project_type"),
+            "extracted_interior_quantity":     parsed.get("extracted_interior_quantity"),
+            "extracted_interior_style":        parsed.get("extracted_interior_style"),
+            "extracted_interior_model":        parsed.get("extracted_interior_model"),
+            "extracted_mamad_type":            parsed.get("extracted_mamad_type"),
+            "extracted_mamad_scope":           parsed.get("extracted_mamad_scope"),
+            "extracted_customer_gender_locked": parsed.get("extracted_customer_gender_locked"),
+            "extracted_service_type":          parsed.get("extracted_service_type"),
+            "extracted_showroom_requested":    parsed.get("extracted_showroom_requested"),
+            "detected_new_topics":             parsed.get("detected_new_topics") or [],
         }
+
     except Exception:
-        # Claude returned plain text instead of JSON — use it directly as the reply
-        # rather than showing an error message to the customer.
         plain = raw.strip()
         if plain and plain not in (_PARSE_ERROR_REPLY, _API_ERROR_REPLY):
             logger.warning("Non-JSON response — using plain text | sender=%s | raw: %s", sender, raw[:120])
             plain = _scrub_prices(plain, sender)
-            return {
-                "reply_text": plain, "reply_text_2": None,
-                "handoff_to_human": False,
-                "summary": "Plain-text response (no JSON wrapper)",
-                "preferred_contact_hours": None, "needs_frame_removal": None,
-                "needs_installation": None, "full_name": None, "phone": None,
-                "service_type": None, "city": None, "doors_count": None,
-                "design_preference": None, "project_status": None,
-                "referral_source": None, "is_returning_customer": None,
-            }
-        logger.warning("Non-JSON empty response | sender=%s — raw: %s", sender, raw[:120])
-        return {
-            "reply_text": _PARSE_ERROR_REPLY, "reply_text_2": None,
-            "handoff_to_human": False,
-            "summary": "Parse error — fallback reply sent",
-            "preferred_contact_hours": None, "needs_frame_removal": None,
-            "needs_installation": None, "full_name": None, "phone": None,
-            "service_type": None, "city": None, "doors_count": None,
-            "design_preference": None, "project_status": None,
-            "referral_source": None, "is_returning_customer": None,
-        }
+            return _parse_fallback(plain)
+        logger.warning("Non-JSON empty response | sender=%s | raw: %s", sender, raw[:120])
+        return _parse_fallback(_PARSE_ERROR_REPLY)
+
+
+def _parse_fallback(reply_text: str) -> dict:
+    return {
+        "reply_text": reply_text, "reply_text_2": None,
+        "handoff_to_human": False, "summary": "Parse fallback",
+        "extracted_full_name": None, "extracted_phone": None,
+        "extracted_city": None, "extracted_preferred_contact_hours": None,
+        "extracted_entrance_scope": None, "extracted_entrance_style": None,
+        "extracted_entrance_model": None, "extracted_interior_project_type": None,
+        "extracted_interior_quantity": None, "extracted_interior_style": None,
+        "extracted_interior_model": None, "extracted_mamad_type": None,
+        "extracted_mamad_scope": None, "extracted_customer_gender_locked": None,
+        "extracted_service_type": None, "extracted_showroom_requested": None,
+        "detected_new_topics": [],
+    }
+
+
+def _extract_claude_fields(structured: dict) -> dict:
+    """Map Claude's extracted_* fields to state field names."""
+    mapping = {
+        "extracted_full_name":             "full_name",
+        "extracted_phone":                 "phone",
+        "extracted_city":                  "city",
+        "extracted_preferred_contact_hours": "preferred_contact_hours",
+        "extracted_entrance_scope":        "entrance_scope",
+        "extracted_entrance_style":        "entrance_style",
+        "extracted_entrance_model":        "entrance_model",
+        "extracted_interior_project_type": "interior_project_type",
+        "extracted_interior_quantity":     "interior_quantity",
+        "extracted_interior_style":        "interior_style",
+        "extracted_interior_model":        "interior_model",
+        "extracted_mamad_type":            "mamad_type",
+        "extracted_mamad_scope":           "mamad_scope",
+        "extracted_customer_gender_locked": "customer_gender_locked",
+        "extracted_service_type":          "service_type",
+    }
+    fields: dict = {}
+    for ex_key, state_key in mapping.items():
+        val = structured.get(ex_key)
+        if val is not None:
+            fields[state_key] = val
+
+    new_topics = structured.get("detected_new_topics") or []
+    if new_topics:
+        fields["_new_topics"] = new_topics
+
+    if structured.get("extracted_showroom_requested"):
+        fields["showroom_requested"] = True
+
+    return fields
 
 
 def _sanitize_input(text: str, sender: str) -> str:
-    """Truncate extreme-length input and strip control characters."""
     if len(text) > _MAX_INPUT_CHARS:
-        logger.warning("[INPUT:TRUNCATE] Message truncated %d→%d | sender=%s", len(text), _MAX_INPUT_CHARS, sender)
+        logger.warning("[INPUT:TRUNCATE] %d→%d | sender=%s", len(text), _MAX_INPUT_CHARS, sender)
         text = text[:_MAX_INPUT_CHARS]
     return text
 
 
 def _validate_history(sender: str) -> None:
-    """Remove any malformed entries from conversation history."""
     history = _conversations.get(sender, [])
     valid = [
         m for m in history
@@ -1173,8 +1365,27 @@ def _validate_history(sender: str) -> None:
         and m["content"].strip()
     ]
     if len(valid) != len(history):
-        logger.warning("[HIST:FIX] Removed %d malformed entries | sender=%s", len(history) - len(valid), sender)
+        logger.warning("[HIST:FIX] Removed %d malformed entries | sender=%s",
+                       len(history) - len(valid), sender)
         _conversations[sender] = valid
+
+
+# ── Last-seen timestamps ──────────────────────────────────────────────────────
+_last_seen: dict[str, float] = {}
+try:
+    _last_seen = json.loads(_LAST_SEEN_PATH.read_text(encoding="utf-8"))
+except Exception:
+    pass
+
+
+def _save_last_seen() -> None:
+    try:
+        _LAST_SEEN_PATH.write_text(json.dumps(_last_seen), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_force_fresh: set[str] = set()
 
 
 async def _supabase_save_conv(sender: str) -> None:
@@ -1185,22 +1396,87 @@ async def _supabase_save_conv(sender: str) -> None:
         logger.warning("[SUPABASE] save_conversation failed: %s", e)
 
 
-async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock_claude: bool = False) -> dict:
+def clear_conversation(sender: str) -> None:
+    """Force a fresh session on the next get_reply call for this sender."""
+    _force_fresh.add(sender)
+
+
+def _empty_return(reply_text: str, summary: str, state: dict | None = None) -> dict:
+    """Build a minimal return dict compatible with main.py's expected keys."""
+    s = state or {}
+    return {
+        "reply_text":              reply_text,
+        "reply_text_2":            None,
+        "handoff_to_human":        False,
+        "summary":                 summary,
+        "preferred_contact_hours": s.get("preferred_contact_hours"),
+        "needs_frame_removal":     (True  if s.get("entrance_scope") == "with_frame" else
+                                    False if s.get("entrance_scope") == "door_only"  else None),
+        "needs_installation":      None,
+        "full_name":               s.get("full_name"),
+        "phone":                   s.get("phone"),
+        "service_type":            s.get("service_type"),
+        "city":                    s.get("city"),
+        "doors_count":             s.get("interior_quantity"),
+        "design_preference":       (s.get("entrance_style") or s.get("interior_style")),
+        "project_status":          s.get("interior_project_type"),
+        "referral_source":         s.get("referral_source"),
+        "is_returning_customer":   s.get("is_returning_customer"),
+        "active_topics":           s.get("active_topics", []),
+        "current_active_topic":    s.get("current_active_topic"),
+    }
+
+
+def _structured_to_return(structured: dict, state: dict) -> dict:
+    """Convert parsed Claude response + state into the return dict for main.py."""
+    s = state or {}
+    scope = s.get("entrance_scope")
+    return {
+        "reply_text":              structured["reply_text"],
+        "reply_text_2":            structured.get("reply_text_2"),
+        "handoff_to_human":        structured.get("handoff_to_human", False),
+        "summary":                 structured.get("summary", ""),
+        "preferred_contact_hours": s.get("preferred_contact_hours"),
+        "needs_frame_removal":     (True  if scope == "with_frame" else
+                                    False if scope == "door_only"  else None),
+        "needs_installation":      None,
+        "full_name":               s.get("full_name"),
+        "phone":                   s.get("phone"),
+        "service_type":            s.get("service_type"),
+        "city":                    s.get("city"),
+        "doors_count":             s.get("interior_quantity"),
+        "design_preference":       (s.get("entrance_style") or s.get("interior_style")),
+        "project_status":          s.get("interior_project_type"),
+        "referral_source":         s.get("referral_source"),
+        "is_returning_customer":   s.get("is_returning_customer"),
+        "active_topics":           s.get("active_topics", []),
+        "current_active_topic":    s.get("current_active_topic"),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRYPOINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def get_reply(
+    sender: str,
+    user_message: str,
+    anthropic_api_key: str,
+    mock_claude: bool = False,
+) -> dict:
     import time as _time
+
     user_message = _sanitize_input(user_message, sender)
 
-    # ── Fresh-start gate ──────────────────────────────────────────────────────
+    # ── Session management ─────────────────────────────────────────────────────
     now = _time.time()
     if sender in _force_fresh:
-        # Explicit #reset (or session close / handoff) — always wipe, works in both modes
         _force_fresh.discard(sender)
         _conversations.pop(sender, None)
         _conv_state.pop(sender, None)
         _last_seen.pop(sender, None)
-        logger.info("[SESSION:FORCED] Fresh start after explicit reset | sender=%s", sender)
+        logger.info("[SESSION:FORCED] Fresh start | sender=%s", sender)
     elif not _cfg.TEST_MODE:
-        # 24h inactivity auto-reset — production only.
-        # In test mode only #reset can start a new conversation.
         last = _last_seen.get(sender, 0.0)
         if last > 0 and (now - last) > _SESSION_GAP:
             gap_h = (now - last) / 3600
@@ -1210,269 +1486,159 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
     _last_seen[sender] = now
     _save_last_seen()
 
+    # ── History management ─────────────────────────────────────────────────────
     if sender not in _conversations:
         _conversations[sender] = []
-
     _conversations[sender].append({"role": "user", "content": user_message})
     if len(_conversations[sender]) > _MAX_HISTORY:
         _conversations[sender] = _conversations[sender][-_MAX_HISTORY:]
-        logger.info("[HIST:TRIM] History trimmed to %d turns | sender=%s", _MAX_HISTORY, sender)
-
+        logger.info("[HIST:TRIM] Trimmed to %d turns | sender=%s", _MAX_HISTORY, sender)
     _validate_history(sender)
 
-    _COMPANY_PITCH = (
-        "תודה שפניתם למיכאל דלתות 🚪\n"
-        "אנו מציעים דלתות כניסה ופנים בסטנדרט הגבוה ביותר — התקנה, מכירה ואחריות מעל שנתיים ✨\n"
-        "באולם התצוגה שלנו בנתיבות תוכלו להתרשם ממגוון רחב של דגמים 😊 (מומלץ לתאם פגישה מראש)"
-    )
-
-    # Scenario check on first message only.
-    # Skip if the message looks like a mid-conversation answer (single short word
-    # with no door-related noun) — likely the history was reset by a server restart.
-    _looks_like_answer = bool(re.match(
-        r"^(כן|לא|חלקה|מעוצבת|מודרנית|קלאסית|בית חדש|שיפוץ|החלפה|אולי|בסדר|אחלה|נכון|ברור|טוב)[.!?\s]*$",
-        user_message.strip(), re.IGNORECASE
-    ))
-
-    # Maps scenario key → active topic (for state initialisation)
-    _SCENARIO_TOPIC_MAP: dict[str, str] = {
-        "detailed_inquiry":          "entrance_doors",
-        "entrance_doors":            "entrance_doors",
-        "detailed_inquiry_interior": "interior_doors",
-        "interior_doors":            "interior_doors",
-        "mamad":                     "mamad",
-    }
-
-    if len(_conversations[sender]) == 1 and not _looks_like_answer:
-        scenario = _detect_scenario(user_message)
-        if scenario:
-            logger.info("[SCENARIO] %s | sender=%s", scenario.get("summary", "?"), sender)
-            greeting = _israel_greeting()
-            # Pulse 1: company pitch (sent once per new conversation)
-            msg1 = _COMPANY_PITCH
-            # Pulse 2: actual response — strip legacy duplicate opening line if present,
-            # then inject the time-based greeting via {{GREETING}} placeholder
-            msg2 = re.sub(
-                r"^היי, תודה שפניתם לדלתות מיכאל[^.\n]*\.?\n?",
-                "",
-                scenario["response"],
-                count=1,
-            ).strip()
-            msg2 = msg2.replace("{{GREETING}}", greeting)
-            # Store as one combined assistant turn so Claude sees clean history
-            combined = msg1 + "\n\n" + msg2
-            _conversations[sender].append({"role": "assistant", "content": combined})
-            _save_conversations()
-            asyncio.create_task(_supabase_save_conv(sender))
-
-            # ── Initialise conv_state for this sender on first message ────────
-            if sender not in _conv_state:
-                _conv_state[sender] = _empty_conv_state()
-            # Extract any fields from the first customer message
-            extracted_s1 = _extract_fields_from_message(user_message)
-            if extracted_s1:
-                logger.info("[STATE:EXTRACT:S1] sender=%s | extracted=%s", sender, extracted_s1)
-            _conv_state[sender] = _merge_state(_conv_state[sender], extracted_s1)
-            # Set active_topics from the detected scenario
-            scenario_key = next(
-                (k for k, v in _SCENARIOS.items() if v is scenario), None
-            )
-            if scenario_key and scenario_key in _SCENARIO_TOPIC_MAP:
-                detected_topic = _SCENARIO_TOPIC_MAP[scenario_key]
-                _conv_state[sender] = _merge_state(
-                    _conv_state[sender], {'active_topics': [detected_topic]}
-                )
-                logger.info("[STATE:TOPIC:S1] sender=%s | topic=%s", sender, detected_topic)
-            _save_conv_state()
-            # ─────────────────────────────────────────────────────────────────
-
-            return {
-                "reply_text":              msg1,
-                "reply_text_2":            msg2,
-                "handoff_to_human":        scenario["handoff_to_human"],
-                "summary":                 scenario["summary"],
-                "preferred_contact_hours": None,
-                "needs_frame_removal":     scenario["needs_frame_removal"],
-                "needs_installation":      None,
-                "full_name":               None,
-                "phone":                   None,
-                "service_type":            None,
-                "city":                    None,
-                "doors_count":             None,
-                "design_preference":       None,
-                "project_status":          None,
-                "referral_source":         None,
-                "is_returning_customer":   None,
-                "active_topics":           _conv_state[sender].get('active_topics', []),
-            }
-
-    # Mock mode — skip AI entirely (for UI testing without burning API credits)
-    if mock_claude:
-        turn = len(_conversations[sender])
-        mock_reply = f"🤖 [מוק סיבוב {turn}] AI היה עונה כאן על: ״{user_message[:40]}״"
-        _conversations[sender].append({"role": "assistant", "content": mock_reply})
-        _save_conversations()
-        return {
-            "reply_text": mock_reply, "reply_text_2": None,
-            "handoff_to_human": False,
-            "summary": f"Mock mode — turn {turn}",
-            "preferred_contact_hours": None, "needs_frame_removal": None,
-            "needs_installation": None, "full_name": None, "phone": None,
-            "service_type": None, "city": None, "doors_count": None,
-            "design_preference": None,
-            "project_status": None,
-            "referral_source": None,
-            "is_returning_customer": None,
-        }
-
-    # ── STATE PIPELINE (runs before every Claude call) ────────────────────────
-    # Step 1: Initialise state for this sender if not yet exists
-    if sender not in _conv_state:
+    # ── State initialization / migration ──────────────────────────────────────
+    if sender not in _conv_state or not _is_v2_state(_conv_state[sender]):
         _conv_state[sender] = _empty_conv_state()
+        logger.info("[STATE:INIT] Fresh v2 state | sender=%s", sender)
 
-    # Step 2: Extract fields from the latest customer message using regex
-    extracted = _extract_fields_from_message(user_message)
+    state   = _conv_state[sender]
+    history = _conversations[sender]
+    is_first_message = len(history) == 1  # only the user message we just appended
+
+    # ── Mock mode ──────────────────────────────────────────────────────────────
+    if mock_claude:
+        turn = len(history)
+        mock_reply = f"🤖 [מוק סיבוב {turn}] AI היה עונה כאן על: ״{user_message[:40]}״"
+        history.append({"role": "assistant", "content": mock_reply})
+        _save_conversations()
+        return _empty_return(mock_reply, f"Mock mode turn {turn}", state)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STATE PIPELINE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Step 1: Extract fields from customer message (regex)
+    extracted = _extract_fields_from_message(user_message, state)
+
+    # Step 2: Detect new topics from message
+    new_topics = _detect_topics_from_message(user_message)
+    if new_topics:
+        extracted["_new_topics"] = new_topics
+        logger.info("[TOPICS:DETECT] sender=%s | %s", sender, new_topics)
+
+    # Step 3: Merge extracted fields into state
+    state = _merge_state(state, extracted)
+    _conv_state[sender] = state
+
     if extracted:
-        logger.info("[STATE:EXTRACT] sender=%s | extracted=%s", sender, extracted)
+        logger.info("[EXTRACT:REGEX] sender=%s | %s", sender, {k: v for k, v in extracted.items() if k != "_new_topics"})
 
-    # Step 3: Merge extracted fields into existing state (never overwrite non-null)
-    _conv_state[sender] = _merge_state(_conv_state[sender], extracted)
+    # Step 4: Apply buffered style to current topic
+    _apply_style_to_topic(state)
 
-    # Step 4: Compute stage3_done from conversation history (reliable ground-truth)
-    _history_now = _conversations.get(sender, [])
-    if not _conv_state[sender].get('stage3_done') and _compute_stage3_done(_conv_state[sender], _history_now):
-        _conv_state[sender]['stage3_done'] = True
-        logger.info("[STATE:STAGE3] Stage 3 marked done | sender=%s", sender)
+    # Step 5: Advance stage flags (reads history)
+    _advance_stage(state, history)
 
-    # Step 5: Save updated state to disk
+    # Step 6: Decide next action (pure state function)
+    action = _decide_next_action(state)
+    logger.info("[ACTION] sender=%s | stage=%d | field=%s | template=%s | context=%s",
+                sender, action.stage, action.field_to_ask, action.template_key, action.context)
+
+    # Save state before AI call
     _save_conv_state()
 
-    # Log the current known state for debugging
-    s = _conv_state[sender]
-    logger.info(
-        "[STATE:CURRENT] sender=%s | phone=%s | name=%s | city=%s | gender=%s | topics=%s | stage3=%s",
-        sender, s.get('phone'), s.get('full_name'), s.get('city'),
-        s.get('customer_gender_locked'), s.get('active_topics'), s.get('stage3_done')
-    )
-
-    # ── AI call (OpenRouter/GPT-4.1-mini or Claude) ───────────────────────────
+    # ── AI call ────────────────────────────────────────────────────────────────
     provider = "openrouter" if _use_openrouter() else "claude"
+    system = _build_system(user_message, sender, state, history, action, is_first_message)
+
     try:
         _t0 = _time.monotonic()
-        logger.info("[AI:REQ] provider=%s | sender=%s | turns=%d", provider, sender, len(_conversations[sender]))
+        logger.info("[AI:REQ] provider=%s | sender=%s | turns=%d | action=%s",
+                    provider, sender, len(history), action.field_to_ask)
         raw_text = None
-        for _attempt in range(3):
+        for attempt in range(3):
             try:
                 raw_text = await _call_ai(
-                    system=_build_system(user_message, sender, state=_conv_state[sender], history=_conversations.get(sender, [])),
-                    messages=_conversations[sender],
+                    system=system,
+                    messages=history,
                     max_tokens=900,
                     api_key=anthropic_api_key,
                     timeout=50.0,
                 )
                 break
             except (anthropic.RateLimitError, anthropic.APITimeoutError) as retry_exc:
-                if _attempt == 2:
+                if attempt == 2:
                     raise
-                wait = 5 * (2 ** _attempt)
-                logger.warning("[AI:RETRY] attempt=%d | sender=%s | %s — waiting %ds", _attempt + 1, sender, retry_exc, wait)
+                wait = 5 * (2 ** attempt)
+                logger.warning("[AI:RETRY] attempt=%d | %s — waiting %ds", attempt + 1, retry_exc, wait)
                 await asyncio.sleep(wait)
         if not raw_text:
             raise ValueError("AI returned empty response")
-        logger.info("[AI:OK] provider=%s | sender=%s | latency=%.1fs", provider, sender, _time.monotonic() - _t0)
+        logger.info("[AI:OK] provider=%s | sender=%s | latency=%.1fs",
+                    provider, sender, _time.monotonic() - _t0)
     except Exception as exc:
-        logger.error("[AI:ERR] provider=%s | sender=%s | type=%s | %s", provider, sender, type(exc).__name__, exc)
+        logger.error("[AI:ERR] sender=%s | %s", sender, exc)
         fallback = _API_ERROR_REPLY
-        _conversations[sender].append({"role": "assistant", "content": fallback})
+        history.append({"role": "assistant", "content": fallback})
         _save_conversations()
-        return {
-            "reply_text": fallback, "reply_text_2": None, "handoff_to_human": False,
-            "summary": "AI API error — fallback sent",
-            "preferred_contact_hours": None, "needs_frame_removal": None, "needs_installation": None,
-        }
+        return _empty_return(fallback, "AI error", state)
 
+    # ── Parse response ─────────────────────────────────────────────────────────
     structured = _parse_response(raw_text, sender)
 
-    # ── Step 6: Merge Claude's JSON output back into state ───────────────────
-    # Claude may have extracted additional fields we missed with regex (e.g. referral_source,
-    # service_type, active_topics). Merge them in — our pre-extracted values win for contact
-    # fields (phone/name/city) since they were already set above.
-    claude_fields = {
-        k: structured.get(k)
-        for k in ('full_name', 'phone', 'city', 'preferred_contact_hours',
-                  'service_type', 'project_status', 'needs_frame_removal',
-                  'doors_count', 'design_preference', 'referral_source',
-                  'is_returning_customer', 'needs_installation')
-        if structured.get(k) is not None
-    }
-    # customer_gender_locked from Claude — only merge if not already locked
-    claude_gender = structured.get('customer_gender_locked')
-    if claude_gender and not _conv_state[sender].get('customer_gender_locked'):
-        claude_fields['customer_gender_locked'] = claude_gender
-    # active_topics from Claude — merge (union, append-only)
-    claude_topics = structured.get('active_topics') or []
-    if claude_topics:
-        claude_fields['active_topics'] = claude_topics
+    # ── Merge Claude's extracted fields into state ─────────────────────────────
+    claude_fields = _extract_claude_fields(structured)
+    state = _merge_state(state, claude_fields)
+    _conv_state[sender] = state
 
-    _conv_state[sender] = _merge_state(_conv_state[sender], claude_fields)
-
-    # Re-compute stage3_done after merging (Claude may have replied with Stage 3 question this turn)
-    updated_history = _conversations.get(sender, [])
-    if not _conv_state[sender].get('stage3_done') and _compute_stage3_done(_conv_state[sender], updated_history):
-        _conv_state[sender]['stage3_done'] = True
-        logger.info("[STATE:STAGE3:POST] Stage 3 marked done after Claude reply | sender=%s", sender)
-
-    _save_conv_state()
-
-    # Patch the structured result to always reflect the authoritative state for contact fields
-    for field in ('phone', 'full_name', 'city', 'preferred_contact_hours', 'customer_gender_locked'):
-        if _conv_state[sender].get(field) is not None and structured.get(field) is None:
-            structured[field] = _conv_state[sender][field]
-    # Always sync active_topics from authoritative state
-    if _conv_state[sender].get('active_topics'):
-        structured['active_topics'] = _conv_state[sender]['active_topics']
-
-    # Always strip greeting/pitch from Claude responses — these lines belong only
-    # in the scripted first-pulse (sent separately). Strip from any position in the text.
-    _GREETING_PAT = re.compile(
-        r"(?:היי,?\s*)?תודה שפניתם (?:לדלתות מיכאל|למיכאל דלתות)[^\n]*\n?", re.IGNORECASE
-    )
-    _PITCH_PAT = re.compile(
-        r"(?:אנחנו|אנו) מציעים דלתות כניסה ופנים[^\n]*\n?", re.IGNORECASE
-    )
-
-    def _strip_greeting(text: str) -> str:
-        text = _GREETING_PAT.sub("", text).strip()
-        text = _PITCH_PAT.sub("", text).strip()
-        return text
-
-    is_followup_turn = any(m["role"] == "assistant" for m in _conversations[sender][:-1])
-    if is_followup_turn:
-        stripped = _strip_greeting(structured["reply_text"])
-        if stripped:
-            structured["reply_text"] = stripped
-        structured["reply_text_2"] = None
-    elif structured.get("reply_text_2"):
-        # First Claude turn: strip from pulse2 in case Claude duplicated the greeting there
-        stripped2 = _strip_greeting(structured["reply_text_2"])
-        structured["reply_text_2"] = stripped2 or None
-
-    if structured["reply_text"] in ERROR_REPLIES:
-        logger.warning("[FALLBACK] Parse fallback used | sender=%s | raw_preview=%s", sender, raw_text[:80])
-    else:
-        logger.info("[REPLY:OK] sender=%s | text=%s", sender, structured["reply_text"][:60])
-    # Store both parts as a single assistant turn so history stays clean
+    # ── Post-call: store reply in history, then re-advance stage flags ─────────
     history_content = structured["reply_text"]
     if structured.get("reply_text_2"):
         history_content += "\n\n" + structured["reply_text_2"]
-    _conversations[sender].append({"role": "assistant", "content": history_content})
+    history.append({"role": "assistant", "content": history_content})
+
+    _advance_stage(state, history)  # catch any new flags set by this reply
+    _conv_state[sender] = state
+
+    # ── First-message safety: ensure reply_text == PITCH ──────────────────────
+    if is_first_message:
+        structured["reply_text"] = PITCH
+
+    # ── Follow-up turns: strip PITCH if Claude accidentally included it ────────
+    if not is_first_message:
+        _GREETING_PAT = re.compile(
+            r"(?:היי,?\s*)?תודה שפניתם (?:לדלתות מיכאל|למיכאל דלתות)[^\n]*\n?",
+            re.IGNORECASE,
+        )
+        _PITCH_PAT = re.compile(
+            r"(?:אנחנו|אנו) מציעים דלתות כניסה ופנים[^\n]*\n?",
+            re.IGNORECASE,
+        )
+        def _strip_pitch(text: str) -> str:
+            text = _GREETING_PAT.sub("", text).strip()
+            text = _PITCH_PAT.sub("", text).strip()
+            return text
+
+        stripped = _strip_pitch(structured["reply_text"])
+        if stripped:
+            structured["reply_text"] = stripped
+        structured["reply_text_2"] = None
+
+    # ── Log ───────────────────────────────────────────────────────────────────
+    if structured["reply_text"] in ERROR_REPLIES:
+        logger.warning("[FALLBACK] Parse fallback | sender=%s | raw=%s", sender, raw_text[:80])
+    else:
+        logger.info("[REPLY:OK] sender=%s | text=%s", sender, structured["reply_text"][:60])
+
+    # ── Persist ───────────────────────────────────────────────────────────────
     _save_conversations()
     asyncio.create_task(_supabase_save_conv(sender))
-    return structured
+    _save_conv_state()
+
+    return _structured_to_return(structured, state)
 
 
+# ── Follow-up message (15-min silence reminder) ───────────────────────────────
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
-    """15-min silence → personalized reminder that references the conversation topic."""
     history = _conversations.get(sender, [])
     _FALLBACK = "היי, עדיין ממתינה לתגובה מכם 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
     if len(history) < 2:
@@ -1481,14 +1647,14 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         return _FALLBACK
     system = (
         "אתה נציג מכירות של דלתות מיכאל. "
-        "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים בסגנון הזה: "
+        "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים: "
         "\"היי, עדיין ממתינה לתגובה מכם 😊 אם יש עוד שאלות לגבי [נושא ספציפי מהשיחה], אנחנו כאן!\". "
-        "החלף את [נושא ספציפי מהשיחה] בנושא האמיתי מהשיחה (סוג הדלת, השירות, הדגם שהוזכר). "
-        "אם אין נושא ספציפי — השתמש בניסוח הגנרי: \"היי, עדיין ממתינה לתגובה מכם 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!\". "
-        "שפה ישירה ואנושית. בעברית בלבד. ללא JSON. ללא ברכות פתיחה נוספות."
+        "החלף [נושא ספציפי] בנושא מהשיחה. "
+        "שפה ישירה ואנושית. בעברית בלבד. ללא JSON."
     )
     try:
-        msg = await _call_ai(system=system, messages=history[-6:], max_tokens=120, api_key=anthropic_api_key, timeout=15.0)
+        msg = await _call_ai(system=system, messages=history[-6:], max_tokens=120,
+                             api_key=anthropic_api_key, timeout=15.0)
         msg = msg.strip()
         _conversations[sender].append({"role": "assistant", "content": msg})
         _save_conversations()
@@ -1500,96 +1666,10 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         return _FALLBACK
 
 
-async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
-    """Generate a warm, personalized closing when customer says goodbye/thanks."""
-    history = _conversations.get(sender, [])
-    system = (
-        "אתה נציג מכירות חם של דלתות מיכאל. "
-        "הלקוח סיים את השיחה (אמר תודה / להתראות / הביע הסכמה). "
-        "כתוב הודעת סגירה חמה וקצרה (2-3 שורות) שתכלול: "
-        "1. תודה חמה על הפנייה עם אימוג'י אחד חיובי "
-        "2. תזכורת שאפשר לחזור אלינו בכל עת "
-        "3. פרטי יצירת קשר: 054-2787578 "
-        "שפה אנושית, חמה, מכירתית. בעברית בלבד. ללא JSON."
-    )
-    try:
-        msg = await _call_ai(
-            system=system,
-            messages=(history[-4:] if len(history) >= 4 else history),
-            max_tokens=120,
-            api_key=anthropic_api_key,
-            timeout=15.0,
-        )
-        return msg.strip()
-    except Exception as exc:
-        logger.error("get_closing_message error | sender=%s | %s", sender, exc)
-        return (
-            "תודה רבה על הפנייה! 🙏\n"
-            "אנחנו כאן בכל עת שתצטרכו — שיהיה לכם יום נהדר!\n"
-            "דלתות מיכאל | 054-2787578"
-        )
+# ── Public API for main.py ─────────────────────────────────────────────────────
+def get_conversations() -> dict:
+    return _conversations
 
 
-def is_closing_intent(message: str, conversation_turns: int) -> bool:
-    """Return True if message looks like a farewell/thank-you and conversation is underway.
-    Requires >= 4 turns so a lone 'תודה' on a 1-turn greeting doesn't trigger closing."""
-    if conversation_turns < 4:
-        return False
-    m = message.strip()
-    return bool(re.match(
-        r"^(תודה רבה|תודה|תנקס|תנקיו|אחלה תודה|נשמע תודה|בסדר תודה|"
-        r"אוקי תודה|אוקיי תודה|הבנתי תודה|קיבלתי תודה|"
-        r"להתראות|ביי|שלום ולהתראות|יום טוב|שיהיה טוב|שיהיה יום טוב|"
-        r"קיבלתי את המידע|"
-        r"אצור קשר|אחזור אליך|נחזור|נצור קשר|אעלה בקשר)[.!,\s]*$",
-        # Removed: הכל ברור / הכל טוב / הכל מובן — ambiguous, could be summary confirmation
-        m, re.IGNORECASE,
-    ))
-
-
-async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> str:
-    """Generate a structured Hebrew summary of the full conversation for CRM use."""
-    history = _conversations.get(sender, [])
-    if not history:
-        return "שיחה קצרה — לא נאסף מידע."
-    system = (
-        "אתה נציג של דלתות מיכאל. סכם את שיחת הוואטסאפ הבאה בעברית בצורה קצרה ומובנית.\n"
-        "כלול את הסעיפים הרלוונטיים בלבד (אל תכתוב סעיף שאין לו מידע):\n"
-        "• שם: [שם הלקוח אם ידוע]\n"
-        "• עיר: [עיר מגורים אם ידועה]\n"
-        "• בקשה: [מה הלקוח רצה — סוג דלת/שירות/דגם]\n"
-        "• פרטים: [מידות, צבע, סגנון, פירוק משקוף — אם הוזכרו]\n"
-        "• זמינות: [שעות מועדפות לחזרה אם הוזכרו]\n"
-        "• סטטוס: [הועבר לנציג / נסגרה בידידות / נסגרה ללא מענה / בהמתנה]\n"
-        "עד 6 שורות. ללא JSON. עברית בלבד."
-    )
-    try:
-        result = await _call_ai(system=system, messages=history, max_tokens=200, api_key=anthropic_api_key, timeout=15.0)
-        return result.strip()
-    except Exception as exc:
-        logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
-        return "שגיאה ביצירת סיכום."
-
-
-def clear_conversation(sender: str) -> None:
-    _conversations.pop(sender, None)
-    _save_conversations()
-    _conv_state.pop(sender, None)
-    _save_conv_state()
-    _last_seen.pop(sender, None)
-    _save_last_seen()
-    _force_fresh.add(sender)  # guarantees next message starts as a new conversation
-    logger.info("Conversation cleared | %s", sender)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_supabase_delete_conv(sender))
-    except RuntimeError:
-        pass  # no running loop — deletion skipped (startup/test context)
-
-
-async def _supabase_delete_conv(sender: str) -> None:
-    try:
-        from ..providers.supabase_store import delete_conversation
-        await delete_conversation(sender)
-    except Exception as e:
-        logger.warning("[SUPABASE] delete_conversation failed: %s", e)
+def get_conv_state() -> dict:
+    return _conv_state
