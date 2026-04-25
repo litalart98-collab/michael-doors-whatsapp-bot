@@ -12,22 +12,33 @@ jobs:
         run: sleep 240
 
       - name: Call /reload on the live bot
+        shell: bash
         run: |
-          ADMIN="${{ secrets.ADMIN_SECRET }}"
-          URL="https://michael-doors-whatsapp-bot.onrender.com/reload"
+          set +e  # don't abort on non-zero exit codes
+
+          BASE_URL="https://michael-doors-whatsapp-bot.onrender.com/reload"
+          ADMIN=$(echo "${{ secrets.ADMIN_SECRET }}" | tr -d '[:space:]')
+
           if [ -n "$ADMIN" ]; then
-            URL="${URL}?admin=${ADMIN}"
+            URL="${BASE_URL}?admin=${ADMIN}"
+          else
+            URL="$BASE_URL"
           fi
 
-          echo "Calling: $URL"
-          STATUS=$(curl -s -o /tmp/reload_body.txt -w "%{http_code}" --max-time 45 "$URL")
-          BODY=$(cat /tmp/reload_body.txt)
+          echo "Calling /reload..."
+          HTTP_STATUS=$(curl -s -o /tmp/body.txt -w "%{http_code}" --max-time 45 "$URL")
+          CURL_EXIT=$?
 
-          echo "Status: $STATUS"
-          echo "Response: $BODY"
+          echo "curl exit code: $CURL_EXIT"
+          echo "HTTP status: $HTTP_STATUS"
+          echo "Response: $(cat /tmp/body.txt 2>/dev/null)"
 
-          if [ "$STATUS" = "200" ]; then
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "WARNING: curl failed (exit $CURL_EXIT) — bot may still be starting up"
+          elif [ "$HTTP_STATUS" = "200" ]; then
             echo "Bot reloaded successfully"
           else
-            echo "WARNING: /reload returned HTTP $STATUS — bot may still be starting up. Render deploy succeeded regardless."
+            echo "WARNING: /reload returned HTTP $HTTP_STATUS"
           fi
+
+          exit 0  # always succeed — Render deploy happened regardless
