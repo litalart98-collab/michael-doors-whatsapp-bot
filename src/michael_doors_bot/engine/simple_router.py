@@ -169,6 +169,303 @@ def _save_conversations() -> None:
         pass
 
 
+# ── Per-sender structured conversation state ──────────────────────────────────
+# Stores verified field values extracted from the conversation.
+# Updated BEFORE every Claude call so Claude always sees the correct state.
+# Never lost between turns — fields accumulate until the session resets.
+_conv_state: dict[str, dict] = {}
+_STATE_PATH = _DATA_DIR / "conv_state.json"
+
+try:
+    _conv_state = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+except Exception:
+    pass
+
+
+def _save_conv_state() -> None:
+    try:
+        _STATE_PATH.write_text(
+            json.dumps(_conv_state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _empty_conv_state() -> dict:
+    return {
+        "full_name": None,
+        "phone": None,
+        "city": None,
+        "preferred_contact_hours": None,
+        "service_type": None,
+        "project_status": None,
+        "needs_frame_removal": None,
+        "doors_count": None,
+        "design_preference": None,
+        "customer_gender_locked": None,
+        "active_topics": [],
+        "stage3_done": False,   # True once Stage 3 question has been sent AND answered
+    }
+
+
+# ── Known Israeli cities for city extraction ──────────────────────────────────
+_ISRAELI_CITIES: set[str] = {
+    # Primary service area
+    "נתיבות", "באר שבע", "אשקלון", "אשדוד", "אופקים", "שדרות", "רהט", "דימונה",
+    "קריית גת", "קריית מלאכי", "ערד", "אילת", "מצפה רמון", "ירוחם", "עומר",
+    "להבים", "מיתר", "כסייפה", "חורה", "תל שבע", "רהט", "לקיה",
+    # Major cities
+    "תל אביב", "ירושלים", "חיפה", "ראשון לציון", "פתח תקווה", "נתניה",
+    "בני ברק", "חולון", "רמת גן", "מודיעין", "כפר סבא", "הרצליה",
+    "רחובות", "בת ים", "בית שמש", "עפולה", "נהריה", "טבריה", "לוד",
+    "רמלה", "נצרת", "רעננה", "הוד השרון", "קריית אונו", "אור יהודה",
+    "מזכרת בתיה", "גדרה", "יבנה", "גן יבנה", "ראש העין", "כפר יונה",
+    "טירת כרמל", "עכו", "כרמיאל", "צפת", "קריית ביאליק", "קריית מוצקין",
+    "קריית ים", "קריית אתא", "מגדל העמק", "זכרון יעקב", "חדרה",
+    "אום אל פחם", "שפרעם", "גבעתיים", "אריאל", "מעלה אדומים",
+    "מודיעין עילית", "ביתר עילית", "בית שאן", "יוקנעם", "קצרין",
+    "אלעד", "גבעת שמואל", "אור עקיבא", "נס ציונה", "גבעת ברנר",
+    "ב\"ש", "ת\"א",   # shorthands
+}
+
+# Regex: Israeli phone numbers (0-prefix or 972-prefix, with optional separators)
+_PHONE_RE = re.compile(
+    r'(?<!\d)'
+    r'(\+?972[-\s]?|0)'
+    r'([5][0-9][-\s]?[0-9]{3}[-\s]?[0-9]{4}'
+    r'|[5][0-9]{8})'
+    r'(?!\d)'
+)
+
+# Hebrew word pattern (used for name validation)
+_HEB_WORD_RE = re.compile(r'^[\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{0,35}$')
+
+
+def _extract_fields_from_message(text: str) -> dict:
+    """
+    Extract structured fields from a single customer message using regex.
+    Returns only non-null values for fields that were confidently found.
+    This runs BEFORE the Claude call so the extracted values are authoritative.
+    """
+    extracted: dict = {}
+    t = text.strip()
+
+    # ── Phone ─────────────────────────────────────────────────────────────────
+    phone_match = _PHONE_RE.search(t)
+    if phone_match:
+        raw = re.sub(r'[-\s+]', '', phone_match.group(0))
+        if raw.startswith('972'):
+            raw = '0' + raw[3:]
+        elif raw.startswith('+972'):
+            raw = '0' + raw[4:]
+        extracted['phone'] = raw
+
+    # ── City ──────────────────────────────────────────────────────────────────
+    for city in _ISRAELI_CITIES:
+        if city in t:
+            extracted['city'] = city
+            break
+    # Also detect "מאשקלון", "בנתיבות" etc. (preposition + city)
+    if 'city' not in extracted:
+        city_prep = re.search(r'(?:מ|ב|ל|ו)(נתיבות|באר שבע|אשקלון|אשדוד|אופקים|שדרות|ירושלים|תל אביב|חיפה|ראשון לציון|פתח תקווה|נתניה|רחובות)', t)
+        if city_prep:
+            extracted['city'] = city_prep.group(1)
+
+    # ── Name — Hebrew word(s) adjacent to phone number ────────────────────────
+    if phone_match:
+        # Text before the phone number
+        before = t[:phone_match.start()].strip()
+        # Remove common name-introduction prefixes
+        before = re.sub(r'^(?:שמי|קוראים לי|אני|שם שלי|השם שלי)\s*', '', before, flags=re.IGNORECASE).strip()
+        # Valid name: 2–4 Hebrew words, no digits, not a city
+        if (before
+                and _HEB_WORD_RE.match(before)
+                and before not in _ISRAELI_CITIES
+                and len(before) >= 2):
+            extracted['full_name'] = before
+
+        if 'full_name' not in extracted:
+            # Check after phone (e.g. "0523989366 ליטל")
+            after = t[phone_match.end():].strip()
+            # Strip city from after_phone so it doesn't get picked up as name
+            if 'city' in extracted:
+                after = after.replace(extracted['city'], '').strip()
+            after = re.sub(r'^[,\s]+|[,\s]+$', '', after).strip()
+            if (after
+                    and _HEB_WORD_RE.match(after)
+                    and after not in _ISRAELI_CITIES
+                    and len(after) >= 2):
+                extracted['full_name'] = after
+    else:
+        # No phone — look for explicit name markers
+        name_m = re.match(
+            r'^(?:שמי|קוראים לי|שם שלי|אני)\s+([\u05d0-\u05fa][\u05d0-\u05fa\'\- ]{1,30})',
+            t, re.IGNORECASE
+        )
+        if name_m:
+            candidate = name_m.group(1).strip()
+            if candidate not in _ISRAELI_CITIES:
+                extracted['full_name'] = candidate
+
+    # ── Gender ────────────────────────────────────────────────────────────────
+    if re.search(r'מחפשת|צריכה\b|מתעניינת|שמחה\b|מרוצה\b|מעוניינת|רציתי|קניתי\b|הגעתי\b', t):
+        extracted['customer_gender_locked'] = 'female'
+    elif re.search(r'מחפש\b|צריך\b|מתעניין\b|שמח\b|מעוניין\b', t):
+        extracted['customer_gender_locked'] = 'male'
+
+    # ── doors_count ───────────────────────────────────────────────────────────
+    count_m = re.search(r'(\d+)\s*דלתות', t)
+    if count_m:
+        extracted['doors_count'] = int(count_m.group(1))
+
+    # ── needs_frame_removal ───────────────────────────────────────────────────
+    if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
+        extracted['needs_frame_removal'] = True
+    elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
+        extracted['needs_frame_removal'] = False
+
+    # ── design_preference ─────────────────────────────────────────────────────
+    if re.search(r'\bחלקה\b', t, re.IGNORECASE):
+        extracted['design_preference'] = 'חלקה'
+    elif re.search(r'\bמעוצבת\b', t, re.IGNORECASE):
+        extracted['design_preference'] = 'מעוצבת'
+
+    # ── project_status ────────────────────────────────────────────────────────
+    if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
+        extracted['project_status'] = 'בית חדש'
+    elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים', t, re.IGNORECASE):
+        extracted['project_status'] = 'שיפוץ'
+    elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה|קיימת', t, re.IGNORECASE):
+        extracted['project_status'] = 'החלפה'
+
+    # ── preferred_contact_hours ───────────────────────────────────────────────
+    hours_m = re.search(r'אחרי\s*(\d{1,2})', t)
+    if hours_m:
+        h = int(hours_m.group(1))
+        if h < 12:
+            h += 12  # "אחרי 5" → 17:00
+        extracted['preferred_contact_hours'] = f'אחרי {h:02d}:00'
+    elif re.search(r'בוקר\b', t) and re.search(r'בין\s*(\d)', t):
+        extracted['preferred_contact_hours'] = 'בבוקר'
+    elif re.search(r'בכל שעה|בכל זמן|לא משנה', t, re.IGNORECASE):
+        extracted['preferred_contact_hours'] = 'בכל שעה'
+
+    return extracted
+
+
+def _merge_state(existing: dict, new_fields: dict) -> dict:
+    """
+    Merge new_fields into the existing state dict.
+    RULE: never overwrite a non-null/non-False value with null.
+    gender_locked is set once and never changed.
+    active_topics is a union (append-only).
+    """
+    merged = dict(existing)
+    for key, value in new_fields.items():
+        # Skip null/empty new values — existing wins
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+
+        if key == 'active_topics':
+            existing_list = merged.get('active_topics') or []
+            if isinstance(value, list):
+                for item in value:
+                    if item not in existing_list:
+                        existing_list.append(item)
+            merged['active_topics'] = existing_list
+
+        elif key == 'customer_gender_locked':
+            # Lock once — never change after first detection
+            if not merged.get('customer_gender_locked'):
+                merged[key] = value
+
+        elif key == 'needs_frame_removal':
+            # False is a valid value — only skip if existing is already set
+            if merged.get(key) is None:
+                merged[key] = value
+
+        else:
+            # For all other fields: new value wins if it's non-null
+            if merged.get(key) is None:
+                merged[key] = value
+
+    return merged
+
+
+def _state_context_block(state: dict) -> str:
+    """
+    Build a context block injected into every Claude call.
+    Shows Claude exactly which fields are already collected so it never re-asks them.
+    """
+    if not state:
+        return ""
+
+    def tick(val) -> str:
+        if val is None:
+            return "❌ NOT YET COLLECTED"
+        if val is False:
+            return "✅ false"
+        if val is True:
+            return "✅ true"
+        return f"✅ {val}"
+
+    phone = state.get('phone')
+    name  = state.get('full_name')
+    city  = state.get('city')
+    hours = state.get('preferred_contact_hours')
+    gender = state.get('customer_gender_locked')
+    nfr   = state.get('needs_frame_removal')
+    dp    = state.get('design_preference')
+    dc    = state.get('doors_count')
+    ps    = state.get('project_status')
+
+    lines = [
+        "## VERIFIED CONVERSATION STATE",
+        "These values were extracted by the pre-processing layer. They are authoritative.",
+        "⚠️  Do NOT ask the customer for any field marked ✅ — it is already known.",
+        "",
+        "Contact fields:",
+        f"  phone:                   {tick(phone)}",
+        f"  full_name:               {tick(name)}",
+        f"  city:                    {tick(city)}",
+        f"  preferred_contact_hours: {tick(hours)}",
+        "",
+        "Product fields:",
+        f"  needs_frame_removal: {tick(nfr)}",
+        f"  design_preference:   {tick(dp)}",
+        f"  doors_count:         {tick(dc)}",
+        f"  project_status:      {tick(ps)}",
+        "",
+    ]
+
+    # Gender — explicit instruction
+    if gender == 'female':
+        lines.append("Gender: FEMALE — use לך / אלייך / תוכלי / תשאירי / תרצי in every reply.")
+    elif gender == 'male':
+        lines.append("Gender: MALE — use לך / אליך / תוכל / תשאיר / תרצה in every reply.")
+    else:
+        lines.append("Gender: UNKNOWN — use neutral plural: לכם / אליכם / תוכלו / תשאירו.")
+
+    # Next contact field to ask
+    lines.append("")
+    if not phone:
+        lines.append("NEXT CONTACT FIELD: phone — ask \"מה מספר הטלפון?\"")
+    elif not name:
+        lines.append("NEXT CONTACT FIELD: full_name — ask \"על שם מי הפנייה?\"")
+    elif not city:
+        lines.append("NEXT CONTACT FIELD: city — ask \"באיזו עיר מדובר?\"")
+    else:
+        lines.append("NEXT CONTACT FIELD: all collected — proceed to Stage 5 summary.")
+
+    lines.append("")
+    lines.append("If the customer's latest message contained contact info you haven't extracted above,")
+    lines.append("extract ALL fields from it now, add them to your JSON output, and use the updated state.")
+
+    return "\n".join(lines)
+
+
 # ── Last-seen timestamps (tracks last customer message time per sender) ────────
 # Used to detect 24h+ gaps and reset conversation to a clean slate.
 _last_seen: dict[str, float] = {}
@@ -307,7 +604,7 @@ def _next_opening_time() -> str:
     return f"ביום {next_day} משעה {h_start}:00"
 
 
-def _build_system(user_msg: str, sender: str = "") -> str:
+def _build_system(user_msg: str, sender: str = "", state: dict | None = None) -> str:
     if not _SYSTEM_PROMPT:
         logger.error("System prompt is empty — Claude will have no instructions")
     greeting = _israel_greeting()
@@ -321,6 +618,11 @@ def _build_system(user_msg: str, sender: str = "") -> str:
             "do NOT include any time-based greeting."
         ),
     ]
+    # Inject verified conversation state so Claude never re-asks collected fields
+    if state:
+        state_block = _state_context_block(state)
+        if state_block:
+            parts.append(state_block)
 
     # Bypass hours check for test/admin phones
     _is_bypass = sender and sender in _cfg.HOURS_BYPASS_PHONES
@@ -757,6 +1059,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         # Explicit #reset (or session close / handoff) — always wipe, works in both modes
         _force_fresh.discard(sender)
         _conversations.pop(sender, None)
+        _conv_state.pop(sender, None)
         _last_seen.pop(sender, None)
         logger.info("[SESSION:FORCED] Fresh start after explicit reset | sender=%s", sender)
     elif not _cfg.TEST_MODE:
@@ -767,6 +1070,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             gap_h = (now - last) / 3600
             logger.info("[SESSION:RESET] %.1fh gap — fresh start | sender=%s", gap_h, sender)
             _conversations.pop(sender, None)
+            _conv_state.pop(sender, None)
     _last_seen[sender] = now
     _save_last_seen()
 
@@ -852,7 +1156,30 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
             "is_returning_customer": None,
         }
 
-    # AI call (OpenRouter/GPT-4.1-mini or Claude)
+    # ── STATE PIPELINE (runs before every Claude call) ────────────────────────
+    # Step 1: Initialise state for this sender if not yet exists
+    if sender not in _conv_state:
+        _conv_state[sender] = _empty_conv_state()
+
+    # Step 2: Extract fields from the latest customer message using regex
+    extracted = _extract_fields_from_message(user_message)
+    if extracted:
+        logger.info("[STATE:EXTRACT] sender=%s | extracted=%s", sender, extracted)
+
+    # Step 3: Merge extracted fields into existing state (never overwrite non-null)
+    _conv_state[sender] = _merge_state(_conv_state[sender], extracted)
+
+    # Step 4: Save updated state to disk
+    _save_conv_state()
+
+    # Log the current known state for debugging
+    s = _conv_state[sender]
+    logger.info(
+        "[STATE:CURRENT] sender=%s | phone=%s | name=%s | city=%s | gender=%s",
+        sender, s.get('phone'), s.get('full_name'), s.get('city'), s.get('customer_gender_locked')
+    )
+
+    # ── AI call (OpenRouter/GPT-4.1-mini or Claude) ───────────────────────────
     provider = "openrouter" if _use_openrouter() else "claude"
     try:
         _t0 = _time.monotonic()
@@ -861,7 +1188,7 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         for _attempt in range(3):
             try:
                 raw_text = await _call_ai(
-                    system=_build_system(user_message, sender),
+                    system=_build_system(user_message, sender, state=_conv_state[sender]),
                     messages=_conversations[sender],
                     max_tokens=900,
                     api_key=anthropic_api_key,
@@ -889,6 +1216,31 @@ async def get_reply(sender: str, user_message: str, anthropic_api_key: str, mock
         }
 
     structured = _parse_response(raw_text, sender)
+
+    # ── Step 5: Merge Claude's JSON output back into state ────────────────────
+    # Claude may have extracted additional fields we missed with regex (e.g. referral_source,
+    # service_type, active_topics, stage3_done). Merge them in — our pre-extracted values
+    # win for contact fields (phone/name/city) since they were already set above.
+    claude_fields = {
+        k: structured.get(k)
+        for k in ('full_name', 'phone', 'city', 'preferred_contact_hours',
+                  'service_type', 'project_status', 'needs_frame_removal',
+                  'doors_count', 'design_preference', 'referral_source',
+                  'is_returning_customer', 'needs_installation')
+        if structured.get(k) is not None
+    }
+    # customer_gender_locked from Claude — only merge if not already locked
+    claude_gender = structured.get('customer_gender_locked')
+    if claude_gender and not _conv_state[sender].get('customer_gender_locked'):
+        claude_fields['customer_gender_locked'] = claude_gender
+
+    _conv_state[sender] = _merge_state(_conv_state[sender], claude_fields)
+    _save_conv_state()
+
+    # Patch the structured result to always reflect the authoritative state for contact fields
+    for field in ('phone', 'full_name', 'city', 'preferred_contact_hours', 'customer_gender_locked'):
+        if _conv_state[sender].get(field) is not None and structured.get(field) is None:
+            structured[field] = _conv_state[sender][field]
 
     # Always strip greeting/pitch from Claude responses — these lines belong only
     # in the scripted first-pulse (sent separately). Strip from any position in the text.
@@ -1032,6 +1384,8 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
 def clear_conversation(sender: str) -> None:
     _conversations.pop(sender, None)
     _save_conversations()
+    _conv_state.pop(sender, None)
+    _save_conv_state()
     _last_seen.pop(sender, None)
     _save_last_seen()
     _force_fresh.add(sender)  # guarantees next message starts as a new conversation
