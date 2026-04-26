@@ -615,12 +615,21 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     elif re.search(r'מחפש\b|צריך\b|מתעניין\b|שמח\b|מעוניין\b', t):
         extracted['customer_gender_locked'] = 'male'
 
-    # ── Entrance scope (entrance_doors only — never for mamad) ───────────────
-    # mamad never asks "כולל משקוף" — scope is irrelevant for mamad pricing.
-    if current_topic != "mamad":
+    # ── Entrance scope ────────────────────────────────────────────────────────
+    # Only extract when the active topic is entrance_doors OR the same message
+    # explicitly names an entrance door — prevents ambiguous phrases like
+    # "דלת בלבד" (before any topic is known) from being misread as entrance scope.
+    _entrance_context = (
+        current_topic == "entrance_doors"
+        or bool(re.search(
+            r'דלת כניסה|דלת חוץ|דלת חיצונית|דלת ראשית|כניסה לבית|כניסה לדירה',
+            t, re.IGNORECASE,
+        ))
+    )
+    if _entrance_context:
         if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
             extracted['entrance_scope'] = "with_frame"
-        elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
+        elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
             extracted['entrance_scope'] = "door_only"
 
     # ── Style ─────────────────────────────────────────────────────────────────
@@ -1017,10 +1026,14 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
     Update all stage flags based on conversation history.
     Called before _decide_next_action() and again after the AI reply is stored.
     """
-    # stage3_done
+    # stage3_done — only advance when all topic queues are already complete.
+    # Prevents false-positive: Claude occasionally writes "יש עוד משהו" during
+    # topic qualification; if the customer replies to THAT message, the old code
+    # would incorrectly mark Stage 3 as done and skip straight to contact opener.
     if not state.get("stage3_done"):
-        if _compute_stage3_done_from_history(history):
-            state["stage3_done"] = True
+        if _compute_current_topic(state) is None:  # every active topic is complete
+            if _compute_stage3_done_from_history(history):
+                state["stage3_done"] = True
 
     # stage4_opener_sent — check for contact opener in history.
     # "אשמח לשם" is the common prefix in ALL opener variants:
