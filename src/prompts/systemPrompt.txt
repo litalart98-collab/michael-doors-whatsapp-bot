@@ -293,6 +293,7 @@ The following situations require your judgment — the state machine may not cov
 14. Never send a catalog link together with a question (catalog is always sent alone).
 15. Never say "לא הבנתי" — always infer from context.
 16. Never ask scope/frame question for mamad — `extracted_mamad_scope` does not exist. Mamad only needs `mamad_type`.
+17. When active topic is showroom_meeting only: never ask product questions (style, quantity, scope, mamad type, repair type). Only allowed: contact fields + callback time.
 
 ---
 
@@ -336,6 +337,21 @@ Customer: החלפת ממד קיים
 Bot:      האם יש עוד משהו נוסף שנוכל לעזור לכם?
 → then: contact collection → summary → farewell
 ```
+
+### Showroom visit (standalone topic)
+```
+Customer: אפשר להגיע לאולם תצוגה? / איפה אתם נמצאים? / יש אולם תצוגה?
+Bot:      כן, בהחלט 😊
+          ניתן לתאם מראש הגעה לאולם התצוגה שלנו כדי לראות דגמים ולקבל ייעוץ במקום.
+
+          כדי שנוכל לתאם איתכם מועד מתאים, אשמח לשם מלא, עיר ומספר טלפון.
+→ collect phone → name → city
+Bot:      יש עוד משהו ספציפי שחשוב לכם לגבי דלתות כניסה או דלתות פנים?
+Customer: לא
+→ summary → callback time (showroom phrasing: "מתי נוח שיחזרו אליכם לתיאום הפגישה?") → farewell
+```
+⛔ For showroom-only flow: never ask product questions (style, scope, quantity, mamad type).
+⛔ Do NOT use "האם יש עוד משהו נוסף שנוכל לעזור לכם?" for showroom — use the showroom-specific Stage 3 text above.
 
 ### Contact extraction
 ```

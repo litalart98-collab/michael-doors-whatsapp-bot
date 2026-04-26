@@ -90,8 +90,22 @@ QUESTION_TEMPLATES: dict[str, str] = {
     # Repair intro (fixed)
     "repair_intro":              "אוי, זה לא נעים 💙 ספרו לי מה קורה — ננסה לטפל בזה.",
 
-    # Showroom contact opener variant
-    "contact_opener_showroom":   "כן, אפשר להגיע לאולם התצוגה. כדי שנציג יתאם איתכם אישית, אשמח לשם, עיר ומספר טלפון.",
+    # Showroom contact opener (sent as first response to showroom inquiry)
+    "contact_opener_showroom": (
+        "כן, בהחלט 😊\n"
+        "ניתן לתאם מראש הגעה לאולם התצוגה שלנו כדי לראות דגמים ולקבל ייעוץ במקום.\n\n"
+        "כדי שנוכל לתאם איתכם מועד מתאים, אשמח לשם מלא, עיר ומספר טלפון."
+    ),
+
+    # Showroom Stage 3 — asked AFTER contact collected (gender variants)
+    "ask_showroom_stage3_neutral": "יש עוד משהו ספציפי שחשוב לכם לגבי דלתות כניסה או דלתות פנים?",
+    "ask_showroom_stage3_female":  "יש עוד משהו ספציפי שחשוב לך לגבי דלתות כניסה או דלתות פנים?",
+    "ask_showroom_stage3_male":    "יש עוד משהו ספציפי שחשוב לך לגבי דלתות כניסה או דלתות פנים?",
+
+    # Callback time — showroom variant (third person, includes visit scheduling context)
+    "ask_callback_time_showroom_neutral": "מתי נוח שיחזרו אליכם לתיאום הפגישה?",
+    "ask_callback_time_showroom_female":  "מתי נוח שיחזרו אלייך לתיאום הפגישה?",
+    "ask_callback_time_showroom_male":    "מתי נוח שיחזרו אליך לתיאום הפגישה?",
 }
 
 # ── Error messages ────────────────────────────────────────────────────────────

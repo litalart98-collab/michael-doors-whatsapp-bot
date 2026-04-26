@@ -479,7 +479,10 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
     "showroom_meeting": re.compile(
         r"לבוא לאולם|תיאום ביקור|לראות מקרוב|מתי אפשר לבוא"
         r"|לקבוע פגישה|לבוא לחנות|רוצה להגיע|אפשר לקבוע פגישה"
-        r"|אולם תצוגה|אולם התצוגה",
+        r"|אולם תצוגה|אולם התצוגה"
+        r"|איפה אתם נמצאים|היכן אתם נמצאים|איפה אתם|היכן אתם"
+        r"|יש לכם אולם|יש אולם|יש לכם חנות|יש לכם מקום"
+        r"|אפשר להגיע לאולם|לראות דגמים|לבוא לראות",
         re.IGNORECASE,
     ),
     "repair": re.compile(
@@ -669,7 +672,9 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     # ── Showroom requested ────────────────────────────────────────────────────
     if re.search(
         r'לבוא לאולם|לבקר|לבוא אליכם|לקבוע פגישה|ביקור באולם|מתי אפשר לבוא'
-        r'|אפשר להגיע|רוצה להגיע|לראות מקרוב',
+        r'|אפשר להגיע|רוצה להגיע|לראות מקרוב'
+        r'|אולם תצוגה|אולם התצוגה|איפה אתם נמצאים|היכן אתם'
+        r'|יש לכם אולם|יש אולם|אפשר להגיע לאולם|לראות דגמים|לבוא לראות',
         t, re.IGNORECASE
     ):
         extracted['showroom_requested'] = True
@@ -787,8 +792,9 @@ def _topic_complete(topic: str, state: dict) -> bool:
         return state.get("mamad_type") is not None
 
     if topic == "showroom_meeting":
-        # Only complete when customer explicitly requested showroom (fix 2)
-        return bool(state.get("showroom_requested"))
+        # No product questions for showroom — complete as soon as topic is detected.
+        # Stage 3 is asked AFTER contact collection (handled in _decide_next_action).
+        return True
 
     if topic == "repair":
         # Repair has no product fields — always "complete" for queue purposes
@@ -860,11 +866,15 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
 
 
 def _get_callback_key(state: dict) -> str:
+    active = state.get("active_topics") or []
+    is_showroom_only = (set(active) == {"showroom_meeting"})
     gender = state.get("customer_gender_locked")
-    if gender == "female":
-        return "ask_callback_time_female"
-    if gender == "male":
-        return "ask_callback_time_male"
+    if is_showroom_only:
+        if gender == "female": return "ask_callback_time_showroom_female"
+        if gender == "male":   return "ask_callback_time_showroom_male"
+        return "ask_callback_time_showroom_neutral"
+    if gender == "female": return "ask_callback_time_female"
+    if gender == "male":   return "ask_callback_time_male"
     return "ask_callback_time_neutral"
 
 
@@ -891,11 +901,14 @@ def _decide_next_action(state: dict) -> NextAction:
 
         # ── All topic queues complete ─────────────────────────────────────────
 
-        # repair-only skips Stage 3
-        is_repair_only = (active == ["repair"])
+        # repair-only skips Stage 3 entirely
+        is_repair_only   = (active == ["repair"])
+        # showroom-only skips pre-contact Stage 3; does post-contact Stage 3 instead
+        is_showroom_only = (set(active) == {"showroom_meeting"})
 
         # Stage 3: pre-contact wrap-up (gender-aware)
-        if not state.get("stage3_done") and not is_repair_only:
+        # Skip for repair-only AND showroom-only (showroom Stage 3 comes after contacts)
+        if not state.get("stage3_done") and not is_repair_only and not is_showroom_only:
             gender = state.get("customer_gender_locked")
             stage3_key = (
                 "stage3_question_female" if gender == "female" else
@@ -923,6 +936,17 @@ def _decide_next_action(state: dict) -> NextAction:
         if not state.get("city"):
             return NextAction(4, "city", "ask_city", False, "stage 4: ask city")
 
+        # Showroom post-contact Stage 3 — after all contacts collected, ask about preferences
+        if is_showroom_only and not state.get("stage3_done"):
+            gender = state.get("customer_gender_locked")
+            showroom_s3_key = (
+                "ask_showroom_stage3_female" if gender == "female" else
+                "ask_showroom_stage3_male"   if gender == "male"   else
+                "ask_showroom_stage3_neutral"
+            )
+            return NextAction(3, "stage3_question", showroom_s3_key, True,
+                              "showroom stage 3: ask about door preferences after contact collection")
+
         # Stage 5: summary + confirmation
         if not state.get("summary_sent"):
             return NextAction(5, "summary", "_summary_dynamic", False,
@@ -948,12 +972,17 @@ def _decide_next_action(state: dict) -> NextAction:
 
 def _compute_stage3_done_from_history(history: list[dict]) -> bool:
     """True if Stage 3 question has been sent AND customer replied after it.
-    Detects all gender variants by matching the shared substring."""
-    _STAGE3_MARKER = "יש עוד משהו נוסף שנוכל"  # present in all three variants
+    Detects all gender/flow variants by matching shared substrings."""
+    _STAGE3_MARKERS = (
+        "יש עוד משהו נוסף שנוכל",    # standard variants (neutral/female/male)
+        "יש עוד משהו ספציפי שחשוב",   # showroom variant
+    )
     found = False
     for msg in history:
-        if not found and msg.get("role") == "assistant" and _STAGE3_MARKER in msg.get("content", ""):
-            found = True
+        if not found and msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if any(m in content for m in _STAGE3_MARKERS):
+                found = True
         elif found and msg.get("role") == "user":
             return True
     return False
@@ -970,17 +999,14 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
             state["stage3_done"] = True
 
     # stage4_opener_sent — check for contact opener in history.
-    # Use the distinctive phrase that appears in ALL gender variants
-    # ("אליכם" / "אלייך" / "אליך" all differ, but this phrase is constant).
+    # "אשמח לשם" is the common prefix in ALL opener variants:
+    #   standard:  "אשמח לשם, עיר ומספר טלפון"
+    #   showroom:  "אשמח לשם מלא, עיר ומספר טלפון"
     if not state.get("stage4_opener_sent"):
-        opener_marker   = "אשמח לשם, עיר ומספר טלפון"
-        showroom_marker = "כדי שנציג יתאם איתכם אישית"
         for m in history:
-            if m.get("role") == "assistant":
-                content = m.get("content", "")
-                if opener_marker in content or showroom_marker in content:
-                    state["stage4_opener_sent"] = True
-                    break
+            if m.get("role") == "assistant" and "אשמח לשם" in m.get("content", ""):
+                state["stage4_opener_sent"] = True
+                break
 
     # summary_sent — check for summary marker
     if not state.get("summary_sent"):
@@ -1207,7 +1233,8 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  reply_text_2: null",
             ]
         elif action.template_key in (
-            "ask_callback_time_neutral", "ask_callback_time_female", "ask_callback_time_male"
+            "ask_callback_time_neutral", "ask_callback_time_female", "ask_callback_time_male",
+            "ask_callback_time_showroom_neutral", "ask_callback_time_showroom_female", "ask_callback_time_showroom_male",
         ):
             lines += [
                 f'INSTRUCTION: Send EXACTLY this text in reply_text: {template_text!r}',
