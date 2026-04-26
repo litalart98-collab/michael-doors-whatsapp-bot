@@ -660,8 +660,10 @@ def _topic_complete(topic: str, state: dict) -> bool:
             return False
         if style == "flat":
             return True
-        # designed or undecided → need catalog sent + model collected
-        return state.get("entrance_model") is not None
+        # designed/undecided → complete once catalog has been sent.
+        # entrance_model is saved passively if the customer mentions one,
+        # but it never blocks progression to the next topic.
+        return bool(state.get("entrance_catalog_sent"))
 
     if topic == "interior_doors":
         if state.get("interior_project_type") is None:
@@ -673,7 +675,9 @@ def _topic_complete(topic: str, state: dict) -> bool:
             return False
         if style == "flat":
             return True
-        return state.get("interior_model") is not None
+        # designed/undecided → complete once catalog has been sent.
+        # interior_model is saved passively if the customer mentions one.
+        return bool(state.get("interior_catalog_sent"))
 
     if topic == "mamad":
         return (
@@ -714,10 +718,8 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
         if state.get("entrance_style") in ("designed", "undecided"):
             if not state.get("entrance_catalog_sent"):
                 return NextAction(2, "entrance_catalog", "entrance_catalog", True,
-                                  "entrance: send catalog URL (fixed message)")
-            if state.get("entrance_model") is None:
-                return NextAction(2, "entrance_model", "ask_entrance_model", False,
-                                  "entrance: ask specific model preference")
+                                  "entrance: send catalog URL (informational — does not block flow)")
+            # catalog sent → entrance topic complete; model saved passively if mentioned
         return None  # complete
 
     if topic == "interior_doors":
@@ -733,10 +735,8 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
         if state.get("interior_style") in ("designed", "undecided"):
             if not state.get("interior_catalog_sent"):
                 return NextAction(2, "interior_catalog", "interior_catalog", True,
-                                  "interior: send catalog URL (fixed message)")
-            if state.get("interior_model") is None:
-                return NextAction(2, "interior_model", "ask_interior_model", False,
-                                  "interior: ask specific model/style preference")
+                                  "interior: send catalog URL (informational — does not block flow)")
+            # catalog sent → interior topic complete; model saved passively if mentioned
         return None
 
     if topic == "mamad":
