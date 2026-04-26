@@ -84,10 +84,7 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "ask_entrance_model":        "יש דגם ספציפי שתפס אותכם ושתרצו שנכלול בהצעה?",
     "ask_interior_model":        "יש סגנון ספציפי שתפס אותכם ושתרצו שנכלול בהצעה?",
 
-    # Mamad scope (same wording as entrance scope but different field)
-    "ask_mamad_scope":           "האם מדובר בדלת כולל משקוף, או דלת בלבד?",
-
-    # Mamad technical info (fixed — sent after mamad scope is collected)
+    # Mamad technical info (fixed — sent after mamad_type is collected)
     "mamad_info":                'דלת ממ"ד צריכה לעמוד בתקן ת"י 5044 — אנחנו מסדרים הכל כולל אישור הג"א. המחיר מתברר אחרי מדידה 😊',
 
     # Repair intro (fixed)

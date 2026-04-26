@@ -324,8 +324,6 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["interior_model"] = result["interior_model"]
     if result.get("mamad_type"):
         lead["mamad_type"] = result["mamad_type"]
-    if result.get("mamad_scope"):
-        lead["mamad_scope"] = result["mamad_scope"]
 
     lead["messages"].append({"from": "customer", "text": user_msg, "time": datetime.utcnow().isoformat()})
     if result.get("reply_text"):
@@ -401,17 +399,12 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         parts_svc.append(lbl)
 
     if "mamad" in active_topics:
-        mamad_type  = lead.get("mamad_type")
-        mamad_scope = lead.get("mamad_scope")
+        mamad_type = lead.get("mamad_type")
         lbl = 'דלת ממ"ד'
         if mamad_type == "new":
             lbl += " חדשה"
         elif mamad_type == "replacement":
             lbl += " — החלפה"
-        if mamad_scope == "with_frame":
-            lbl += " כולל משקוף"
-        elif mamad_scope == "door_only":
-            lbl += " דלת בלבד"
         parts_svc.append(lbl)
 
     if "repair" in active_topics:

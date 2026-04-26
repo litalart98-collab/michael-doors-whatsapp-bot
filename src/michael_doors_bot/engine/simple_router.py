@@ -225,7 +225,7 @@ def _empty_conv_state() -> dict:
 
         # ── Mamad fields ──
         "mamad_type":  None,   # "new" | "replacement"
-        "mamad_scope": None,   # "with_frame" | "door_only"
+        # mamad_scope intentionally removed — mamad never asks scope/frame question
 
         # ── Showroom ──
         "showroom_requested": False,
@@ -602,19 +602,13 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     elif re.search(r'מחפש\b|צריך\b|מתעניין\b|שמח\b|מעוניין\b', t):
         extracted['customer_gender_locked'] = 'male'
 
-    # ── Entrance / mamad scope ────────────────────────────────────────────────
-    if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
-        scope_val = "with_frame"
-        if current_topic == "mamad":
-            extracted['mamad_scope'] = scope_val
-        else:
-            extracted['entrance_scope'] = scope_val
-    elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
-        scope_val = "door_only"
-        if current_topic == "mamad":
-            extracted['mamad_scope'] = scope_val
-        else:
-            extracted['entrance_scope'] = scope_val
+    # ── Entrance scope (entrance_doors only — never for mamad) ───────────────
+    # mamad never asks "כולל משקוף" — scope is irrelevant for mamad pricing.
+    if current_topic != "mamad":
+        if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
+            extracted['entrance_scope'] = "with_frame"
+        elif re.search(r'דלת בלבד|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
+            extracted['entrance_scope'] = "door_only"
 
     # ── Style ─────────────────────────────────────────────────────────────────
     # Route to topic-specific field based on current active topic; buffer if unknown
@@ -1056,7 +1050,7 @@ def _state_summary_block(state: dict) -> str:
         + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('entrance_style') == 'flat' else f"  catalog_sent={v(state.get('entrance_catalog_sent'))}  model={v(state.get('entrance_model'))}"),
         f"Interior:  type={v(state.get('interior_project_type'))}  qty={v(state.get('interior_quantity'))}  style={v(state.get('interior_style'))}"
         + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('interior_style') == 'flat' else f"  catalog_sent={v(state.get('interior_catalog_sent'))}  model={v(state.get('interior_model'))}"),
-        f"Mamad:     type={v(state.get('mamad_type'))}  scope={v(state.get('mamad_scope'))}",
+        f"Mamad:     type={v(state.get('mamad_type'))}",
         f"Showroom:  requested={v(state.get('showroom_requested'))}",
         "",
         f"Topics:    {state.get('active_topics', [])}",
@@ -1604,7 +1598,6 @@ def _parse_response(raw: str, sender: str) -> dict:
             "extracted_interior_style":        parsed.get("extracted_interior_style"),
             "extracted_interior_model":        parsed.get("extracted_interior_model"),
             "extracted_mamad_type":            parsed.get("extracted_mamad_type"),
-            "extracted_mamad_scope":           parsed.get("extracted_mamad_scope"),
             "extracted_customer_gender_locked": parsed.get("extracted_customer_gender_locked"),
             "extracted_service_type":          parsed.get("extracted_service_type"),
             "extracted_showroom_requested":    parsed.get("extracted_showroom_requested"),
@@ -1631,7 +1624,7 @@ def _parse_fallback(reply_text: str) -> dict:
         "extracted_entrance_model": None, "extracted_interior_project_type": None,
         "extracted_interior_quantity": None, "extracted_interior_style": None,
         "extracted_interior_model": None, "extracted_mamad_type": None,
-        "extracted_mamad_scope": None, "extracted_customer_gender_locked": None,
+        "extracted_customer_gender_locked": None,
         "extracted_service_type": None, "extracted_showroom_requested": None,
         "detected_new_topics": [],
     }
@@ -1652,7 +1645,6 @@ def _extract_claude_fields(structured: dict) -> dict:
         "extracted_interior_style":        "interior_style",
         "extracted_interior_model":        "interior_model",
         "extracted_mamad_type":            "mamad_type",
-        "extracted_mamad_scope":           "mamad_scope",
         "extracted_customer_gender_locked": "customer_gender_locked",
         "extracted_service_type":          "service_type",
     }
@@ -1759,7 +1751,6 @@ def _empty_return(reply_text: str, summary: str, state: dict | None = None) -> d
         "interior_style":          s.get("interior_style"),
         "interior_model":          s.get("interior_model"),
         "mamad_type":              s.get("mamad_type"),
-        "mamad_scope":             s.get("mamad_scope"),
     }
 
 
@@ -1797,7 +1788,6 @@ def _structured_to_return(structured: dict, state: dict) -> dict:
         "interior_style":          s.get("interior_style"),
         "interior_model":          s.get("interior_model"),
         "mamad_type":              s.get("mamad_type"),
-        "mamad_scope":             s.get("mamad_scope"),
     }
 
 
