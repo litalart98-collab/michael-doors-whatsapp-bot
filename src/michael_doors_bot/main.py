@@ -20,6 +20,7 @@ from .engine.simple_router import (
     DIAG_STATE as _ROUTER_DIAG,
     ERROR_REPLIES,
     _conversations as _conv_history,
+    _conv_state as _router_conv_state,   # per-sender conversation state dict
     clear_conversation,
     generate_conversation_summary,
     get_closing_message,
@@ -29,6 +30,14 @@ from .engine.simple_router import (
     is_working_hours,
     _refresh_system_prompt,
     _refresh_faq,
+)
+from .engine.messages import (
+    FINAL_HANDOFF,
+    FINAL_HANDOFF_FEMALE,
+    FINAL_HANDOFF_MALE,
+    FINAL_HANDOFF_SERVICE,
+    FINAL_HANDOFF_SERVICE_FEMALE,
+    FINAL_HANDOFF_SERVICE_MALE,
 )
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
@@ -57,6 +66,17 @@ CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
 _NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
+
+# All possible farewell texts — if the last bot message matches any of these,
+# the conversation is closed and no follow-up reminder should be sent.
+_FAREWELL_TEXTS: frozenset[str] = frozenset({
+    FINAL_HANDOFF,
+    FINAL_HANDOFF_FEMALE,
+    FINAL_HANDOFF_MALE,
+    FINAL_HANDOFF_SERVICE,
+    FINAL_HANDOFF_SERVICE_FEMALE,
+    FINAL_HANDOFF_SERVICE_MALE,
+})
 
 # Max text length passed into _process_message — truncated if exceeded
 _MAX_MSG_CHARS = 2000
@@ -654,6 +674,50 @@ async def _followup_loop() -> None:
                     _followup.pop(sender, None)
                     _save_followup()
                     continue
+
+                # ── Conversation-complete guards ──────────────────────────────
+                # Guard 1: router state — preferred_contact_hours, summary_confirmed,
+                # or handoff_to_human all mean the conversation reached Stage 7.
+                # Any one of these is sufficient — close silently, no reminder.
+                conv_state = _router_conv_state.get(sender, {})
+                if (
+                    conv_state.get("handoff_to_human")
+                    or conv_state.get("preferred_contact_hours")
+                    or conv_state.get("summary_confirmed")
+                ):
+                    logger.info(
+                        "[BOT:FOLLOWUP_SKIP] Conv complete (handoff=%s callback=%s confirmed=%s) — "
+                        "closing silently | sender=%s",
+                        conv_state.get("handoff_to_human"),
+                        bool(conv_state.get("preferred_contact_hours")),
+                        conv_state.get("summary_confirmed"),
+                        sender,
+                    )
+                    state["closed"] = True
+                    _save_followup()
+                    continue
+
+                # Guard 2: lead record — already sent to Sheets or handoff recorded.
+                lead_rec = _load_leads(config.TEST_MODE).get(sender, {})
+                if lead_rec.get("sheets_sent") or lead_rec.get("handoff_to_human"):
+                    logger.info(
+                        "[BOT:FOLLOWUP_SKIP] Lead already complete "
+                        "(sheets_sent=%s handoff=%s) | sender=%s",
+                        lead_rec.get("sheets_sent"), lead_rec.get("handoff_to_human"), sender,
+                    )
+                    state["closed"] = True
+                    _save_followup()
+                    continue
+
+                # Guard 3: conversation history — last bot message was a farewell.
+                if last_bot_text in _FAREWELL_TEXTS:
+                    logger.info(
+                        "[BOT:FOLLOWUP_SKIP] Farewell already sent in history | sender=%s", sender
+                    )
+                    state["closed"] = True
+                    _save_followup()
+                    continue
+
                 try:
                     msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)
                     await green.send_message(sender, msg)
