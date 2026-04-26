@@ -41,6 +41,9 @@ from .messages import (
     FINAL_HANDOFF_SERVICE,
     FINAL_HANDOFF_SERVICE_FEMALE,
     FINAL_HANDOFF_SERVICE_MALE,
+    FINAL_HANDOFF_SHOWROOM,
+    FINAL_HANDOFF_SHOWROOM_FEMALE,
+    FINAL_HANDOFF_SHOWROOM_MALE,
     QUESTION_TEMPLATES,
     ERROR_MSG as _ERR,
 )
@@ -264,13 +267,20 @@ _PURCHASE_TOPICS: frozenset[str] = frozenset({"entrance_doors", "interior_doors"
 def _get_farewell_text(state: dict) -> str:
     """
     Return the correct farewell string based on active topics and customer gender.
-    - Purchase topics (entrance/interior/mamad) → "הצעת מחיר מסודרת"
-    - Service/info topics (repair/showroom)     → "כל הפרטים"
+    - Showroom-only                             → visit-scheduling farewell ("ניצור איתכם קשר לתיאום פגישה")
+    - Purchase topics (entrance/interior/mamad) → details-transferred farewell
+    - Service/info topics (repair)              → details-transferred farewell
     """
     gender = state.get("customer_gender_locked")
     active = set(state.get("active_topics") or [])
-    is_purchase = bool(active & _PURCHASE_TOPICS)
 
+    # Showroom-only: specific wording about visit scheduling
+    if active == {"showroom_meeting"}:
+        if gender == "female": return FINAL_HANDOFF_SHOWROOM_FEMALE
+        if gender == "male":   return FINAL_HANDOFF_SHOWROOM_MALE
+        return FINAL_HANDOFF_SHOWROOM
+
+    is_purchase = bool(active & _PURCHASE_TOPICS)
     if is_purchase:
         if gender == "female": return FINAL_HANDOFF_FEMALE
         if gender == "male":   return FINAL_HANDOFF_MALE

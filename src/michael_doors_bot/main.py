@@ -38,6 +38,9 @@ from .engine.messages import (
     FINAL_HANDOFF_SERVICE,
     FINAL_HANDOFF_SERVICE_FEMALE,
     FINAL_HANDOFF_SERVICE_MALE,
+    FINAL_HANDOFF_SHOWROOM,
+    FINAL_HANDOFF_SHOWROOM_FEMALE,
+    FINAL_HANDOFF_SHOWROOM_MALE,
 )
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
@@ -76,6 +79,9 @@ _FAREWELL_TEXTS: frozenset[str] = frozenset({
     FINAL_HANDOFF_SERVICE,
     FINAL_HANDOFF_SERVICE_FEMALE,
     FINAL_HANDOFF_SERVICE_MALE,
+    FINAL_HANDOFF_SHOWROOM,
+    FINAL_HANDOFF_SHOWROOM_FEMALE,
+    FINAL_HANDOFF_SHOWROOM_MALE,
 })
 
 # Max text length passed into _process_message — truncated if exceeded
