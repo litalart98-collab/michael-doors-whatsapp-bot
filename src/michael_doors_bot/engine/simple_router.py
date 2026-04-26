@@ -646,7 +646,7 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     # ── Mamad type ────────────────────────────────────────────────────────────
     if re.search(r'ממ.?ד חדש|מרחב מוגן חדש', t, re.IGNORECASE):
         extracted['mamad_type'] = 'new'
-    elif re.search(r'ממ.?ד קיים|להחליף.*ממ.?ד|ממ.?ד.*להחליף', t, re.IGNORECASE):
+    elif re.search(r'ממ.?ד קיים|להחליף.*ממ.?ד|ממ.?ד.*להחליף|החלפת.*ממ.?ד|החלפה.*ממ.?ד', t, re.IGNORECASE):
         extracted['mamad_type'] = 'replacement'
 
     # ── Interior quantity ─────────────────────────────────────────────────────
@@ -789,10 +789,8 @@ def _topic_complete(topic: str, state: dict) -> bool:
         return bool(state.get("interior_catalog_sent"))
 
     if topic == "mamad":
-        return (
-            state.get("mamad_type") is not None
-            and state.get("mamad_scope") is not None
-        )
+        # mamad is complete once mamad_type is known — no scope question
+        return state.get("mamad_type") is not None
 
     if topic == "showroom_meeting":
         # Only complete when customer explicitly requested showroom (fix 2)
@@ -849,12 +847,10 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
         return None
 
     if topic == "mamad":
+        # Only one question: new or replacement. No scope/frame question for mamad.
         if state.get("mamad_type") is None:
             return NextAction(2, "mamad_type", "ask_mamad_type", False,
                               "mamad: ask type (new or replacing existing)")
-        if state.get("mamad_scope") is None:
-            return NextAction(2, "mamad_scope", "ask_mamad_scope", False,
-                              "mamad: ask scope (with_frame or door_only)")
         return None
 
     if topic == "showroom_meeting":

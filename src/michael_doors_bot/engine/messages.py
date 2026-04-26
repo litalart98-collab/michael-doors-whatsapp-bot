@@ -50,7 +50,7 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "ask_interior_style":        "הדלתות חלקות או מעוצבות?",
 
     # Mamad queue
-    "ask_mamad_type":            'ממ"ד חדש, או יש ממ"ד קיים שרוצים להחליף את דלתו?',
+    "ask_mamad_type":            'מדובר בממ"ד חדש או החלפה של ממ"ד קיים?',
 
     # Repair queue
     "ask_repair_type":           "מדובר בדלת כניסה או דלת פנים?",
