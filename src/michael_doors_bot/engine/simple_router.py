@@ -308,6 +308,74 @@ def _topic_label_he(state: dict) -> str:
     return " + ".join(parts) if parts else "שירות דלתות"
 
 
+# ── Hebrew style / project-type labels for rich summary ──────────────────────
+_STYLE_HE: dict[str, str] = {
+    "flat":     "חלקות",
+    "designed": "מעוצבות",
+}
+_PROJ_HE: dict[str, str] = {
+    "new":         "בית חדש",
+    "renovation":  "שיפוץ",
+    "replacement": "החלפה",
+}
+
+
+def _build_service_label_he(state: dict) -> str:
+    """
+    Build a natural Hebrew service label for Stage 5 summary.
+    Derived entirely from collected state fields — never exposes internal topic keys
+    or English field names (entrance_doors, interior_doors, etc.).
+
+    Examples:
+      entrance_doors only                    → "דלת כניסה"
+      interior_doors qty=3 style=flat        → "3 דלתות פנים חלקות"
+      interior_doors qty=3 style=flat proj=renovation → "3 דלתות פנים חלקות — שיפוץ"
+      entrance_doors + interior_doors        → "דלת כניסה + 3 דלתות פנים חלקות"
+    """
+    active = state.get("active_topics") or []
+    parts: list[str] = []
+
+    for topic in active:
+        if topic == "entrance_doors":
+            parts.append("דלת כניסה")
+
+        elif topic == "interior_doors":
+            qty   = state.get("interior_quantity")
+            style = state.get("interior_style")
+            proj  = state.get("interior_project_type")
+            qty_str   = f"{qty} " if qty else ""
+            style_str = f" {_STYLE_HE[style]}" if style in _STYLE_HE else ""
+            proj_str  = f" — {_PROJ_HE[proj]}" if proj in _PROJ_HE else ""
+            parts.append(f"{qty_str}דלתות פנים{style_str}{proj_str}")
+
+        elif topic == "mamad":
+            mamad_type = state.get("mamad_type")
+            if mamad_type == "new":
+                parts.append('דלת ממ"ד חדשה')
+            elif mamad_type == "replacement":
+                parts.append('החלפת דלת ממ"ד')
+            else:
+                parts.append('דלת ממ"ד')
+
+        elif topic == "showroom_meeting":
+            parts.append("ביקור באולם תצוגה")
+
+        elif topic == "repair":
+            repair_type = state.get("repair_type")
+            if repair_type == "entrance":
+                parts.append("תיקון דלת כניסה")
+            elif repair_type == "interior":
+                parts.append("תיקון דלת פנים")
+            else:
+                parts.append("תיקון דלת")
+
+        else:
+            # Unknown topic: map via _TOPIC_LABELS_HE, fall back to raw key
+            parts.append(_TOPIC_LABELS_HE.get(topic, topic))
+
+    return " + ".join(parts) if parts else "שירות דלתות"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FIELD EXTRACTION — REGEX LAYER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1177,16 +1245,18 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
     # ── Dynamic questions ─────────────────────────────────────────────────────
     elif action.template_key == "_summary_dynamic":
         name = (state.get("full_name") or "לקוח/ה").split()[0]
-        topic_label = _topic_label_he(state)  # always natural Hebrew, never internal field names
+        topic_label = _build_service_label_he(state)  # built from state fields — never exposes internal keys
         lines += [
             "INSTRUCTION: Stage 5 — Send a summary and ask for confirmation.",
-            f"  Open with a warm line using the customer's first name: {name}",
-            "  Format (one field per line, no extras):",
+            f"  Open with a SHORT warm greeting using the customer's first name, e.g.: 'מדהים, {name} 😊'",
+            "  ⛔ Do NOT write 'הכל נכון' in the opening — it must appear ONLY at the very end.",
+            "  After the greeting, list the details exactly as follows (one field per line, no extras):",
             f"    נושא הפנייה: {topic_label}",
             f"    שם: {state.get('full_name')}",
             f"    עיר: {state.get('city')}",
             f"    טלפון: {state.get('phone')}",
-            '  Close with ONLY: "הכל נכון?"',
+            '  Close the message with EXACTLY: "הכל נכון?"',
+            "  ⛔ 'הכל נכון?' appears EXACTLY ONCE — as the last line only. Never at the start.",
             "  handoff_to_human: false (wait for customer confirmation)",
             "  reply_text_2: null",
         ]
