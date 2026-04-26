@@ -302,6 +302,18 @@ _ISRAELI_CITIES: set[str] = {
     'ב"ש', 'ת"א',
 }
 
+# ── Hebrew-only enforcement ───────────────────────────────────────────────────
+# Any message containing at least one Hebrew letter is treated as Hebrew.
+# Messages with zero Hebrew characters get a fixed Hebrew reply — no AI call needed.
+_HEB_CHAR_RE = re.compile(r'[\u05d0-\u05fa]')
+_HEBREW_ONLY_REPLY = "כרגע אני יכולה לעזור בעברית 😊 אפשר לכתוב לי בעברית במה מדובר?"
+
+
+def _has_hebrew(text: str) -> bool:
+    """Return True if the text contains at least one Hebrew character."""
+    return bool(_HEB_CHAR_RE.search(text))
+
+
 _PHONE_RE = re.compile(
     r'(?<!\d)'
     r'(\+?972[-\s]?|0)'
@@ -1187,7 +1199,12 @@ def _next_opening_time() -> str:
 # ── FAQ helpers ───────────────────────────────────────────────────────────────
 def _find_faqs(user_msg: str) -> list[dict]:
     msg = user_msg.lower()
-    matched = [e for e in _faq_bank if any(kw.lower() in msg for kw in e.get("keywords", []))]
+    matched = [
+        e for e in _faq_bank
+        # Exclude language_* entries — non-Hebrew is handled at the Python gate
+        if not e.get("category", "").startswith("language_")
+        and any(kw.lower() in msg for kw in e.get("keywords", []))
+    ]
     return matched[:3]
 
 
@@ -1661,6 +1678,19 @@ async def get_reply(
         history.append({"role": "assistant", "content": mock_reply})
         _save_conversations()
         return _empty_return(mock_reply, f"Mock mode turn {turn}", state)
+
+    # ── Hebrew-only gate ──────────────────────────────────────────────────────
+    # If the message has NO Hebrew characters at all → return fixed Hebrew reply.
+    # This covers: pure English, pure Russian, pure Arabic, and any other script.
+    # Mixed messages (Hebrew + another language) pass through: _has_hebrew() → True.
+    # The same reply is returned every time they write non-Hebrew — no language switch.
+    if not _has_hebrew(user_message):
+        logger.info("[LANG:NON-HEBREW] Returning Hebrew fallback | sender=%s | msg=%s",
+                    sender, user_message[:60])
+        history.append({"role": "assistant", "content": _HEBREW_ONLY_REPLY})
+        _save_conversations()
+        asyncio.create_task(_supabase_save_conv(sender))
+        return _empty_return(_HEBREW_ONLY_REPLY, "Non-Hebrew input — Hebrew fallback", state)
 
     # ══════════════════════════════════════════════════════════════════════════
     # STATE PIPELINE

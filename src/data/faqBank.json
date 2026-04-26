@@ -389,13 +389,13 @@
     "category": "language_en",
     "keywords": ["door", "price", "entrance", "interior", "install", "how much", "contact"],
     "question_examples": ["I need a door", "How much does a door cost?", "Do you install?"],
-    "answer": "Hello! Welcome to Michael Doors 😊 We specialize in entrance and interior doors with professional installation. Are you looking for an entrance door or interior doors?"
+    "answer": "כרגע אני יכולה לעזור בעברית 😊 אפשר לכתוב לי בעברית במה מדובר?"
   },
   {
     "id": "faq_065",
     "category": "language_ru",
     "keywords": ["дверь", "двери", "цена", "сколько стоит", "установка", "входная дверь"],
     "question_examples": ["сколько стоит дверь?", "нужна входная дверь", "дверь цена"],
-    "answer": "Здравствуйте! Добро пожаловать в Двери Михаэль 😊 Мы специализируемся на входных и межкомнатных дверях с профессиональной установкой. Вас интересует входная дверь или межкомнатные?"
+    "answer": "כרגע אני יכולה לעזור בעברית 😊 אפשר לכתוב לי בעברית במה מדובר?"
   }
 ]
