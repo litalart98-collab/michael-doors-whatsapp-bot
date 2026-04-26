@@ -969,6 +969,41 @@ def _state_summary_block(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _peek_catalog_next_action(
+    catalog_action: NextAction, state: dict
+) -> tuple:
+    """
+    After sending this catalog and marking it as sent, what is the next required action?
+    Returns (next_action, next_topic_key) or (None, None).
+
+    Used to fold the next question into the same reply as the catalog link,
+    so the customer never has to send a blank message just to move the flow forward.
+
+    Only folds in Stage-2 topic-queue questions — Stage 3+ has its own handling.
+    """
+    peek = dict(state)
+    if catalog_action.template_key == "entrance_catalog":
+        peek["entrance_catalog_sent"] = True
+    elif catalog_action.template_key == "interior_catalog":
+        peek["interior_catalog_sent"] = True
+    else:
+        return None, None
+
+    peek["current_active_topic"] = _compute_current_topic(peek)
+    nxt = _decide_next_action(peek)
+
+    # Only fold in Stage 2 topic-queue questions (not another catalog, not fallback)
+    if (
+        nxt.stage == 2
+        and nxt.template_key not in (
+            "entrance_catalog", "interior_catalog",
+            "ask_topic_clarification", "ask_safe_fallback",
+        )
+    ):
+        return nxt, peek.get("current_active_topic")
+    return None, None
+
+
 def _build_action_block(action: NextAction, state: dict, is_first_message: bool) -> str:
     """
     Build the DECIDED ACTION block that tells Claude exactly what to do this turn.
@@ -1048,10 +1083,21 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
         elif action.template_key in ("entrance_catalog", "interior_catalog"):
             lines += [
                 f'INSTRUCTION: Send EXACTLY this text in reply_text: {template_text!r}',
-                "  ⛔ Send the catalog URL ALONE — no question appended.",
-                "  ⛔ Wait for customer reply, then ask about specific model.",
-                "  reply_text_2: null",
+                "  ⛔ reply_text must be EXACTLY the catalog text above — do not change a single character.",
             ]
+            nxt, nxt_topic = _peek_catalog_next_action(action, state)
+            if nxt:
+                nxt_template = QUESTION_TEMPLATES.get(nxt.template_key, "")
+                dst_label = _TOPIC_LABELS_HE.get(nxt_topic or "", "")
+                transition = f"נעבור ל{dst_label} — " if dst_label else ""
+                lines += [
+                    f"  reply_text_2: Short follow-up that transitions to the next topic.",
+                    f"  Send EXACTLY: '{transition}{nxt_template}'",
+                    f"  (Adapt gender forms per {gender_note} if needed, but keep the question exact.)",
+                ]
+            else:
+                lines += ["  reply_text_2: null"]
+            lines += [""]
         elif action.template_key == "_farewell_dynamic":
             farewell_text = _get_farewell_text(state)
             lines += [
@@ -1847,7 +1893,10 @@ async def get_reply(
         stripped = _strip_pitch(structured["reply_text"])
         if stripped:
             structured["reply_text"] = stripped
-        structured["reply_text_2"] = None
+        # Preserve reply_text_2 for catalog actions — they use it to send the
+        # immediate next-topic question in the same turn.
+        if action.template_key not in ("entrance_catalog", "interior_catalog"):
+            structured["reply_text_2"] = None
 
     # ── Log ───────────────────────────────────────────────────────────────────
     if structured["reply_text"] in ERROR_REPLIES:
