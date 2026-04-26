@@ -938,6 +938,11 @@ def _decide_next_action(state: dict) -> NextAction:
                               "stage 3: ask if anything else before contact collection")
 
         # Stage 4: contact opener
+        # Guard: if any contact field is already known, skip the opener entirely.
+        # This handles: customer giving contact info upfront, or history detection miss.
+        _any_contact_known = bool(state.get("phone") or state.get("full_name") or state.get("city"))
+        if _any_contact_known and not state.get("stage4_opener_sent"):
+            state["stage4_opener_sent"] = True  # sync state so _advance_stage agrees
         if not state.get("stage4_opener_sent"):
             opener_key = (
                 "contact_opener_showroom"
@@ -1026,6 +1031,16 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
             if m.get("role") == "assistant" and "אשמח לשם" in m.get("content", ""):
                 state["stage4_opener_sent"] = True
                 break
+
+    # Contact-field guard: if any contact field is already known, the opener is
+    # functionally done — the customer has already provided information.
+    # This prevents re-sending the opener when:
+    #   • customer included contact info in the same message as their request
+    #   • history-marker detection above failed (e.g. Claude paraphrased the opener)
+    if not state.get("stage4_opener_sent") and (
+        state.get("phone") or state.get("full_name") or state.get("city")
+    ):
+        state["stage4_opener_sent"] = True
 
     # summary_sent — check for summary marker
     if not state.get("summary_sent"):
