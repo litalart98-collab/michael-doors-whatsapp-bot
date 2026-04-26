@@ -690,14 +690,23 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         extracted['showroom_requested'] = True
 
     # ── Preferred contact hours ───────────────────────────────────────────────
+    # Priority order: numeric "אחרי X" → anytime → time-of-day → day/date → clock time
     hours_m = re.search(r'אחרי\s*(\d{1,2})', t)
     if hours_m:
         h = int(hours_m.group(1))
         if h < 12:
             h += 12
         extracted['preferred_contact_hours'] = f'אחרי {h:02d}:00'
-    elif re.search(r'בכל שעה|בכל זמן|לא משנה', t, re.IGNORECASE):
+    elif re.search(r'בכל שעה|בכל זמן|לא משנה|מתי שנוח|כל שעה|בכל עת', t, re.IGNORECASE):
         extracted['preferred_contact_hours'] = 'בכל שעה'
+    elif re.search(r'בבוקר|בצהריים|בצהרים|אחרי הצהריים|אחה"צ|בערב|בלילה', t, re.IGNORECASE):
+        m = re.search(r'(בבוקר|בצהריים|בצהרים|אחרי הצהריים|אחה"צ|בערב|בלילה)', t, re.IGNORECASE)
+        extracted['preferred_contact_hours'] = m.group(1) if m else t.strip()
+    elif re.search(r'מחר|היום|בשבוע הבא|בשבוע הקרוב|ביום (?:ראשון|שני|שלישי|רביעי|חמישי|שישי)', t, re.IGNORECASE):
+        extracted['preferred_contact_hours'] = t.strip()[:50]
+    elif re.search(r'\b\d{1,2}:\d{2}\b', t):
+        m = re.search(r'\b(\d{1,2}:\d{2})\b', t)
+        extracted['preferred_contact_hours'] = f'בשעה {m.group(1)}'
 
     return extracted
 
@@ -1986,6 +1995,19 @@ async def get_reply(
     if state.get("phone") and state.get("_near_miss_phone"):
         state["_near_miss_phone"] = None
         logger.info("[NEAR_MISS:CLEAR] Valid phone collected via Claude | sender=%s", sender)
+
+    # ── Stage 6→7 bridge: callback time just collected → apply farewell now ──────
+    # When the regex layer misses a callback-time pattern (e.g. "בערב") but
+    # Claude extracts it, preferred_contact_hours is set here for the first time.
+    # Without this bridge Python would return Claude's improvised farewell instead
+    # of the exact template. The bridge fires in the same turn so the customer
+    # always sees the correct final message.
+    if (action.field_to_ask == "preferred_contact_hours"
+            and state.get("preferred_contact_hours")):
+        structured["reply_text"] = _get_farewell_text(state)
+        structured["reply_text_2"] = None
+        structured["handoff_to_human"] = True
+        logger.info("[FAREWELL:STAGE6_BRIDGE] sender=%s | text=%s", sender, structured["reply_text"])
 
     # ── Stage 7 safety: hard-override farewell text ───────────────────────────
     # Claude sometimes adds names, blessings, or times around the farewell.
