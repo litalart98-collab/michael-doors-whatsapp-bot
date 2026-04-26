@@ -331,14 +331,37 @@ _ISRAELI_CITIES: set[str] = {
 
 # ── Hebrew-only enforcement ───────────────────────────────────────────────────
 # Any message containing at least one Hebrew letter is treated as Hebrew.
-# Messages with zero Hebrew characters get a fixed Hebrew reply — no AI call needed.
-_HEB_CHAR_RE = re.compile(r'[\u05d0-\u05fa]')
+# The fallback fires ONLY for messages that contain foreign-language letters
+# (Latin/Cyrillic/Arabic) with zero Hebrew characters AND zero digits.
+# Numeric-only ("3"), phone numbers, emojis, and punctuation all pass through.
+_HEB_CHAR_RE     = re.compile(r'[\u05d0-\u05fa]')
+_FOREIGN_LETTER_RE = re.compile(r'[a-zA-Z\u0400-\u04FF\u0600-\u06FF]')
 _HEBREW_ONLY_REPLY = "כרגע אני יכולה לעזור בעברית 😊 אפשר לכתוב לי בעברית במה מדובר?"
 
 
 def _has_hebrew(text: str) -> bool:
     """Return True if the text contains at least one Hebrew character."""
     return bool(_HEB_CHAR_RE.search(text))
+
+
+def _needs_hebrew_fallback(text: str) -> bool:
+    """
+    Return True only when the message should get the Hebrew-only fallback.
+
+    Rules (in priority order):
+    1. Has Hebrew chars → False  (normal flow)
+    2. Has digits       → False  (numeric answer, phone number, quantity)
+    3. Has foreign-language letters (Latin/Cyrillic/Arabic) → True  (fallback)
+    4. Otherwise (emoji, punctuation, empty) → False (normal flow)
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _HEB_CHAR_RE.search(stripped):
+        return False
+    if re.search(r'\d', stripped):
+        return False
+    return bool(_FOREIGN_LETTER_RE.search(stripped))
 
 
 _PHONE_RE = re.compile(
@@ -562,6 +585,24 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     count_m = re.search(r'(\d+)\s*דלתות', t)
     if count_m:
         extracted['interior_quantity'] = int(count_m.group(1))
+    else:
+        # Hebrew number words (e.g. "שלוש דלתות פנים")
+        _HEB_QTY: dict[str, int] = {
+            'אחת': 1, 'אחד': 1,
+            'שניים': 2, 'שתיים': 2, 'שני': 2, 'שתי': 2,
+            'שלוש': 3, 'שלושה': 3,
+            'ארבע': 4, 'ארבעה': 4,
+            'חמש': 5, 'חמישה': 5,
+            'שש': 6, 'ששה': 6,
+            'שבע': 7, 'שבעה': 7,
+            'שמונה': 8,
+            'תשע': 9, 'תשעה': 9,
+            'עשר': 10, 'עשרה': 10,
+        }
+        for word, num in _HEB_QTY.items():
+            if re.search(rf'(?:{word})\s*(?:דלתות|דלת)|(?:דלתות|דלת)\s*(?:{word})', t, re.IGNORECASE):
+                extracted['interior_quantity'] = num
+                break
 
     # ── Showroom requested ────────────────────────────────────────────────────
     if re.search(
@@ -1753,11 +1794,11 @@ async def get_reply(
         return _empty_return(mock_reply, f"Mock mode turn {turn}", state)
 
     # ── Hebrew-only gate ──────────────────────────────────────────────────────
-    # If the message has NO Hebrew characters at all → return fixed Hebrew reply.
-    # This covers: pure English, pure Russian, pure Arabic, and any other script.
-    # Mixed messages (Hebrew + another language) pass through: _has_hebrew() → True.
+    # If the message contains ONLY foreign letters (no Hebrew, no digits) → return fixed Hebrew reply.
+    # This covers: pure English, pure Russian, pure Arabic, etc.
+    # Mixed messages (Hebrew + another language), digit-only, emoji-only, and punctuation all pass through.
     # The same reply is returned every time they write non-Hebrew — no language switch.
-    if not _has_hebrew(user_message):
+    if _needs_hebrew_fallback(user_message):
         logger.info("[LANG:NON-HEBREW] Returning Hebrew fallback | sender=%s | msg=%s",
                     sender, user_message[:60])
         history.append({"role": "assistant", "content": _HEBREW_ONLY_REPLY})
