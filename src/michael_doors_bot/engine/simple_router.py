@@ -281,6 +281,33 @@ def _get_farewell_text(state: dict) -> str:
         return FINAL_HANDOFF_SERVICE
 
 
+# ── Topic → natural Hebrew label ─────────────────────────────────────────────
+# Used in Stage 5 summary so customers never see internal field names like
+# "['interior_doors', 'entrance_doors']".
+_TOPIC_LABELS_HE: dict[str, str] = {
+    "entrance_doors":   "דלת כניסה",
+    "interior_doors":   "דלתות פנים",
+    "mamad":            'דלת ממ"ד',
+    "showroom_meeting": "ביקור באולם תצוגה",
+    "repair":           "תיקון דלת",
+}
+
+
+def _topic_label_he(state: dict) -> str:
+    """
+    Return a natural Hebrew description of what the customer needs.
+    Priority: service_type field (Claude-extracted free text) → mapped active_topics → fallback.
+    Multiple topics are joined with ' + '.
+    Never exposes internal field names.
+    """
+    service = state.get("service_type")
+    if service:
+        return service
+    active = state.get("active_topics") or []
+    parts = [_TOPIC_LABELS_HE.get(t, t) for t in active]
+    return " + ".join(parts) if parts else "שירות דלתות"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FIELD EXTRACTION — REGEX LAYER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1063,7 +1090,7 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
     # ── Dynamic questions ─────────────────────────────────────────────────────
     elif action.template_key == "_summary_dynamic":
         name = (state.get("full_name") or "לקוח/ה").split()[0]
-        topic_label = state.get("service_type") or str(state.get("active_topics", []))
+        topic_label = _topic_label_he(state)  # always natural Hebrew, never internal field names
         lines += [
             "INSTRUCTION: Stage 5 — Send a summary and ask for confirmation.",
             f"  Open with a warm line using the customer's first name: {name}",
