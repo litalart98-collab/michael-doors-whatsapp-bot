@@ -391,20 +391,64 @@ def _build_service_label_he(state: dict) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _ISRAELI_CITIES: set[str] = {
-    "נתיבות", "באר שבע", "אשקלון", "אשדוד", "אופקים", "שדרות", "רהט", "דימונה",
-    "קריית גת", "קריית מלאכי", "ערד", "אילת", "מצפה רמון", "ירוחם", "עומר",
-    "להבים", "מיתר", "כסייפה", "חורה", "תל שבע", "לקיה",
+    # ── Major cities ──────────────────────────────────────────────────────────
     "תל אביב", "ירושלים", "חיפה", "ראשון לציון", "פתח תקווה", "נתניה",
     "בני ברק", "חולון", "רמת גן", "מודיעין", "כפר סבא", "הרצליה",
     "רחובות", "בת ים", "בית שמש", "עפולה", "נהריה", "טבריה", "לוד",
-    "רמלה", "נצרת", "רעננה", "הוד השרון", "קריית אונו", "אור יהודה",
+    "רמלה", "נצרת", "רעננה", "הוד השרון", "אור יהודה",
+    "גבעתיים", "אריאל", "מעלה אדומים", "בית שאן", "יוקנעם", "קצרין",
+    "אלעד", "גבעת שמואל", "אור עקיבא", "נס ציונה",
+
+    # ── South / Negev ─────────────────────────────────────────────────────────
+    "נתיבות", "באר שבע", "אשקלון", "אשדוד", "אופקים", "שדרות", "רהט", "דימונה",
+    "ערד", "אילת", "מצפה רמון", "ירוחם", "עומר", "להבים", "מיתר",
+    "כסייפה", "חורה", "תל שבע", "לקיה", "שגב שלום", "חצרים",
     "מזכרת בתיה", "גדרה", "יבנה", "גן יבנה", "ראש העין", "כפר יונה",
-    "טירת כרמל", "עכו", "כרמיאל", "צפת", "קריית ביאליק", "קריית מוצקין",
-    "קריית ים", "קריית אתא", "מגדל העמק", "זכרון יעקב", "חדרה",
-    "אום אל פחם", "שפרעם", "גבעתיים", "אריאל", "מעלה אדומים",
-    "מודיעין עילית", "ביתר עילית", "בית שאן", "יוקנעם", "קצרין",
-    "אלעד", "גבעת שמואל", "אור עקיבא", "נס ציונה", "גבעת ברנר",
-    'ב"ש', 'ת"א',
+    "גבעת ברנר", "שדה דוד", "שדה יואב", "תלמי אליהו", "תלמי יוסף",
+    "נחל עוז", "כפר מנחם", "כפר עזה", "ניר עם", "ניר עוז", "ניצן",
+    "קיבוץ עין גדי", "אשכול", "שאר הנגב",
+
+    # ── קרית / קריית ─────────────────────────────────────────────────────────
+    # Both spellings (with and without yud) accepted interchangeably in practice.
+    "קריית גת",       "קרית גת",
+    "קריית מלאכי",    "קרית מלאכי",
+    "קריית עקרון",    "קרית עקרון",
+    "קריית ארבע",     "קרית ארבע",
+    "קריית שמונה",    "קרית שמונה",
+    "קריית טבעון",    "קרית טבעון",
+    "קריית חיים",     "קרית חיים",
+    "קריית ביאליק",   "קרית ביאליק",
+    "קריית מוצקין",   "קרית מוצקין",
+    "קריית ים",       "קרית ים",
+    "קריית אתא",      "קרית אתא",
+    "קריית אונו",     "קרית אונו",
+    "קריית אלונים",   "קרית אלונים",
+    "קריית שמואל",    "קרית שמואל",
+    "קריית נורית",    "קרית נורית",
+
+    # ── North / Galilee / Golan ───────────────────────────────────────────────
+    "עכו", "כרמיאל", "צפת", "מגדל העמק", "זכרון יעקב", "חדרה",
+    "אום אל פחם", "שפרעם", "מגדל", "ראש פינה", "מעלות תרשיחא",
+    "מעלות", "תרשיחא", "נהריה", "עכו", "נצרת עילית", "אופקים",
+    "טירת כרמל", "עתלית", "פרדס חנה", "כרכור", "בנימינה", "גבעת עדה",
+    "חיפה", "טבריה", "עפולה", "יוקנעם",
+
+    # ── Sharon / Center ───────────────────────────────────────────────────────
+    "הרצליה", "רמת השרון", "כפר שמריהו", "גני תקווה", "סביון",
+    "יהוד", "מונוסון", "כפר ויתקין", "אביחיל", "נחסון",
+    "ג'לג'וליה", "טייבה", "כפר קאסם", "ראש העין", "פתח תקווה",
+    "אלפי מנשה", "מגדל הצלחה", "חבלה", "ברקת",
+
+    # ── Jerusalem area ────────────────────────────────────────────────────────
+    "מודיעין עילית", "ביתר עילית", "בית שמש", "מעלה אדומים",
+    "ישוב פסגות", "גבעת זאב", "אבו גוש", "מבשרת ציון",
+
+    # ── Shfela / Judean foothills ─────────────────────────────────────────────
+    "לוד", "רמלה", "נס ציונה", "ראשון לציון", "יבנה", "גדרה",
+    "בית דגן", "ניר צבי", "גן שמואל", "גן יבנה",
+
+    # ── Abbreviations ─────────────────────────────────────────────────────────
+    'ב"ש', 'ת"א', 'ר"ג', 'ק"ג', 'ק"מ',
 }
 
 # ── Hebrew-only enforcement ───────────────────────────────────────────────────
@@ -470,7 +514,13 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         r"|דלת חוץ|דלתות חוץ"
         r"|דלת חיצונית|דלתות חיצוניות"
         r"|דלת ראשית|דלתות ראשיות"
+        # standalone "ראשית" / "וראשית" = front/main door in colloquial usage
+        # e.g. "פנים וראשית" / "בית חדש ופנים וראשית"
+        # Use Hebrew-aware boundary: not preceded/followed by another Hebrew letter,
+        # with optional conjunction-ו prefix (e.g. "וראשית" → "and entrance door").
+        r"|(?<![א-ת])ו?ראשית(?![א-ת])"
         r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"
+        r"|דלת לבית|דלתות לבית"
         r"|כניסה לבית|כניסה לדירה|כניסה לבניין"
         r"|נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|קלאסי|אומנויות|סביליה",
         re.IGNORECASE,
@@ -479,7 +529,12 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         r"דלת פנים|דלתות פנים"
         r"|דלת לחדר|דלת חדר|דלתות חדר"
         r"|דלת שינה|דלת שירותים|דלת אמבטיה|דלת מטבח|דלת סלון"
-        r"|דלתות פנימיות|פולימר",
+        r"|דלתות פנימיות|פולימר"
+        # standalone "פנים" / "ופנים" = interior doors in colloquial shorthand
+        # e.g. "פנים וראשית" / "בית חדש ופנים וראשית"
+        # Hebrew-aware boundary: not preceded/followed by another Hebrew letter,
+        # with optional conjunction-ו prefix.
+        r"|(?<![א-ת])ו?פנים(?![א-ת])",
         re.IGNORECASE,
     ),
     "mamad": re.compile(
@@ -535,18 +590,63 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         if nm:
             extracted['_near_miss_phone'] = nm.group(0)
 
+    # ── Interior quantity — FAST PATH (highest priority) ─────────────────────
+    # Simple, direct check: ANY number 1–50 + ANY interior-door context word in
+    # the same message → extract as interior_quantity immediately.
+    # This runs FIRST, before all other field extractions, so the value is
+    # guaranteed to be in `extracted` before _merge_state → state → _decide_next_action.
+    # Context words listed explicitly (no regex generics) — each word the customer
+    # might use when talking about an interior-door order:
+    #   יחידות, יחידה         — unit-count nouns  ("14 יחידות")
+    #   דלתות, דלת            — door nouns         ("12 דלתות")
+    #   פנים                   — "interior"         ("8 דלתות פנים")
+    #   פולימר, פולימרי, פולימריות — material type  ("14 יחידות פולימרי מלא")
+    _FAST_QTY_CTX = re.compile(
+        r'(?:יחידות|יחידה|דלתות|דלת|פנים|פולימר|פולימרי|פולימריות)',
+        re.IGNORECASE | re.UNICODE,
+    )
+    if not phone_match and _FAST_QTY_CTX.search(t):
+        _fq_m = re.search(r'(?<!\d)(\d{1,2})(?!\d)', t)
+        if _fq_m:
+            _fq = int(_fq_m.group(1))
+            if 1 <= _fq <= 50:
+                extracted['interior_quantity'] = _fq
+                _rt = extracted.setdefault('_new_topics', [])
+                if isinstance(_rt, list) and 'interior_doors' not in _rt:
+                    _rt.append('interior_doors')
+
     # ── City ──────────────────────────────────────────────────────────────────
-    for city in _ISRAELI_CITIES:
-        if city in t:
-            extracted['city'] = city
-            break
+    # Priority 1: locality-type prefix patterns.
+    # Captures the full "PREFIX + locality-name" unit so that, e.g.,
+    # "קיבוץ להב" / "קריית עקרון" / "מושב תקומה" are saved as a whole phrase.
+    # Prefixes covered:
+    #   קריית / קרית — "קריית עקרון", "קרית שמונה"
+    #   קיבוץ / ישוב / יישוב / כפר / מושב
+    #   מועצה / נווה / שכונת / הרחבת / עיר
+    locality_m = re.search(
+        r'((?:קריית|קרית|קיבוץ|מושב|יישוב|ישוב|כפר|מועצה|נווה|שכונת|הרחבת|עיר)'
+        r'\s+[\u05d0-\u05fa][\u05d0-\u05fa "\'-]{1,30})',
+        t,
+        re.IGNORECASE,
+    )
+    if locality_m:
+        extracted['city'] = locality_m.group(1).strip().rstrip(',.!?')
+
+    # Priority 2: exact match against the known city list (longest match wins).
+    # Sort by descending length so "קריית גת" is found before "גת".
     if 'city' not in extracted:
-        city_prep = re.search(
-            r'(?:מ|ב|ל|ו)(נתיבות|באר שבע|אשקלון|אשדוד|אופקים|שדרות'
-            r'|ירושלים|תל אביב|חיפה|ראשון לציון|פתח תקווה|נתניה|רחובות)',
-            t)
-        if city_prep:
-            extracted['city'] = city_prep.group(1)
+        for city_name in sorted(_ISRAELI_CITIES, key=len, reverse=True):
+            if city_name in t:
+                extracted['city'] = city_name
+                break
+
+    # Priority 3: prepositional prefix (ב/מ/ל) + any known city.
+    if 'city' not in extracted:
+        for city_name in sorted(_ISRAELI_CITIES, key=len, reverse=True):
+            m = re.search(r'(?:מ|ב|ל)(' + re.escape(city_name) + r')', t)
+            if m:
+                extracted['city'] = m.group(1)
+                break
 
     # ── Name ──────────────────────────────────────────────────────────────────
     # Strategy: when a phone number is present, remove it and any detected city
@@ -574,7 +674,37 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         remainder = re.sub(r'[,،.!?;]+', ' ', remainder)
         remainder = re.sub(r'\s+', ' ', remainder).strip()
 
-        if (remainder
+        # ── "name + locality" split fallback ────────────────────────────────
+        # When city wasn't detected yet AND the remainder has multiple words,
+        # try: first single Hebrew word = name, rest = city.
+        # Only fires when the potential-city part is confirmed by either:
+        #   a) appearing in _ISRAELI_CITIES (exact match)
+        #   b) starting with a recognised locality-type prefix
+        # This avoids misreading last names like "כהן" or "לוי" as cities.
+        _LOCALITY_PREFIX_RE = re.compile(
+            r'^(?:קריית|קרית|קיבוץ|מושב|יישוב|ישוב|כפר|מועצה|נווה|עיר)\b',
+            re.IGNORECASE,
+        )
+        if 'city' not in extracted and remainder:
+            _parts = remainder.split()
+            if len(_parts) >= 2:
+                _maybe_name = _parts[0]
+                _maybe_city = ' '.join(_parts[1:]).strip().rstrip(',.!?')
+                _name_ok = (
+                    re.match(r'^[\u05d0-\u05fa]{2,}$', _maybe_name)
+                    and _maybe_name not in _NOT_A_NAME
+                    and _maybe_name not in _ISRAELI_CITIES
+                )
+                _city_ok = (
+                    _maybe_city in _ISRAELI_CITIES
+                    or bool(_LOCALITY_PREFIX_RE.match(_maybe_city))
+                )
+                if _name_ok and _city_ok:
+                    extracted['full_name'] = _maybe_name
+                    extracted['city']      = _maybe_city
+                    remainder = ''  # fully consumed — skip normal name extraction
+
+        if not extracted.get('full_name') and (remainder
                 and _HEB_WORD_RE.match(remainder)
                 and remainder not in _ISRAELI_CITIES
                 and remainder not in _NOT_A_NAME
@@ -622,7 +752,9 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     _entrance_context = (
         current_topic == "entrance_doors"
         or bool(re.search(
-            r'דלת כניסה|דלת חוץ|דלת חיצונית|דלת ראשית|כניסה לבית|כניסה לדירה',
+            r'דלת כניסה|דלת חוץ|דלת חיצונית|דלת ראשית|דלת לבית'
+            r'|דלת ברזל|דלת פלדה|כניסה לבית|כניסה לדירה'
+            r'|(?<![א-ת])ו?ראשית(?![א-ת])',
             t, re.IGNORECASE,
         ))
     )
@@ -631,25 +763,47 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             extracted['entrance_scope'] = "with_frame"
         elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
             extracted['entrance_scope'] = "door_only"
+        # Retroactive topic inference: entrance context was confirmed by the regex
+        # (e.g. message contains "ראשית" / "דלת כניסה") OR the current_topic is
+        # already entrance_doors — either way ensure entrance_doors is registered
+        # in active_topics so the completion guard can find it.
+        # This is bidirectionally consistent with _detect_topics_from_message.
+        rt = extracted.setdefault('_new_topics', [])
+        if isinstance(rt, list) and "entrance_doors" not in rt:
+            rt.append("entrance_doors")
 
     # ── Style ─────────────────────────────────────────────────────────────────
-    # Route to topic-specific field based on current active topic; buffer if unknown
+    # Route style to every active topic that hasn't locked its style field yet.
+    # In a combined entrance+interior flow, answering "חלקה" once (even while
+    # the entrance question is active) locks interior_style too — so the bot
+    # never has to ask the same style question twice.
+    _active_topics = (state or {}).get("active_topics") or []
+    _state_ref     = state or {}
+
+    def _maybe_set_style(val: str) -> None:
+        assigned = False
+        if "entrance_doors" in _active_topics and _state_ref.get("entrance_style") is None:
+            extracted['entrance_style'] = val
+            assigned = True
+            # Retroactive: ensure entrance_doors is registered as active topic
+            rt = extracted.setdefault('_new_topics', [])
+            if isinstance(rt, list) and "entrance_doors" not in rt:
+                rt.append("entrance_doors")
+        if "interior_doors" in _active_topics and _state_ref.get("interior_style") is None:
+            extracted['interior_style'] = val
+            assigned = True
+            # Retroactive: ensure interior_doors is registered as active topic
+            rt = extracted.setdefault('_new_topics', [])
+            if isinstance(rt, list) and "interior_doors" not in rt:
+                rt.append("interior_doors")
+        if not assigned:
+            # No active topic needs style yet — buffer for when topic becomes known
+            extracted['_raw_style'] = val
+
     if re.search(r'\bחלקה\b|\bחלקות\b', t, re.IGNORECASE):
-        style_val = "flat"
-        if current_topic == "entrance_doors":
-            extracted['entrance_style'] = style_val
-        elif current_topic == "interior_doors":
-            extracted['interior_style'] = style_val
-        else:
-            extracted['_raw_style'] = style_val
+        _maybe_set_style("flat")
     elif re.search(r'\bמעוצבת\b|\bמעוצבות\b', t, re.IGNORECASE):
-        style_val = "designed"
-        if current_topic == "entrance_doors":
-            extracted['entrance_style'] = style_val
-        elif current_topic == "interior_doors":
-            extracted['interior_style'] = style_val
-        else:
-            extracted['_raw_style'] = style_val
+        _maybe_set_style("designed")
 
     # ── Interior project type ─────────────────────────────────────────────────
     if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
@@ -658,6 +812,11 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         extracted['interior_project_type'] = 'renovation'
     elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה|קיימות', t, re.IGNORECASE):
         extracted['interior_project_type'] = 'replacement'
+    # Retroactive: project type is interior-specific — register the topic
+    if 'interior_project_type' in extracted:
+        rt = extracted.setdefault('_new_topics', [])
+        if isinstance(rt, list) and "interior_doors" not in rt:
+            rt.append("interior_doors")
 
     # ── Mamad type ────────────────────────────────────────────────────────────
     if re.search(r'ממ.?ד חדש|מרחב מוגן חדש', t, re.IGNORECASE):
@@ -665,12 +824,95 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     elif re.search(r'ממ.?ד קיים|להחליף.*ממ.?ד|ממ.?ד.*להחליף|החלפת.*ממ.?ד|החלפה.*ממ.?ד', t, re.IGNORECASE):
         extracted['mamad_type'] = 'replacement'
 
-    # ── Interior quantity ─────────────────────────────────────────────────────
-    count_m = re.search(r'(\d+)\s*דלתות', t)
-    if count_m:
-        extracted['interior_quantity'] = int(count_m.group(1))
+    # ── Interior quantity (3-tier) ────────────────────────────────────────────
+    #
+    # Unit / product words that signal an interior-door quantity context.
+    # Listed EXPLICITLY (no \w* generics) to avoid ambiguity and Unicode edge cases:
+    _QTY_UNIT_ALT = r'(?:יחידות|יחידה|דלתות|דלת|פנים|פולימר|פולימרי|פולימריות|פולימרים)'
+    #
+    # ── Tier 1: digit adjacent to unit/product word (either order) ───────────
+    # 1a — number BEFORE word: "14 יחידות", "14 פולימרי", "14 דלתות", "3 פנים"
+    _tier1_m = re.search(
+        r'(?<!\d)(\d{1,3})\s*' + _QTY_UNIT_ALT,
+        t, re.IGNORECASE,
+    )
+    if not _tier1_m:
+        # 1b — word BEFORE number: "דלתות 14", "יחידות 14"
+        _tier1_m = re.search(
+            _QTY_UNIT_ALT + r'\s*(?<!\d)(\d{1,3})(?!\d)',
+            t, re.IGNORECASE,
+        )
+        _tier1_grp = 1 if _tier1_m else None
     else:
-        # Hebrew number words (e.g. "שלוש דלתות פנים")
+        _tier1_grp = 1
+
+    if _tier1_m and _tier1_grp is not None:
+        n = int(_tier1_m.group(_tier1_grp))
+        if 1 <= n <= 999:
+            extracted['interior_quantity'] = n
+            # Retroactive: product-context match → interior_doors topic
+            _rt = extracted.setdefault('_new_topics', [])
+            if isinstance(_rt, list) and "interior_doors" not in _rt:
+                _rt.append("interior_doors")
+
+    # ── Tier 2: any number present when strong product-context words appear ──
+    # "Strong" words (יחידות / פולימר) are specific to ordered products and
+    # virtually never appear in price/model discussions.  When the customer
+    # writes something like "14 יחידות פולימרי מלא" the Tier-1 pattern already
+    # fires; this tier catches edge cases where the number and the context word
+    # are separated by other words (e.g. "אני צריך 14, פולימרי").
+    if 'interior_quantity' not in extracted and not phone_match:
+        _strong_ctx = re.search(
+            r'(?<![א-ת])(?:יחידות|יחידה|פולימר\w*)(?![א-ת])',
+            t, re.IGNORECASE,
+        )
+        if _strong_ctx:
+            _any_num = re.search(r'(?<!\d)(\d{1,3})(?!\d)', t)
+            if _any_num:
+                n = int(_any_num.group(1))
+                if 1 <= n <= 99:
+                    extracted['interior_quantity'] = n
+                    _rt = extracted.setdefault('_new_topics', [])
+                    if isinstance(_rt, list) and "interior_doors" not in _rt:
+                        _rt.append("interior_doors")
+
+    # ── Tier 3: bare number when bot is actively collecting quantity ──────────
+    # Only fires when current_topic == interior_doors (the bot just asked
+    # "כמה דלתות?") and the customer replies with a plain number like "12".
+    # Guard: skip if a phone was detected — phone digits look like small numbers.
+    if 'interior_quantity' not in extracted and current_topic == "interior_doors" and not phone_match:
+        bare_num = re.search(r'(?<!\d)(\d{1,2})(?!\d)', t)
+        if bare_num:
+            n = int(bare_num.group(1))
+            if 1 <= n <= 99:
+                extracted['interior_quantity'] = n
+
+    # ── Hebrew number words ───────────────────────────────────────────────────
+    if 'interior_quantity' not in extracted:
+        # Two-word numbers (11–20): "ארבע עשרה דלתות", "שתים עשרה יחידות"
+        _HEB_QTY_TWO: dict[str, int] = {
+            'אחד עשר': 11,   'אחת עשרה': 11,
+            'שנים עשר': 12,  'שתים עשרה': 12,
+            'שלושה עשר': 13, 'שלוש עשרה': 13,
+            'ארבעה עשר': 14, 'ארבע עשרה': 14,
+            'חמישה עשר': 15, 'חמש עשרה': 15,
+            'שישה עשר': 16,  'שש עשרה': 16,
+            'שבעה עשר': 17,  'שבע עשרה': 17,
+            'שמונה עשר': 18, 'שמונה עשרה': 18,
+            'תשעה עשר': 19,  'תשע עשרה': 19,
+            'עשרים': 20,
+        }
+        for phrase, num in _HEB_QTY_TWO.items():
+            if re.search(
+                rf'(?:{re.escape(phrase)})\s*{_QTY_UNIT_ALT}'
+                rf'|{_QTY_UNIT_ALT}\s*(?:{re.escape(phrase)})',
+                t, re.IGNORECASE,
+            ):
+                extracted['interior_quantity'] = num
+                break
+
+    if 'interior_quantity' not in extracted:
+        # Single-word numbers: "שש דלתות", "עשר יחידות"
         _HEB_QTY: dict[str, int] = {
             'אחת': 1, 'אחד': 1,
             'שניים': 2, 'שתיים': 2, 'שני': 2, 'שתי': 2,
@@ -684,7 +926,11 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             'עשר': 10, 'עשרה': 10,
         }
         for word, num in _HEB_QTY.items():
-            if re.search(rf'(?:{word})\s*(?:דלתות|דלת)|(?:דלתות|דלת)\s*(?:{word})', t, re.IGNORECASE):
+            if re.search(
+                rf'(?:{re.escape(word)})\s*{_QTY_UNIT_ALT}'
+                rf'|{_QTY_UNIT_ALT}\s*(?:{re.escape(word)})',
+                t, re.IGNORECASE,
+            ):
                 extracted['interior_quantity'] = num
                 break
 
@@ -718,6 +964,67 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         extracted['preferred_contact_hours'] = f'בשעה {m.group(1)}'
 
     return extracted
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EARLY QUANTITY EXTRACTION  (safety net — runs before the state machine)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _early_extract_qty(text: str) -> int | None:
+    """
+    Early-pass interior-quantity extraction.
+
+    Runs in get_reply AFTER regex extraction and state merge, but BEFORE
+    _advance_stage / _decide_next_action.  Purpose: guarantee that a quantity
+    present in the very first message (e.g. "14 יחידות פולימרי מלא") is stored
+    in state before the flow engine decides what to ask next — preventing a
+    redundant "כמה דלתות?" question.
+
+    Covers:
+      Tier A  — digit adjacent to unit word  ("14 יחידות", "דלתות 8")
+      Tier B  — quantifier prefix            ("כמות 14", "בערך 10", "כ-8")
+      Tier C  — strong context + digit       ("אני צריך 14, פולימרי")
+
+    Returns an integer in [1, 50] or None.
+    Phone-guard is the caller's responsibility.
+    """
+    t = text.strip()
+    _UNIT = r'(?:יחידות|יחידה|דלתות|דלת|פנים|פולימר\w*)'
+
+    # Tier A1 — number BEFORE unit word: "14 יחידות", "8 דלתות פנים"
+    m = re.search(r'(?<!\d)(\d{1,2})\s*' + _UNIT, t, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 50:
+            return n
+
+    # Tier A2 — unit word BEFORE number: "יחידות 14", "דלתות 8"
+    m = re.search(_UNIT + r'\s*(?<!\d)(\d{1,2})(?!\d)', t, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 50:
+            return n
+
+    # Tier B — quantifier prefix words: "כמות 14", "בערך 10", "כ-8", "כ 8"
+    m = re.search(r'(?:כמות|בערך|כ[-]?)\s*(\d{1,2})', t, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 50:
+            return n
+
+    # Tier C — strong interior-context word anywhere + any digit in message
+    _strong = re.search(
+        r'(?<![א-ת])(?:יחידות|יחידה|פולימר\w*)(?![א-ת])',
+        t, re.IGNORECASE,
+    )
+    if _strong:
+        m = re.search(r'(?<!\d)(\d{1,2})(?!\d)', t)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 50:
+                return n
+
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -914,13 +1221,19 @@ def _decide_next_action(state: dict) -> NextAction:
     """
     try:
         active = state.get("active_topics") or []
-        current_topic = state.get("current_active_topic")
 
         # ── Stage 2: topic qualification ──────────────────────────────────────
         if not active:
             # No topics detected yet
             return NextAction(2, "topic_detection", "ask_topic_clarification", False,
                               "no topics detected — ask what type of door they need")
+
+        # Always recompute current_topic fresh — never rely solely on the cached
+        # current_active_topic value, which may be stale if topics were added to
+        # active_topics after _advance_stage last ran (e.g. retroactive inference).
+        current_topic = _compute_current_topic(state)
+        # Keep the cached value in sync for system-prompt display and logging.
+        state["current_active_topic"] = current_topic
 
         if current_topic:
             action = _next_topic_action(current_topic, state)
@@ -1915,14 +2228,6 @@ async def get_reply(
     history = _conversations[sender]
     is_first_message = len(history) == 1  # only the user message we just appended
 
-    # ── Mock mode ──────────────────────────────────────────────────────────────
-    if mock_claude:
-        turn = len(history)
-        mock_reply = f"🤖 [מוק סיבוב {turn}] AI היה עונה כאן על: ״{user_message[:40]}״"
-        history.append({"role": "assistant", "content": mock_reply})
-        _save_conversations()
-        return _empty_return(mock_reply, f"Mock mode turn {turn}", state)
-
     # ── Hebrew-only gate ──────────────────────────────────────────────────────
     # If the message contains ONLY foreign letters (no Hebrew, no digits) → return fixed Hebrew reply.
     # This covers: pure English, pure Russian, pure Arabic, etc.
@@ -1943,11 +2248,23 @@ async def get_reply(
     # Step 1: Extract fields from customer message (regex)
     extracted = _extract_fields_from_message(user_message, state)
 
-    # Step 2: Detect new topics from message
+    # Step 2: Detect new topics from message.
+    # MERGE with any retroactive topics already added by _extract_fields_from_message
+    # (e.g. entrance_doors inferred from entrance_scope, interior_doors from project_type).
+    # Never overwrite — always union.
     new_topics = _detect_topics_from_message(user_message)
     if new_topics:
-        extracted["_new_topics"] = new_topics
-        logger.info("[TOPICS:DETECT] sender=%s | %s", sender, new_topics)
+        existing_rt = extracted.get("_new_topics") or []
+        merged_topics = list(existing_rt)
+        for _t in new_topics:
+            if _t not in merged_topics:
+                merged_topics.append(_t)
+        extracted["_new_topics"] = merged_topics
+        logger.info("[TOPICS:DETECT] sender=%s | regex=%s | merged=%s",
+                    sender, new_topics, merged_topics)
+    elif extracted.get("_new_topics"):
+        logger.info("[TOPICS:DETECT] sender=%s | retroactive=%s",
+                    sender, extracted["_new_topics"])
 
     # Step 3: Merge extracted fields into state
     state = _merge_state(state, extracted)
@@ -1961,11 +2278,51 @@ async def get_reply(
     if extracted:
         logger.info("[EXTRACT:REGEX] sender=%s | %s", sender, {k: v for k, v in extracted.items() if k != "_new_topics"})
 
+    # Step 3b: Early quantity extraction — safety net before flow decisions.
+    # Catches "14 יחידות פולימרי מלא" on the very first message so that the
+    # state machine never asks "כמה דלתות?" when the answer is already known.
+    if state.get("interior_quantity") is None and not _PHONE_RE.search(user_message):
+        _eq = _early_extract_qty(user_message)
+        if _eq is not None:
+            state["interior_quantity"] = _eq
+            if "interior_doors" not in (state.get("active_topics") or []):
+                state.setdefault("active_topics", []).append("interior_doors")
+            _conv_state[sender] = state
+            logger.info(
+                "[EARLY_QTY] sender=%s | qty=%d | active_topics=%s",
+                sender, _eq, state.get("active_topics"),
+            )
+
     # Step 4: Apply buffered style to current topic
     _apply_style_to_topic(state)
 
     # Step 5: Advance stage flags (reads history)
     _advance_stage(state, history)
+
+    # Step 5c: Quantity hard-guard — last resort before flow decision.
+    # If interior_quantity is STILL None at this point and the message contains
+    # a quantity signal, extract and store NOW before _decide_next_action sees
+    # the state. This fires only when all previous layers (Step 1 fast-path,
+    # Step 1 Tier-1/2/3, and Step 3b early-extract) somehow missed the value.
+    # It should never fire in practice — but if it does, we log a WARNING so
+    # the root cause can be investigated.
+    if state.get("interior_quantity") is None and not _PHONE_RE.search(user_message):
+        _hg = _early_extract_qty(user_message)
+        if _hg is not None:
+            state["interior_quantity"] = _hg
+            if "interior_doors" not in (state.get("active_topics") or []):
+                state.setdefault("active_topics", []).append("interior_doors")
+            _conv_state[sender] = state
+            logger.warning(
+                "[QTY:HARDGUARD] qty was still None after all prior steps — "
+                "forced to %d | sender=%s | msg=%r",
+                _hg, sender, user_message[:80],
+            )
+
+    # Diagnostic log: assert qty is set when context words are present
+    if state.get("interior_quantity") is not None:
+        logger.debug("[QTY:CHECK] interior_quantity=%d is set before _decide_next_action | sender=%s",
+                     state["interior_quantity"], sender)
 
     # Step 6: Decide next action (pure state function)
     action = _decide_next_action(state)
@@ -1974,6 +2331,25 @@ async def get_reply(
 
     # Save state before AI call
     _save_conv_state()
+
+    # ── Mock mode — replace AI call only (extraction pipeline already ran above) ──
+    # IMPORTANT: mock mode must NOT skip the extraction pipeline (Steps 1–6).
+    # If it did, state fields like interior_quantity would never be saved, and the
+    # NEXT real-mode message would see a stale state and ask for fields already given.
+    if mock_claude:
+        turn = len(history)
+        mock_reply = (
+            f"🤖 [מוק סיבוב {turn}] "
+            f"action={action.template_key} | "
+            f"qty={state.get('interior_quantity')} | "
+            f"topics={state.get('active_topics')} | "
+            f"msg=״{user_message[:30]}״"
+        )
+        history.append({"role": "assistant", "content": mock_reply})
+        _save_conversations()
+        logger.info("[MOCK] sender=%s | turn=%d | action=%s | interior_quantity=%s",
+                    sender, turn, action.template_key, state.get("interior_quantity"))
+        return _empty_return(mock_reply, f"Mock mode turn {turn}", state)
 
     # ── AI call ────────────────────────────────────────────────────────────────
     provider = "openrouter" if _use_openrouter() else "claude"
@@ -2200,6 +2576,96 @@ async def generate_conversation_summary(sender: str, anthropic_api_key: str) -> 
     except Exception as exc:
         logger.error("generate_conversation_summary error | sender=%s | %s", sender, exc)
         return _FALLBACK
+
+
+# ── Callback-time normalizer ──────────────────────────────────────────────────
+# Converts any Hebrew (or already-formatted) time expression to "HH:MM" (24-h).
+# Used by main.py before writing preferred_contact_hours to Google Sheets.
+
+_HEB_HOUR_WORDS: dict[str, int] = {
+    "אחת עשרה": 11, "אחד עשר": 11,
+    "שתים עשרה": 12, "שתיים עשרה": 12,
+    "אחת": 1, "שתיים": 2, "שתים": 2,
+    "שלוש": 3, "ארבע": 4, "חמש": 5,
+    "שש": 6, "שבע": 7, "שמונה": 8,
+    "תשע": 9, "עשר": 10,
+}
+
+
+def _normalize_callback_time(text: str) -> str:
+    """Normalise a free-text Hebrew callback-time to HH:MM (24-hour).
+
+    Examples
+    --------
+    "אחרי 7"         → "19:00"
+    "אחרי שבע"       → "19:00"
+    "בערב"           → "19:00"
+    "בבוקר"          → "09:00"
+    "מחר בבוקר"      → "09:00"
+    "בצהריים"        → "13:00"
+    "אחר הצהריים"    → "16:00"
+    "18:30"          → "18:30"
+    """
+    if not text:
+        return text
+    t = text.strip()
+
+    # ── Already HH:MM or H:MM ────────────────────────────────────────────────
+    m = re.match(r'^(\d{1,2}):(\d{2})$', t)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+    # ── Fixed slots (highest priority — checked before digit parsing) ────────
+    if re.search(r'אחר\s+הצהריים|אחרי\s+הצהריים', t):
+        return "16:00"
+    if re.search(r'צהריים', t):
+        return "13:00"
+    if re.search(r'בוקר', t):
+        return "09:00"
+    if re.search(r'ערב', t):
+        return "19:00"
+
+    # ── "אחרי/אחר X" — digit ────────────────────────────────────────────────
+    m = re.search(r'(?:לאחר|אחרי?)\s+(\d{1,2})(?::(\d{2}))?', t)
+    if m:
+        h, mins = int(m.group(1)), m.group(2) or "00"
+        if h < 12:
+            h += 12          # assume PM for small numbers
+        return f"{h:02d}:{mins}"
+
+    # ── "אחרי/אחר X" — Hebrew word ──────────────────────────────────────────
+    for word in sorted(_HEB_HOUR_WORDS, key=len, reverse=True):
+        if re.search(r'(?:לאחר|אחרי?)\s+' + re.escape(word), t):
+            h = _HEB_HOUR_WORDS[word]
+            if h < 12:
+                h += 12
+            return f"{h:02d}:00"
+
+    # ── "בX" / "ב-X" / "ב X" — digit ────────────────────────────────────────
+    m = re.search(r'ב[-\s]?(\d{1,2})(?::(\d{2}))?', t)
+    if m:
+        h, mins = int(m.group(1)), m.group(2) or "00"
+        if h < 12:
+            h += 12
+        return f"{h:02d}:{mins}"
+
+    # ── "בX" — Hebrew word (e.g. "בשבע") ────────────────────────────────────
+    for word in sorted(_HEB_HOUR_WORDS, key=len, reverse=True):
+        if re.search(r'ב' + re.escape(word), t):
+            h = _HEB_HOUR_WORDS[word]
+            if h < 12:
+                h += 12
+            return f"{h:02d}:00"
+
+    # ── Bare digit (last resort) ─────────────────────────────────────────────
+    m = re.search(r'(?<!\d)(\d{1,2})(?::(\d{2}))?(?!\d)', t)
+    if m:
+        h, mins = int(m.group(1)), m.group(2) or "00"
+        if h < 12:
+            h += 12
+        return f"{h:02d}:{mins}"
+
+    return t  # unparseable → keep original
 
 
 # ── Public API for main.py ─────────────────────────────────────────────────────

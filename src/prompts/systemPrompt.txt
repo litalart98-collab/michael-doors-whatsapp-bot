@@ -99,6 +99,29 @@ Every reply must include ALL fields below. Use `null` for fields not found.
 - `extracted_showroom_requested`: `true` if customer explicitly wants to visit the showroom.
 - `detected_new_topics`: array of newly detected topics in this message. Valid values: `"entrance_doors"` / `"interior_doors"` / `"mamad"` / `"showroom_meeting"` / `"repair"`.
 
+  **Topic synonym table — use this to decide which topics to emit:**
+
+  | Hebrew phrase / word | topic |
+  |---|---|
+  | דלת כניסה / דלת חוץ / דלת חיצונית | `entrance_doors` |
+  | דלת ראשית / ראשית (standalone, meaning front door) | `entrance_doors` |
+  | דלת לבית / דלת פלדה / דלת ברזל | `entrance_doors` |
+  | כניסה לבית / כניסה לדירה / כניסה לבניין | `entrance_doors` |
+  | דגם כניסה: נפחות / פנורמי / יווני / מרקורי / עדן / קלאסי / סביליה | `entrance_doors` |
+  | דלת פנים / דלתות פנים / פולימר / דלת חדר / דלת שינה | `interior_doors` |
+  | ממ"ד / ממד / מרחב מוגן / חדר ביטחון | `mamad` |
+  | תיקון / תקלה / בעיה בדלת / פריצה | `repair` |
+  | לבוא לאולם / אולם תצוגה / לקבוע פגישה / לראות דגמים | `showroom_meeting` |
+
+  **Critical multi-topic examples:**
+  - "פנים וראשית" → `["interior_doors", "entrance_doors"]`
+  - "בית חדש ופנים וראשית" → `["interior_doors", "entrance_doors"]`
+  - "דלתות פנים פולימר ודלת ראשית" → `["interior_doors", "entrance_doors"]`
+  - "גם כניסה וגם פנים" → `["entrance_doors", "interior_doors"]`
+  - "צריך ממ\"ד ודלתות פנים" → `["mamad", "interior_doors"]`
+
+  When in doubt: if "ראשית" appears in a door-shopping context, always emit `"entrance_doors"`.
+
 ### 2D — JSON escaping
 All `"` inside Hebrew abbreviations MUST be escaped: ממ"ד → `ממ\"ד` | ת"י → `ת\"י` | אחה"צ → `אחה\"צ`
 
@@ -158,15 +181,18 @@ Extract from the customer's message and populate `extracted_*` fields.
 - "כולל משקוף" / "עם משקוף" / "דלת ומשקוף" → `"with_frame"`
 - "דלת בלבד" / "בלי משקוף" / "רק דלת" / "ללא משקוף" → `"door_only"`
 
-**entrance_style / interior_style:**
-- "חלקה" / "חלקות" → `"flat"`
-- "מעוצבת" / "מעוצבות" / "מודרנית" / "עיצובית" → `"designed"`
+**entrance_style / interior_style — LOCK ONCE, NEVER RE-ASK:**
+- "חלקה" / "חלקות" → `"flat"` for **every active topic** that still needs style.
+  In a combined entrance+interior flow, set BOTH `extracted_entrance_style` and `extracted_interior_style` to `"flat"` — do not ask again later.
+- "מעוצבת" / "מעוצבות" / "מודרנית" / "עיצובית" → `"designed"` (same multi-topic rule)
 - "לא יודע" / "לא יודעת" / "עדיין לא החלטתי" → `"undecided"`
+- If COLLECTED STATE already shows a style value for a topic → do NOT extract a new value for that topic, even if the customer repeats a style word.
 
-**interior_project_type:**
-- "בית חדש" / "דירה חדשה" / "נכס חדש" → `"new"`
+**interior_project_type — LOCK ONCE, NEVER RE-ASK:**
+- "בית חדש" / "דירה חדשה" / "נכס חדש" → `"new"` — extract regardless of current active topic.
 - "שיפוץ" / "משפצים" / "בשיפוץ" → `"renovation"`
 - "החלפה" / "להחליף" / "דלת ישנה" / "קיימות" → `"replacement"`
+- If COLLECTED STATE already shows `interior_project_type` → never extract again, never re-ask.
 
 **mamad_type:**
 - "ממ\"ד חדש" / "מרחב מוגן חדש" → `"new"`
@@ -176,9 +202,19 @@ Extract from the customer's message and populate `extracted_*` fields.
 - Any specific model name mentioned → use it verbatim
 - "לא יודע" / "לא יודעת" / "לא החלטתי" / "לא" after model question → `"undecided"`
 
+**extracted_city — accept ALL Israeli locality types, not just large cities:**
+- Cities (עיר): "תל אביב", "באר שבע", "אשקלון", etc.
+- Kibbutzim (קיבוץ): "קיבוץ להב", "קיבוץ בארי" → save as "קיבוץ להב" (with prefix)
+- Moshavim (מושב): "מושב תקומה", "מושב נבטים" → save as "מושב תקומה"
+- Small localities / yishuvim: "יישוב עומר", "כפר ורדים", "נווה מדבר"
+- If customer writes only the locality name without prefix (e.g. "להב"), accept it as the city value.
+- If COLLECTED STATE already shows `city` → do NOT ask "באיזו עיר מדובר?" again.
+
 **Multi-field messages:**
 - "ליטל 0523989366 אופקים" → full_name: "ליטל", phone: "0523989366", city: "אופקים"
 - "שמי דוד כהן, 052-1234567, תל אביב" → full_name: "דוד כהן", phone: "0521234567", city: "תל אביב"
+- "מוטי 0523989366 קיבוץ להב" → full_name: "מוטי", phone: "0523989366", city: "קיבוץ להב"
+- "ליטל 0523989366 מושב תקומה" → full_name: "ליטל", phone: "0523989366", city: "מושב תקומה"
 - "3 דלתות פנים להחלפה" → interior_quantity: 3, interior_project_type: "replacement"
 - "צריך 3 דלתות פנים" → interior_quantity: 3
 

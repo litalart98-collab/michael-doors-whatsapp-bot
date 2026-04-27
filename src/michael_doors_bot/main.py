@@ -28,6 +28,7 @@ from .engine.simple_router import (
     get_reply,
     is_closing_intent,
     is_working_hours,
+    _normalize_callback_time,
     _refresh_system_prompt,
     _refresh_faq,
 )
@@ -86,6 +87,16 @@ _FAREWELL_TEXTS: frozenset[str] = frozenset({
 
 # Max text length passed into _process_message — truncated if exceeded
 _MAX_MSG_CHARS = 2000
+
+# ── Message debounce / batching ───────────────────────────────────────────────
+# When a customer sends 2–3 messages in quick succession, we wait DEBOUNCE_WINDOW
+# seconds after the LAST message before processing anything.  All buffered texts
+# are joined (newline-separated) into a single logical input, so the bot replies
+# once with full context instead of fragmented partial answers.
+DEBOUNCE_WINDOW: float = 3.0   # seconds to wait after the last message
+
+_pending_messages: dict[str, list[str]] = {}   # sender → buffered texts
+_debounce_tasks:   dict[str, asyncio.Task] = {} # sender → active sleep task
 
 # ── Diagnostics — error tracking ──────────────────────────────────────────────
 _recent_errors: deque = deque(maxlen=50)  # last 50 error events
@@ -340,14 +351,42 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
 
 
 async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None:
-    """Send lead to Google Sheets as soon as all 4 required fields are collected.
-    Re-sends automatically if the customer corrects any detail (fingerprint change)."""
+    """Send lead to Google Sheets exactly ONCE per conversation, at Stage 7 handoff.
+
+    Rules:
+    • Do NOT send partial leads (all 5 required fields must be present).
+    • Do NOT send before Stage 7 handoff (handoff_to_human must be True).
+    • Once sheets_sent = True → never call append_lead again for this conversation.
+      No update rows, no correction rows — one completed conversation = one row.
+    """
     if not config.GOOGLE_SHEETS_WEBHOOK_URL:
         return
 
-    # Send only after ALL required contact fields AND callback time are collected.
-    # preferred_contact_hours = Stage 6; we never send before it completes.
+    # ── One-row guard: already sent → hard stop ───────────────────────────────
+    if lead.get("sheets_sent"):
+        logger.debug(
+            "[SHEETS:SKIP] already sent — one row per conversation | sender=%s",
+            lead.get("phone", ""),
+        )
+        return
+
+    # ── Required fields: all 5 must be non-empty ─────────────────────────────
     if not all(lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type", "preferred_contact_hours")):
+        logger.debug(
+            "[SHEETS:SKIP] incomplete lead — missing required fields | sender=%s | "
+            "full_name=%r city=%r callback_phone=%r service_type=%r callback_hours=%r",
+            lead.get("phone", ""), lead.get("full_name"), lead.get("city"),
+            lead.get("callback_phone"), lead.get("service_type"),
+            lead.get("preferred_contact_hours"),
+        )
+        return
+
+    # ── Handoff guard: send only at Stage 7 ──────────────────────────────────
+    if not result.get("handoff_to_human"):
+        logger.debug(
+            "[SHEETS:SKIP] not at handoff yet — deferring | sender=%s | full_name=%r",
+            lead.get("phone", ""), lead.get("full_name", ""),
+        )
         return
 
     # Prefer callback phone given by customer; fall back to WhatsApp sender number
@@ -453,46 +492,45 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     # fall back to the per-turn "summary" field Claude writes.
     conversation_summary = lead.get("conv_summary") or lead.get("summary", "")
 
+    # Normalise callback time to HH:MM before writing to Sheets.
+    callback_hours_raw = lead.get("preferred_contact_hours", "")
+    callback_hours = _normalize_callback_time(callback_hours_raw)
+    if callback_hours != callback_hours_raw:
+        logger.debug(
+            "[SHEETS:TIME_NORM] %r → %r | sender=%s",
+            callback_hours_raw, callback_hours, lead.get("phone", ""),
+        )
+
     row = {
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
         "service_type":            service_field,
         "datetime":                lead.get("firstContact", ""),
-        "preferred_contact_hours": lead.get("preferred_contact_hours", ""),
+        "preferred_contact_hours": callback_hours,
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
         "conversation_summary":    conversation_summary,
     }
 
-    # Fingerprint: only contact + service fields drive re-send (customer corrections).
-    # conversation_summary is intentionally excluded — it changes every turn and
-    # would otherwise trigger a duplicate row on each message.
-    fingerprint = "|".join([
-        row["full_name"], row["phone"], row["city"],
+    # Pre-send audit log.
+    logger.info(
+        "[SHEETS:PRE-SEND] sender=%s | full_name=%r | phone=%s | "
+        "service=%r | callback=%r | handoff=%s",
+        lead.get("phone", ""), row["full_name"], row["phone"],
         row["service_type"], row["preferred_contact_hours"],
-    ])
-    if lead.get("sheets_sent") and lead.get("sheets_fingerprint") == fingerprint:
-        return  # identical data already in Sheets — nothing to do
-
-    # If this is an update (correction), mark it clearly in the notes column.
-    is_update = bool(lead.get("sheets_sent"))
-    if is_update:
-        update_note = "עדכון פרטים"
-        row["notes"] = (update_note + (" | " + row["notes"] if row["notes"] else "")).strip()
+        result.get("handoff_to_human"),
+    )
 
     sender_id = lead.get("phone", "")
     try:
         await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
         lead["sheets_sent"] = True
-        lead["sheets_fingerprint"] = fingerprint
         if sender_id:
             fresh = _load_leads(is_test)
             if sender_id in fresh:
                 fresh[sender_id]["sheets_sent"] = True
-                fresh[sender_id]["sheets_fingerprint"] = fingerprint
                 _save_leads(fresh, is_test)
-        action = "UPDATED" if is_update else "APPENDED"
-        logger.info("[SHEETS:%s] phone=%s", action, row.get("phone"))
+        logger.info("[SHEETS:APPENDED] phone=%s | one row written — will not send again", row.get("phone"))
     except Exception as exc:
         _record_error("send_fail", sender_id, f"sheets: {exc}")
         _queue_sheets_retry(row, is_test, sender_id, exc)
@@ -803,6 +841,55 @@ def _get_sender_lock(sender: str) -> asyncio.Lock:
     return _sender_locks[sender]
 
 
+# ── Debounce helpers ──────────────────────────────────────────────────────────
+
+def _schedule_debounced(sender: str, text: str) -> None:
+    """Buffer text for sender and (re)start the debounce timer.
+
+    Called from both the webhook handler and the poll loop.  Returns immediately;
+    actual processing happens DEBOUNCE_WINDOW seconds after the *last* call for
+    this sender, via a background asyncio Task.
+    """
+    _pending_messages.setdefault(sender, []).append(text)
+
+    # Cancel any outstanding timer — a new message resets the window
+    existing = _debounce_tasks.get(sender)
+    if existing and not existing.done():
+        existing.cancel()
+
+    task = asyncio.create_task(_debounce_wrapper(sender))
+    _debounce_tasks[sender] = task
+    logger.info(
+        "[DEBOUNCE:SCHED] sender=%s | buffer=%d msg(s) | window=%.1fs",
+        sender, len(_pending_messages[sender]), DEBOUNCE_WINDOW,
+    )
+
+
+async def _debounce_wrapper(sender: str) -> None:
+    """Sleep for DEBOUNCE_WINDOW, then flush all buffered messages."""
+    try:
+        await asyncio.sleep(DEBOUNCE_WINDOW)
+    except asyncio.CancelledError:
+        return  # a newer message arrived — the new task will handle flushing
+    await _flush_pending(sender)
+
+
+async def _flush_pending(sender: str) -> None:
+    """Combine all buffered messages for sender and run the pipeline once."""
+    _debounce_tasks.pop(sender, None)
+    parts = _pending_messages.pop(sender, [])
+    if not parts:
+        return
+    combined = "\n".join(parts)
+    if len(parts) > 1:
+        logger.info(
+            "[DEBOUNCE:FLUSH] sender=%s | merged %d messages → %d chars | texts=%s",
+            sender, len(parts), len(combined),
+            " | ".join(p[:40] for p in parts),
+        )
+    await _process_message(sender, combined)
+
+
 async def _process_message(sender: str, text: str) -> None:
     # Rate limiting — checked before acquiring lock so flooded senders don't queue (Fix 6)
     if _is_rate_limited(sender):
@@ -969,7 +1056,7 @@ async def _poll_loop() -> None:
                 elif sender and text:
                     _track_msg_id(msg_id)
                     logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
-                    await _process_message(sender, text)
+                    _schedule_debounced(sender, text)
 
             if receipt_id:
                 await green.delete_notification(receipt_id)
@@ -1114,22 +1201,10 @@ async def webhook(request: Request, token: str = Query(default="")):
 
     if sender and text:
         logger.info("[BOT:RECV] Webhook | sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
-        try:
-            await asyncio.wait_for(_process_message(sender, text), timeout=60.0)
-        except asyncio.TimeoutError:
-            _record_error("webhook", sender, "60s processing timeout")
-            logger.error("[BOT:TIMEOUT] Webhook timeout | sender=%s — sending fallback", sender)
-            try:
-                await green.send_message(sender, _BOT_ERROR_MSG)
-            except Exception:
-                pass
-        except Exception as exc:
-            _record_error("webhook", sender, str(exc))
-            logger.error("[BOT:WEBHOOK_ERR] sender=%s | %s", sender, exc)
-            try:
-                await green.send_message(sender, _BOT_ERROR_MSG)
-            except Exception:
-                pass
+        # Fire-and-forget: buffer the message and let the debounce timer decide
+        # when to process.  Multiple messages sent in quick succession are merged
+        # into one pipeline call after DEBOUNCE_WINDOW seconds of silence.
+        _schedule_debounced(sender, text)
 
     return JSONResponse({"ok": True})
 
