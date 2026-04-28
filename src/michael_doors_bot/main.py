@@ -8,7 +8,7 @@ import logging
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +52,33 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ── Israel timezone helper ────────────────────────────────────────────────────
+# Israel is UTC+2 (winter) / UTC+3 (summer, DST).
+# We use the simple approach: try zoneinfo (Python 3.9+), fall back to a
+# fixed UTC+3 offset so Render never crashes even without tzdata installed.
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _TZ_IL = _ZoneInfo("Asia/Jerusalem")
+except Exception:
+    _TZ_IL = None  # type: ignore[assignment]
+
+def _utc_iso_to_il(utc_iso: str) -> str:
+    """Convert a UTC ISO timestamp string to Israel local time (DD/MM/YYYY HH:MM)."""
+    if not utc_iso:
+        return utc_iso
+    try:
+        dt_utc = datetime.fromisoformat(utc_iso.replace("Z", "+00:00"))
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        if _TZ_IL:
+            dt_il = dt_utc.astimezone(_TZ_IL)
+        else:
+            dt_il = dt_utc.astimezone(timezone(timedelta(hours=3)))  # fallback UTC+3
+        return dt_il.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return utc_iso
+
 
 _ROOT     = Path(__file__).parent.parent.parent
 # DATA_DIR can be set to a Render Persistent Disk mount (e.g. /data) so runtime
@@ -593,7 +620,7 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
         "service_type":            service_field,
-        "datetime":                lead.get("firstContact", ""),
+        "datetime":                _utc_iso_to_il(lead.get("firstContact", "")),
         "preferred_contact_hours": callback_hours,
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
@@ -701,7 +728,7 @@ async def _send_incomplete_lead_to_sheets(sender: str, is_test: bool) -> None:
         "full_name":               name_from_conv,
         "city":                    conv_state.get("city") or lead_rec.get("city", ""),
         "service_type":            service_field,
-        "datetime":                lead_rec.get("firstContact", datetime.utcnow().isoformat()),
+        "datetime":                _utc_iso_to_il(lead_rec.get("firstContact", datetime.utcnow().isoformat())),
         "preferred_contact_hours": "",
         "phone":                   phone_clean,
         "notes":                   "❗ דורש מעקב — לא השלים שיחה",
@@ -1776,7 +1803,7 @@ async def test_sheets(admin: str = Query(default="")):
         "full_name":               "טסט בוט",
         "city":                    "נתיבות",
         "service_type":            "בדיקת חיבור — דלת כניסה מעוצבת",
-        "datetime":                datetime.utcnow().isoformat(),
+        "datetime":                _utc_iso_to_il(datetime.utcnow().isoformat()),
         "preferred_contact_hours": "בוקר",
         "phone":                   "050-0000000",
         "notes":                   "שורת טסט — אפשר למחוק",
