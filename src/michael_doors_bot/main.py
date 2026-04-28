@@ -120,6 +120,16 @@ def _record_error(kind: str, sender: str, detail: str) -> None:
     })
 
 
+# ── Pre-boot sender block ─────────────────────────────────────────────────────
+# Senders whose messages pre-date this bot session (history from before the bot
+# was connected to the number).  Once a sender is identified as pre-boot — via
+# timestamp comparison OR via existing bot conversation history at startup —
+# ALL their messages are silently ignored for the lifetime of this session.
+# The set is intentionally NOT persisted: after a server restart it resets,
+# so if enough time has passed a returning customer can reach the bot normally.
+_pre_boot_senders: set[str] = set()
+
+
 # ── Message deduplication ─────────────────────────────────────────────────────
 # Ordered deque so we evict the OLDEST IDs (not a random half) when full.
 _MAX_PROCESSED_IDS  = 500
@@ -1042,10 +1052,14 @@ async def _poll_loop() -> None:
                 )
                 msg_timestamp = body.get("timestamp", 0)
                 if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+                    if sender:
+                        _pre_boot_senders.add(sender)
                     logger.info(
-                        "[BOT:SKIP_OLD] Poll pre-boot message ignored | id=%s | sender=%s",
+                        "[BOT:SKIP_OLD] Poll pre-boot message — sender blocked | id=%s | sender=%s",
                         msg_id, sender,
                     )
+                elif sender in _pre_boot_senders:
+                    logger.info("[BOT:SKIP_PREBOOT] Poll blocked sender | sender=%s", sender)
                 elif sender and msg_id and _is_duplicate(msg_id):
                     logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
                 elif sender and not text and _is_individual_chat(sender):
@@ -1117,6 +1131,12 @@ async def _lifespan(app: FastAPI):
     _load_dedup_cache()
     _load_followup()
 
+    # Populate pre-boot sender block from existing conversation history.
+    # Any sender already in the bot's store at startup had conversations
+    # before this session — they must not receive automated replies.
+    _pre_boot_senders.update(_conv_history.keys())
+    logger.info("[BOOT] Pre-boot senders blocked: %d", len(_pre_boot_senders))
+
     # Load system prompt and FAQ from Supabase (overrides file-based fallback)
     await _refresh_system_prompt()
     await _refresh_faq()
@@ -1184,16 +1204,22 @@ async def webhook(request: Request, token: str = Query(default="")):
         or ""
     )
 
-    # Skip historical messages — sent before this bot instance started.
-    # Green API replays unread messages on first connect; we never want to
-    # respond to conversations the bot wasn't part of.
+    # ── Pre-boot sender block ─────────────────────────────────────────────────
+    # Layer 1: timestamp filter — message predates bot startup → mark sender
     msg_timestamp = body.get("timestamp", 0)
     if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+        if sender:
+            _pre_boot_senders.add(sender)
         logger.info(
-            "[BOT:SKIP_OLD] Pre-boot message ignored | id=%s | sender=%s | "
+            "[BOT:SKIP_OLD] Pre-boot message — sender blocked | id=%s | sender=%s | "
             "msg_ts=%d | boot_ts=%d",
             msg_id, sender, int(msg_timestamp), int(_bot_start_time),
         )
+        return JSONResponse({"ok": True})
+
+    # Layer 2: sender already known to have pre-boot history → block all their messages
+    if sender in _pre_boot_senders:
+        logger.info("[BOT:SKIP_PREBOOT] Blocked sender has pre-boot history | sender=%s", sender)
         return JSONResponse({"ok": True})
 
     # Deduplication — webhook and poll loop can both deliver the same message
