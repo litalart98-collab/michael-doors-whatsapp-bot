@@ -78,21 +78,19 @@ def _build_image_reply(sender: str) -> str:
     has_entrance = "entrance_doors" in topics
     has_interior = "interior_doors" in topics
 
+    entrance = "https://www.michaeldoors.co.il/catalog/entry-designed"
+    interior = "https://www.michaeldoors.co.il/catalog/interior-smooth"
+
     if has_entrance and not has_interior:
-        links = "דלתות כניסה: https://www.michaeldoors.co.il/catalog/entry-designed"
+        links = entrance
     elif has_interior and not has_entrance:
-        links = "דלתות פנים: https://www.michaeldoors.co.il/catalog/interior-smooth"
+        links = interior
     else:
-        links = (
-            "דלתות כניסה: https://www.michaeldoors.co.il/catalog/entry-designed\n"
-            "דלתות פנים: https://www.michaeldoors.co.il/catalog/interior-smooth"
-        )
+        links = f"{entrance} / {interior}"
 
     return (
-        "קיבלתי את התמונה 😊\n"
-        "כדי שנוכל להעביר לנציג את הפרטים המדויקים — "
-        "תסתכלו בקטלוג שלנו וציינו את שם הדגם שתפס אתכם:\n\n"
-        + links
+        f"קיבלתי את התמונה 😊 כדי שנוכל להעביר לנציג את הפרטים המדויקים — "
+        f"תסתכלו בקטלוג שלנו וציינו את שם הדגם:\n{links}"
     )
 
 # All possible farewell texts — if the last bot message matches any of these,
