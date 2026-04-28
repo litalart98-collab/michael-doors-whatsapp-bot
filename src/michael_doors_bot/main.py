@@ -70,6 +70,40 @@ CLOSE_AFTER_FOLLOWUP  = 90 * 60  # 90 min after follow-up → close inquiry (2 h
 
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
+async def _handle_non_text(sender: str) -> None:
+    """
+    Handle image / voice / sticker from a customer.
+
+    First non-text:
+      Send catalog link and ask for the model name.
+      Mark sender in _image_catalog_sent.
+
+    Second non-text (no text reply in between):
+      Customer hasn't given a model name → escalate to contact collection.
+      Clear the mark so a third image would restart the cycle.
+    """
+    _followup_reset(sender)
+    if sender in _image_catalog_sent:
+        # Second image — give up on model name, move to contact collection
+        _image_catalog_sent.discard(sender)
+        msg = (
+            "נראה שקשה לתאר את הדגם בטקסט 😊\n"
+            "נציג שלנו ישמח לעזור אישית — אשמח לשם, עיר ומספר טלפון כדי שיחזרו אליכם."
+        )
+        logger.info("[BOT:IMAGE_ESCALATE] Moving to contact collection | sender=%s", sender)
+    else:
+        # First image — send catalog link
+        _image_catalog_sent.add(sender)
+        msg = _build_image_reply(sender)
+        logger.info("[BOT:IMAGE_CATALOG] Sent catalog link | sender=%s", sender)
+    try:
+        await green.send_message(sender, msg)
+        _followup_mark_bot_replied(sender)
+    except Exception as exc:
+        _record_error("send_fail", sender, str(exc))
+        logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
+
+
 def _build_image_reply(sender: str) -> str:
     """Return the non-text reply for a given sender.
     Sends the relevant catalog link(s) based on active topics in the conversation.
@@ -141,6 +175,12 @@ def _record_error(kind: str, sender: str, detail: str) -> None:
         "detail": str(detail)[:200],
     })
 
+
+# ── Image catalog escalation tracker ─────────────────────────────────────────
+# Tracks senders who already received the catalog link after sending an image.
+# If they send ANOTHER image without giving a model name, we skip to contact
+# collection. Cleared when the sender moves to contact collection or closes.
+_image_catalog_sent: set[str] = set()
 
 # ── Pre-boot sender block ─────────────────────────────────────────────────────
 # Senders whose messages pre-date this bot session (history from before the bot
@@ -1205,14 +1245,9 @@ async def _poll_loop() -> None:
                     msg_type = msg_data.get("typeMessage", "")
                     if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
                         logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
-                        _followup_reset(sender)
-                        try:
-                            await green.send_message(sender, _build_image_reply(sender))
-                            _followup_mark_bot_replied(sender)
-                        except Exception as exc:
-                            _record_error("send_fail", sender, str(exc))
-                            logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
+                        await _handle_non_text(sender)
                 elif sender and text:
+                    _image_catalog_sent.discard(sender)  # text reply clears image escalation
                     _track_msg_id(msg_id)
                     logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
                     _schedule_debounced(sender, text)
@@ -1398,16 +1433,11 @@ async def webhook(request: Request, token: str = Query(default="")):
         msg_type = msg_data.get("typeMessage", "")
         if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
             logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
-            _followup_reset(sender)  # customer is active — reset the follow-up clock
-            try:
-                await green.send_message(sender, _build_image_reply(sender))
-                _followup_mark_bot_replied(sender)
-            except Exception as exc:
-                _record_error("send_fail", sender, str(exc))
-                logger.error("[BOT:SEND_FAIL] Non-text reply | sender=%s | %s", sender, exc)
+            await _handle_non_text(sender)
         return JSONResponse({"ok": True})
 
     if sender and text:
+        _image_catalog_sent.discard(sender)  # text reply clears image escalation state
         logger.info("[BOT:RECV] Webhook | sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
         # Fire-and-forget: buffer the message and let the debounce timer decide
         # when to process.  Multiple messages sent in quick succession are merged
