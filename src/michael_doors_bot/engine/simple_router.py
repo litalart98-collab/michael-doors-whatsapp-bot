@@ -1529,6 +1529,7 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  For reply_text_2: customer hasn't stated a specific need.",
                 "  Greet warmly + invite them to share what they're looking for.",
                 "  Use time-based greeting from business context above.",
+                "  ⛔ Use EXACTLY the phrase 'שמחים שפניתם אלינו' — never 'שקשרתם איתנו' or any other variant.",
                 f"  {gender_note}",
             ]
         else:
