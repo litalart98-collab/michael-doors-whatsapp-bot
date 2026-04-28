@@ -1040,7 +1040,13 @@ async def _poll_loop() -> None:
                     or msg_data.get("extendedTextMessageData", {}).get("text")
                     or ""
                 )
-                if sender and msg_id and _is_duplicate(msg_id):
+                msg_timestamp = body.get("timestamp", 0)
+                if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+                    logger.info(
+                        "[BOT:SKIP_OLD] Poll pre-boot message ignored | id=%s | sender=%s",
+                        msg_id, sender,
+                    )
+                elif sender and msg_id and _is_duplicate(msg_id):
                     logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
                 elif sender and not text and _is_individual_chat(sender):
                     msg_type = msg_data.get("typeMessage", "")
@@ -1177,6 +1183,18 @@ async def webhook(request: Request, token: str = Query(default="")):
         or msg_data.get("extendedTextMessageData", {}).get("text")
         or ""
     )
+
+    # Skip historical messages — sent before this bot instance started.
+    # Green API replays unread messages on first connect; we never want to
+    # respond to conversations the bot wasn't part of.
+    msg_timestamp = body.get("timestamp", 0)
+    if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+        logger.info(
+            "[BOT:SKIP_OLD] Pre-boot message ignored | id=%s | sender=%s | "
+            "msg_ts=%d | boot_ts=%d",
+            msg_id, sender, int(msg_timestamp), int(_bot_start_time),
+        )
+        return JSONResponse({"ok": True})
 
     # Deduplication — webhook and poll loop can both deliver the same message
     if sender and msg_id:
