@@ -215,9 +215,11 @@ def _empty_conv_state() -> dict:
 
         # ── Entrance door fields ──
         "entrance_scope":        None,   # "with_frame" | "door_only"
-        "entrance_style":        None,   # "flat" | "designed" | "undecided"
+        "entrance_style":        None,   # "flat" | "designed" | "undecided" | "zero_line"
         "entrance_catalog_sent": False,
         "entrance_model":        None,   # model name | "undecided"
+        "entrance_zero_line":    False,  # True when customer asked for קו אפס entrance
+        "entrance_project_type": None,   # "new" | "renovation" | "replacement" (zero_line only)
 
         # ── Interior door fields ──
         "interior_project_type": None,   # "new" | "renovation" | "replacement"
@@ -765,7 +767,14 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         ))
     )
     if _entrance_context:
-        if re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
+        # ── Zero-line entrance detection ──────────────────────────────────────
+        # קו אפס entrance doors always include the hidden frame — no need to ask
+        # scope. Style is locked to "zero_line" and project_type replaces scope.
+        if re.search(r'קו.?אפס|דלת.?אפס|דלתות.?אפס', t, re.IGNORECASE):
+            extracted['entrance_zero_line'] = True
+            extracted['entrance_scope']     = 'with_frame'   # always included
+            extracted['entrance_style']     = 'zero_line'    # locks style
+        elif re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
             extracted['entrance_scope'] = "with_frame"
         elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
             extracted['entrance_scope'] = "door_only"
@@ -823,6 +832,21 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         rt = extracted.setdefault('_new_topics', [])
         if isinstance(rt, list) and "interior_doors" not in rt:
             rt.append("interior_doors")
+
+    # ── Entrance project type (zero-line only) ────────────────────────────────
+    # Only extracted when the current topic is entrance_doors + zero_line style,
+    # so these answers can't accidentally bleed into interior_project_type.
+    _is_zero_line_entrance = (
+        (state or {}).get("entrance_zero_line")
+        or extracted.get("entrance_zero_line")
+    )
+    if _is_zero_line_entrance and 'entrance_project_type' not in extracted:
+        if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
+            extracted['entrance_project_type'] = 'new'
+        elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים', t, re.IGNORECASE):
+            extracted['entrance_project_type'] = 'renovation'
+        elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה', t, re.IGNORECASE):
+            extracted['entrance_project_type'] = 'replacement'
 
     # ── Mamad type ────────────────────────────────────────────────────────────
     if re.search(r'ממ.?ד חדש|מרחב מוגן חדש', t, re.IGNORECASE):
@@ -1103,6 +1127,10 @@ class NextAction:
 def _topic_complete(topic: str, state: dict) -> bool:
     """Return True when all required fields for the given topic are collected."""
     if topic == "entrance_doors":
+        # Zero-line entrance: complete once project_type is known.
+        # Scope is auto-set; style is locked to "zero_line"; no catalog needed.
+        if state.get("entrance_zero_line") or state.get("entrance_style") == "zero_line":
+            return state.get("entrance_project_type") is not None
         scope = state.get("entrance_scope")
         style = state.get("entrance_style")
         if scope is None or style is None:
@@ -1157,6 +1185,16 @@ def _compute_current_topic(state: dict) -> str | None:
 def _next_topic_action(topic: str, state: dict) -> NextAction | None:
     """Return the next required NextAction for the given topic."""
     if topic == "entrance_doors":
+        # ── Zero-line entrance: skip scope + style questions ──────────────────
+        # Frame is always built-in (scope auto-set); style locked to zero_line.
+        # Only ask project_type (new / renovation / replacement).
+        if state.get("entrance_zero_line") or state.get("entrance_style") == "zero_line":
+            if state.get("entrance_project_type") is None:
+                return NextAction(2, "entrance_project_type", "ask_entrance_project_type", False,
+                                  "entrance zero-line: ask project type (new/renovation/replacement)")
+            return None  # complete
+
+        # ── Regular entrance door flow ─────────────────────────────────────────
         if state.get("entrance_scope") is None:
             return NextAction(2, "entrance_scope", "ask_entrance_scope", False,
                               "entrance: ask scope (with_frame or door_only)")

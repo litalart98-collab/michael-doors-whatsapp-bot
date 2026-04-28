@@ -48,6 +48,7 @@ QUESTION_TEMPLATES: dict[str, str] = {
     # Entrance doors queue
     "ask_entrance_scope":        "האם מדובר בדלת כולל משקוף, או דלת בלבד?",
     "ask_entrance_style":        "דלת חלקה או מעוצבת?",
+    "ask_entrance_project_type": "מדובר בבית חדש, שיפוץ, או החלפה של דלת קיימת?",
 
     # Interior doors queue
     "ask_interior_project_type": "מדובר בבית חדש, שיפוץ, או החלפה של דלתות קיימות?",
