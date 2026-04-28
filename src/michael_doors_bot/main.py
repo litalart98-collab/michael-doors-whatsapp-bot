@@ -546,6 +546,101 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         _queue_sheets_retry(row, is_test, sender_id, exc)
 
 
+async def _send_incomplete_lead_to_sheets(sender: str, is_test: bool) -> None:
+    """
+    Send a partial lead row to Sheets when a conversation closes without completion.
+    Fires only if:
+      • Complete lead was NOT already sent (sheets_sent is False)
+      • At least one topic was detected
+      • Customer sent at least one message (not a silent bounce)
+    Row is flagged "❗ דורש מעקב" so the sales team knows to follow up manually.
+    """
+    if not config.GOOGLE_SHEETS_WEBHOOK_URL:
+        return
+
+    # Guard: complete lead already sent — don't add a second row
+    leads    = _load_leads(is_test)
+    lead_rec = leads.get(sender, {})
+    if lead_rec.get("sheets_sent") or lead_rec.get("partial_lead_sent"):
+        return
+
+    # Guard: need at least one detected topic
+    conv_state = _router_conv_state.get(sender, {})
+    active_topics = conv_state.get("active_topics") or []
+    if not active_topics:
+        return
+
+    # Guard: customer must have sent at least one message
+    history = _conv_history.get(sender, [])
+    if not any(m.get("role") == "user" for m in history):
+        return
+
+    # ── Phone: clean WhatsApp sender ID → Israeli format ─────────────────────
+    raw_phone = sender
+    phone_clean = raw_phone.replace("@c.us", "").strip()
+    if phone_clean.startswith("972") and len(phone_clean) >= 11:
+        phone_clean = "0" + phone_clean[3:]
+    phone_digits = phone_clean.replace("-", "").replace(" ", "")
+    if len(phone_digits) == 10 and phone_digits.isdigit():
+        phone_clean = phone_digits[:3] + "-" + phone_digits[3:]
+
+    # ── Service field: same logic as complete leads ───────────────────────────
+    parts_svc: list[str] = []
+    if "entrance_doors" in active_topics:
+        lbl = "דלת כניסה"
+        style = conv_state.get("entrance_style")
+        if style == "flat":     lbl += " חלקה"
+        elif style == "designed": lbl += " מעוצבת"
+        elif style == "zero_line": lbl += " קו אפס"
+        scope = conv_state.get("entrance_scope")
+        if scope == "with_frame": lbl += " כולל משקוף"
+        elif scope == "door_only": lbl += " דלת בלבד"
+        parts_svc.append(lbl)
+    if "interior_doors" in active_topics:
+        lbl = "דלתות פנים"
+        qty = conv_state.get("interior_quantity")
+        if qty: lbl += f" {qty} יח'"
+        style = conv_state.get("interior_style")
+        if style == "flat":     lbl += " חלקות"
+        elif style == "designed": lbl += " מעוצבות"
+        parts_svc.append(lbl)
+    if "mamad" in active_topics:
+        lbl = 'דלת ממ"ד'
+        mamad_type = conv_state.get("mamad_type")
+        if mamad_type == "new":         lbl += " חדשה"
+        elif mamad_type == "replacement": lbl += " — החלפה"
+        parts_svc.append(lbl)
+    if "repair"           in active_topics: parts_svc.append("תיקון")
+    if "showroom_meeting" in active_topics: parts_svc.append("ביקור אולם תצוגה")
+    service_field = " | ".join(parts_svc) if parts_svc else ""
+
+    row = {
+        "full_name":               conv_state.get("full_name") or lead_rec.get("full_name", ""),
+        "city":                    conv_state.get("city")      or lead_rec.get("city", ""),
+        "service_type":            service_field,
+        "datetime":                lead_rec.get("firstContact", datetime.utcnow().isoformat()),
+        "preferred_contact_hours": "",
+        "phone":                   phone_clean,
+        "notes":                   "❗ דורש מעקב — לא השלים שיחה",
+        "conversation_summary":    lead_rec.get("conv_summary", ""),
+    }
+
+    try:
+        await append_lead(config.GOOGLE_SHEETS_WEBHOOK_URL, row)
+        # Mark so we never send again for this conversation
+        leads = _load_leads(is_test)
+        if sender not in leads:
+            leads[sender] = {"phone": sender}
+        leads[sender]["partial_lead_sent"] = True
+        _save_leads(leads, is_test)
+        logger.info(
+            "[SHEETS:INCOMPLETE] Partial lead sent | sender=%s | phone=%s | topics=%s",
+            sender, phone_clean, active_topics,
+        )
+    except Exception as exc:
+        logger.error("[SHEETS:INCOMPLETE_ERR] sender=%s | %s", sender, exc)
+
+
 # ── Follow-up tracker ─────────────────────────────────────────────────────────
 # {sender: {"last_bot_time": float, "followup_sent": bool, "followup_time": float, "closed": bool}}
 _followup: dict[str, dict] = {}
@@ -785,6 +880,7 @@ async def _followup_loop() -> None:
                     _save_followup()
                     logger.info("[BOT:CLOSE] Inquiry closed (no-response) | sender=%s", sender)
                     await _attach_summary(sender, "נסגרה ללא מענה", config.TEST_MODE)
+                    await _send_incomplete_lead_to_sheets(sender, config.TEST_MODE)
                 except Exception as exc:
                     logger.error("Close message error | sender=%s | %s", sender, exc)
 
