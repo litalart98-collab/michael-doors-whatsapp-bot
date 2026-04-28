@@ -53,6 +53,25 @@ class GreenAPIClient:
             logger.error("Green-API deleteNotification failed | receiptId=%d | %s", receipt_id, exc)
             return False
 
+    async def get_chats(self) -> list[str]:
+        """Return list of all existing chat IDs (individual chats only, @c.us suffix)."""
+        url = f"{self._base}/getChats/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+                if not isinstance(data, list):
+                    return []
+                return [
+                    c.get("id") or c.get("chatId", "")
+                    for c in data
+                    if (c.get("id") or c.get("chatId", "")).endswith("@c.us")
+                ]
+        except Exception as exc:
+            logger.warning("Green-API getChats failed: %s", exc)
+            return []
+
     async def get_contact_name(self, chat_id: str) -> str:
         """Return the WhatsApp display name for a contact, or empty string on failure."""
         url = f"{self._base}/getContactInfo/{self._token}"

@@ -57,11 +57,12 @@ _ROOT     = Path(__file__).parent.parent.parent
 # DATA_DIR can be set to a Render Persistent Disk mount (e.g. /data) so runtime
 # data files survive service restarts.  Falls back to project root.
 _DATA_DIR        = Path(config.DATA_DIR) if config.DATA_DIR else _ROOT
-_LEADS_FILE      = _DATA_DIR / "leads.json"
-_TEST_LEADS_FILE = _DATA_DIR / "leads_test.json"
-_SESSIONS_FILE   = _DATA_DIR / "sessions.json"
-_DEDUP_FILE      = _DATA_DIR / "dedup_ids.json"   # persisted dedup cache
-_FOLLOWUP_FILE   = _DATA_DIR / "followup_state.json"  # persisted follow-up timers
+_LEADS_FILE           = _DATA_DIR / "leads.json"
+_TEST_LEADS_FILE      = _DATA_DIR / "leads_test.json"
+_SESSIONS_FILE        = _DATA_DIR / "sessions.json"
+_DEDUP_FILE           = _DATA_DIR / "dedup_ids.json"         # persisted dedup cache
+_FOLLOWUP_FILE        = _DATA_DIR / "followup_state.json"    # persisted follow-up timers
+_PRE_EXISTING_FILE    = _DATA_DIR / "pre_existing_contacts.json"  # human chats before bot
 
 SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 30 * 60  # 30 min silence → send follow-up
@@ -123,11 +124,27 @@ def _record_error(kind: str, sender: str, detail: str) -> None:
 # ── Pre-boot sender block ─────────────────────────────────────────────────────
 # Senders whose messages pre-date this bot session (history from before the bot
 # was connected to the number).  Once a sender is identified as pre-boot — via
-# timestamp comparison OR via existing bot conversation history at startup —
-# ALL their messages are silently ignored for the lifetime of this session.
-# The set is intentionally NOT persisted: after a server restart it resets,
-# so if enough time has passed a returning customer can reach the bot normally.
+# timestamp comparison — ALL their messages are silently ignored for the
+# lifetime of this session.
 _pre_boot_senders: set[str] = set()
+
+# ── Pre-existing contacts (persistent) ───────────────────────────────────────
+# WhatsApp chats that existed BEFORE the bot was ever connected to this number.
+# Populated once (first boot) via Green API getChats, then persisted to disk.
+# Senders in this set had human conversations the bot never participated in —
+# the bot will silently skip their messages so it never interrupts a pre-bot
+# human relationship.  Only contacts with no bot-conversation history are added;
+# customers who already talked to the bot are never blocked.
+_pre_existing_contacts: set[str] = set()
+try:
+    _pre_existing_contacts = set(
+        json.loads(_PRE_EXISTING_FILE.read_text(encoding="utf-8"))
+    )
+    logger.info("[BOOT] Pre-existing contacts loaded: %d", len(_pre_existing_contacts))
+except FileNotFoundError:
+    pass  # first boot — will be populated in _lifespan
+except Exception as e:
+    logger.warning("[BOOT] Could not load pre-existing contacts: %s", e)
 
 
 # ── Message deduplication ─────────────────────────────────────────────────────
@@ -1159,6 +1176,8 @@ async def _poll_loop() -> None:
                     )
                 elif sender in _pre_boot_senders:
                     logger.info("[BOT:SKIP_PREBOOT] Poll blocked sender | sender=%s", sender)
+                elif sender in _pre_existing_contacts:
+                    logger.info("[BOT:SKIP_PREEXISTING] Poll pre-bot human contact | sender=%s", sender)
                 elif sender and msg_id and _is_duplicate(msg_id):
                     logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
                 elif sender and not text and _is_individual_chat(sender):
@@ -1230,12 +1249,6 @@ async def _lifespan(app: FastAPI):
     _load_dedup_cache()
     _load_followup()
 
-    # Populate pre-boot sender block from existing conversation history.
-    # Any sender already in the bot's store at startup had conversations
-    # before this session — they must not receive automated replies.
-    _pre_boot_senders.update(_conv_history.keys())
-    logger.info("[BOOT] Pre-boot senders blocked: %d", len(_pre_boot_senders))
-
     # Load system prompt and FAQ from Supabase (overrides file-based fallback)
     await _refresh_system_prompt()
     await _refresh_faq()
@@ -1247,6 +1260,31 @@ async def _lifespan(app: FastAPI):
             _conv_history[sender] = msgs
     if supabase_convs:
         logger.info("[BOOT] Supabase conversations loaded: %d senders", len(supabase_convs))
+
+    # ── Pre-existing contacts (first-boot population) ─────────────────────────
+    # If the file doesn't exist yet, this is the first time the bot runs on this
+    # number.  Fetch all existing WhatsApp chats via Green API and save them as
+    # "pre-existing contacts" — conversations the bot never managed.
+    # Contacts already in _conv_history (existing bot conversations) are excluded
+    # so returning bot customers are never blocked.
+    global _pre_existing_contacts
+    if not _PRE_EXISTING_FILE.exists():
+        logger.info("[BOOT] Pre-existing contacts file not found — fetching from Green API…")
+        try:
+            all_chats = await green.get_chats()
+            bot_known = set(_conv_history.keys())
+            new_pre_existing = {c for c in all_chats if c not in bot_known}
+            _pre_existing_contacts = new_pre_existing
+            _PRE_EXISTING_FILE.write_text(
+                json.dumps(sorted(_pre_existing_contacts), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(
+                "[BOOT] Pre-existing contacts saved: %d (of %d total chats, %d excluded as bot history)",
+                len(_pre_existing_contacts), len(all_chats), len(bot_known),
+            )
+        except Exception as exc:
+            logger.warning("[BOOT] Could not fetch pre-existing contacts: %s — no contacts blocked", exc)
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
@@ -1319,6 +1357,12 @@ async def webhook(request: Request, token: str = Query(default="")):
     # Layer 2: sender already known to have pre-boot history → block all their messages
     if sender in _pre_boot_senders:
         logger.info("[BOT:SKIP_PREBOOT] Blocked sender has pre-boot history | sender=%s", sender)
+        return JSONResponse({"ok": True})
+
+    # Pre-existing contacts — human conversations before bot was connected.
+    # Never respond to these; the bot was not part of their conversation history.
+    if sender in _pre_existing_contacts:
+        logger.info("[BOT:SKIP_PREEXISTING] Pre-bot human contact — staying silent | sender=%s", sender)
         return JSONResponse({"ok": True})
 
     # Deduplication — webhook and poll loop can both deliver the same message
