@@ -70,7 +70,30 @@ CLOSE_AFTER_FOLLOWUP  = 90 * 60  # 90 min after follow-up → close inquiry (2 h
 
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
-_NON_TEXT_MSG     = "אני יכולה לעזור רק עם הודעות טקסט 😊 במה אפשר לעזור?"
+def _build_image_reply(sender: str) -> str:
+    """Return the non-text reply for a given sender.
+    Sends the relevant catalog link(s) based on active topics in the conversation.
+    """
+    topics = set(_router_conv_state.get(sender, {}).get("active_topics") or [])
+    has_entrance = "entrance_doors" in topics
+    has_interior = "interior_doors" in topics
+
+    if has_entrance and not has_interior:
+        links = "דלתות כניסה: https://www.michaeldoors.co.il/catalog/entry-designed"
+    elif has_interior and not has_entrance:
+        links = "דלתות פנים: https://www.michaeldoors.co.il/catalog/interior-smooth"
+    else:
+        links = (
+            "דלתות כניסה: https://www.michaeldoors.co.il/catalog/entry-designed\n"
+            "דלתות פנים: https://www.michaeldoors.co.il/catalog/interior-smooth"
+        )
+
+    return (
+        "קיבלתי את התמונה 😊\n"
+        "כדי שנוכל להעביר לנציג את הפרטים המדויקים — "
+        "תסתכלו בקטלוג שלנו וציינו את שם הדגם שתפס אתכם:\n\n"
+        + links
+    )
 
 # All possible farewell texts — if the last bot message matches any of these,
 # the conversation is closed and no follow-up reminder should be sent.
@@ -1186,7 +1209,7 @@ async def _poll_loop() -> None:
                         logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
                         _followup_reset(sender)
                         try:
-                            await green.send_message(sender, _NON_TEXT_MSG)
+                            await green.send_message(sender, _build_image_reply(sender))
                             _followup_mark_bot_replied(sender)
                         except Exception as exc:
                             _record_error("send_fail", sender, str(exc))
@@ -1379,7 +1402,7 @@ async def webhook(request: Request, token: str = Query(default="")):
             logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
             _followup_reset(sender)  # customer is active — reset the follow-up clock
             try:
-                await green.send_message(sender, _NON_TEXT_MSG)
+                await green.send_message(sender, _build_image_reply(sender))
                 _followup_mark_bot_replied(sender)
             except Exception as exc:
                 _record_error("send_fail", sender, str(exc))
