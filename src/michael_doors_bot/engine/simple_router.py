@@ -2519,31 +2519,22 @@ async def get_reply(
 
 # ── Follow-up message (15-min silence reminder) ───────────────────────────────
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
-    history = _conversations.get(sender, [])
-    _FALLBACK = "היי, עדיין ממתינה לתגובה מכם 😊 אם יש שאלה נוספת, אנחנו כאן לעזור!"
-    if len(history) < 2:
-        _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
-        _save_conversations()
-        return _FALLBACK
-    system = (
-        "אתה נציג מכירות של דלתות מיכאל. "
-        "הלקוח לא ענה כבר 15 דקות. כתוב הודעת תזכורת קצרה בשורה אחת עד שתיים: "
-        "\"היי, עדיין ממתינה לתגובה מכם 😊 אם יש עוד שאלות לגבי [נושא ספציפי מהשיחה], אנחנו כאן!\". "
-        "החלף [נושא ספציפי] בנושא מהשיחה. "
-        "שפה ישירה ואנושית. בעברית בלבד. ללא JSON."
-    )
-    try:
-        msg = await _call_ai(system=system, messages=history[-6:], max_tokens=120,
-                             api_key=anthropic_api_key, timeout=15.0)
-        msg = msg.strip()
-        _conversations[sender].append({"role": "assistant", "content": msg})
-        _save_conversations()
-        return msg
-    except Exception as exc:
-        logger.error("get_followup_message error | sender=%s | %s", sender, exc)
-        _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
-        _save_conversations()
-        return _FALLBACK
+    """
+    Build a follow-up reminder without calling AI.
+    Uses the stored conversation state to name the exact topic — prevents
+    hallucinated content like "יבואנים בסין" that Claude would sometimes invent.
+    """
+    state = _conv_state.get(sender, {})
+    topic_he = _topic_label_he(state) if state else ""
+
+    if topic_he and topic_he != "שירות דלתות":
+        msg = f"היי, עדיין כאן 😊 אם נשארו שאלות לגבי {topic_he}, אנחנו זמינים לעזור!"
+    else:
+        msg = "היי, עדיין כאן 😊 אם נשארו שאלות, אנחנו זמינים לעזור!"
+
+    _conversations.setdefault(sender, []).append({"role": "assistant", "content": msg})
+    _save_conversations()
+    return msg
 
 
 # ── Closing intent detection ─────────────────────────────────────────────────
