@@ -2705,6 +2705,11 @@ def _normalize_callback_time(text: str) -> str:
         return text
     t = text.strip()
 
+    # ── Multiple options (e.g. "עכשיו או מחר ב9:00") — pass through as-is ───
+    # Normalising would lose part of the answer or produce wrong results.
+    if re.search(r'\bאו\b|/|,', t):
+        return t
+
     # ── Already HH:MM or H:MM ────────────────────────────────────────────────
     m = re.match(r'^(\d{1,2}):(\d{2})$', t)
     if m:
