@@ -64,8 +64,8 @@ _DEDUP_FILE      = _DATA_DIR / "dedup_ids.json"   # persisted dedup cache
 _FOLLOWUP_FILE   = _DATA_DIR / "followup_state.json"  # persisted follow-up timers
 
 SESSION_TIMEOUT       = 30 * 60  # seconds
-FOLLOWUP_DELAY        = 15 * 60  # 15 min silence → send follow-up
-CLOSE_AFTER_FOLLOWUP  =  7 * 60  # 7 min after follow-up → close inquiry
+FOLLOWUP_DELAY        = 30 * 60  # 30 min silence → send follow-up
+CLOSE_AFTER_FOLLOWUP  = 90 * 60  # 90 min after follow-up → close inquiry (2 h total)
 
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
