@@ -27,7 +27,6 @@ from .engine.simple_router import (
     get_followup_message,
     get_reply,
     is_closing_intent,
-    is_working_hours,
     _normalize_callback_time,
     _refresh_system_prompt,
     _refresh_faq,
@@ -894,10 +893,6 @@ async def _followup_loop() -> None:
             followup_time = state.get("followup_time", 0.0)
 
             if not followup_sent and now - last_bot >= FOLLOWUP_DELAY:
-                # Never send follow-ups outside business hours — defer until opening time
-                if not is_working_hours():
-                    continue
-
                 history = _conv_history.get(sender, [])
 
                 # Guard: never follow-up if no customer reply is recorded in history.
@@ -980,10 +975,6 @@ async def _followup_loop() -> None:
                     logger.error("[BOT:FOLLOWUP_ERR] sender=%s | %s", sender, exc)
 
             elif followup_sent and now - followup_time >= CLOSE_AFTER_FOLLOWUP:
-                # Never send outside business hours — defer until opening time
-                if not is_working_hours():
-                    continue
-
                 try:
                     await green.send_message(sender, _CLOSE_MSG)
                     state["closed"] = True
