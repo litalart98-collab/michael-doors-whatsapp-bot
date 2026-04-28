@@ -723,21 +723,19 @@ async def _followup_loop() -> None:
                     continue
 
                 # ── Conversation-complete guards ──────────────────────────────
-                # Guard 1: router state — preferred_contact_hours, summary_confirmed,
-                # or handoff_to_human all mean the conversation reached Stage 7.
-                # Any one of these is sufficient — close silently, no reminder.
+                # Guard 1: router state — preferred_contact_hours or handoff_to_human
+                # mean the conversation reached Stage 7 (callback time answered / farewell sent).
+                # Either one is sufficient — close silently, no reminder.
                 conv_state = _router_conv_state.get(sender, {})
                 if (
                     conv_state.get("handoff_to_human")
                     or conv_state.get("preferred_contact_hours")
-                    or conv_state.get("summary_confirmed")
                 ):
                     logger.info(
-                        "[BOT:FOLLOWUP_SKIP] Conv complete (handoff=%s callback=%s confirmed=%s) — "
+                        "[BOT:FOLLOWUP_SKIP] Conv complete (handoff=%s callback=%s) — "
                         "closing silently | sender=%s",
                         conv_state.get("handoff_to_human"),
                         bool(conv_state.get("preferred_contact_hours")),
-                        conv_state.get("summary_confirmed"),
                         sender,
                     )
                     state["closed"] = True

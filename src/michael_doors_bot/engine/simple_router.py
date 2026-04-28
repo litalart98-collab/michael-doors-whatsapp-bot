@@ -1337,11 +1337,6 @@ def _decide_next_action(state: dict) -> NextAction:
             return NextAction(3, "stage3_question", showroom_s3_key, True,
                               "showroom stage 3: ask about door preferences after contact collection")
 
-        # Stage 5: summary + confirmation
-        if not state.get("summary_sent"):
-            return NextAction(5, "summary", "_summary_dynamic", False,
-                              "stage 5: send summary and ask הכל נכון?")
-
         # Stage 6: callback time — is_fixed=True so Claude sends the exact template
         if not state.get("preferred_contact_hours"):
             return NextAction(6, "preferred_contact_hours", _get_callback_key(state), True,
@@ -2544,6 +2539,30 @@ async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
         _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
         _save_conversations()
         return _FALLBACK
+
+    # ── Specific case: waiting for callback time after contact details collected ──
+    # State: contact info complete, no preferred_contact_hours yet, no handoff.
+    # Use a fixed message — no AI call needed, no risk of hallucination.
+    _CALLBACK_TIME_KEYS = (
+        "מתי נוח שנחזור",
+        "מתי נוח שיחזרו",
+    )
+    if (
+        state.get("full_name") and state.get("phone") and state.get("city")
+        and not state.get("preferred_contact_hours")
+        and not state.get("handoff_to_human")
+        and any(k in last_bot_msg for k in _CALLBACK_TIME_KEYS)
+    ):
+        gender = state.get("customer_gender_locked")
+        if gender == "female":
+            msg = "היי, עדיין ממתינה לתשובה שלך 😊 מתי נוח לך שנחזור אלייך?"
+        elif gender == "male":
+            msg = "היי, עדיין ממתין לתשובה שלך 😊 מתי נוח לך שנחזור אליך?"
+        else:
+            msg = "היי, עדיין ממתינה לתשובה 😊 מתי נוח לכם שנחזור אליכם?"
+        _conversations.setdefault(sender, []).append({"role": "assistant", "content": msg})
+        _save_conversations()
+        return msg
 
     system = (
         "אתה נציגת שירות של מיכאל דלתות. "
