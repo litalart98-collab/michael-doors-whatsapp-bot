@@ -614,9 +614,14 @@ async def _send_incomplete_lead_to_sheets(sender: str, is_test: bool) -> None:
     if "showroom_meeting" in active_topics: parts_svc.append("ביקור אולם תצוגה")
     service_field = " | ".join(parts_svc) if parts_svc else ""
 
+    # ── Name: prefer what customer said → fallback to WhatsApp display name ──
+    name_from_conv = conv_state.get("full_name") or lead_rec.get("full_name", "")
+    if not name_from_conv:
+        name_from_conv = await green.get_contact_name(sender)
+
     row = {
-        "full_name":               conv_state.get("full_name") or lead_rec.get("full_name", ""),
-        "city":                    conv_state.get("city")      or lead_rec.get("city", ""),
+        "full_name":               name_from_conv,
+        "city":                    conv_state.get("city") or lead_rec.get("city", ""),
         "service_type":            service_field,
         "datetime":                lead_rec.get("firstContact", datetime.utcnow().isoformat()),
         "preferred_contact_hours": "",

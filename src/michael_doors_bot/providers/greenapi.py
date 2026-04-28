@@ -52,3 +52,23 @@ class GreenAPIClient:
         except Exception as exc:
             logger.error("Green-API deleteNotification failed | receiptId=%d | %s", receipt_id, exc)
             return False
+
+    async def get_contact_name(self, chat_id: str) -> str:
+        """Return the WhatsApp display name for a contact, or empty string on failure."""
+        url = f"{self._base}/getContactInfo/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(url, json={"chatId": chat_id})
+                r.raise_for_status()
+                data = r.json()
+                # Green API returns: name / pushname / contactName (in priority order)
+                name = (
+                    data.get("name") or
+                    data.get("pushname") or
+                    data.get("contactName") or
+                    ""
+                )
+                return name.strip()
+        except Exception as exc:
+            logger.warning("Green-API getContactInfo failed | chatId=%s | %s", chat_id, exc)
+            return ""
