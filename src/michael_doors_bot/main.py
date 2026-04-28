@@ -69,7 +69,7 @@ CLOSE_AFTER_FOLLOWUP  = 90 * 60  # 90 min after follow-up → close inquiry (2 h
 
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
-_NON_TEXT_MSG     = "שלום 😊 אני יכולה לעזור רק עם הודעות טקסט. במה אפשר לעזור?"
+_NON_TEXT_MSG     = "אני יכולה לעזור רק עם הודעות טקסט 😊 במה אפשר לעזור?"
 
 # All possible farewell texts — if the last bot message matches any of these,
 # the conversation is closed and no follow-up reminder should be sent.
