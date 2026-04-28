@@ -522,7 +522,10 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"
         r"|דלת לבית|דלתות לבית"
         r"|כניסה לבית|כניסה לדירה|כניסה לבניין"
-        r"|נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|קלאסי|אומנויות|סביליה",
+        r"|נפחות|נפחת|פנורמי|יווני|מרקורי|עדן|קלאסי|אומנויות|סביליה"
+        # "קו אפס" combined with entrance-type indicators
+        r"|קו.?אפס.{0,10}(?:כניסה|ראשית|חיצונית|חוץ)"
+        r"|(?:כניסה|ראשית|חיצונית|חוץ).{0,10}קו.?אפס",
         re.IGNORECASE,
     ),
     "interior_doors": re.compile(
@@ -534,7 +537,10 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         # e.g. "פנים וראשית" / "בית חדש ופנים וראשית"
         # Hebrew-aware boundary: not preceded/followed by another Hebrew letter,
         # with optional conjunction-ו prefix.
-        r"|(?<![א-ת])ו?פנים(?![א-ת])",
+        r"|(?<![א-ת])ו?פנים(?![א-ת])"
+        # "קו אפס" combined with interior-type indicators
+        r"|קו.?אפס.{0,10}(?:פנים|חדר|פנימי)"
+        r"|(?:פנים|חדר|פנימי).{0,10}קו.?אפס",
         re.IGNORECASE,
     ),
     "mamad": re.compile(

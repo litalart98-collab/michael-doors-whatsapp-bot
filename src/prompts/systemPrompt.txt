@@ -112,6 +112,13 @@ Every reply must include ALL fields below. Use `null` for fields not found.
   | ממ"ד / ממד / מרחב מוגן / חדר ביטחון | `mamad` |
   | תיקון / תקלה / בעיה בדלת / פריצה | `repair` |
   | לבוא לאולם / אולם תצוגה / לקבוע פגישה / לראות דגמים | `showroom_meeting` |
+  | דלת קו אפס / קו אפס / דלתות קו אפס / דלת אפס / דלתות אפס | ⚠️ could be `entrance_doors` OR `interior_doors` — see rule below |
+
+  **"קו אפס" clarification rule:**
+  "קו אפס" (zero-line / flush door) is a door style available in both entrance and interior versions.
+  - "דלת קו אפס כניסה" / "קו אפס ראשית" / "קו אפס חיצונית" → emit `entrance_doors`
+  - "דלת קו אפס פנים" / "קו אפס לחדר" → emit `interior_doors`
+  - "קו אפס" or "דלת קו אפס" with NO type specified → emit `[]` (empty) — do NOT guess. The system will automatically ask the customer "דלת כניסה או דלת פנים?"
 
   **Critical multi-topic examples:**
   - "פנים וראשית" → `["interior_doors", "entrance_doors"]`
@@ -119,6 +126,9 @@ Every reply must include ALL fields below. Use `null` for fields not found.
   - "דלתות פנים פולימר ודלת ראשית" → `["interior_doors", "entrance_doors"]`
   - "גם כניסה וגם פנים" → `["entrance_doors", "interior_doors"]`
   - "צריך ממ\"ד ודלתות פנים" → `["mamad", "interior_doors"]`
+  - "דלת קו אפס כניסה" → `["entrance_doors"]`
+  - "קו אפס פנים" → `["interior_doors"]`
+  - "קו אפס" (alone) → `[]`
 
   When in doubt: if "ראשית" appears in a door-shopping context, always emit `"entrance_doors"`.
 
