@@ -1855,3 +1855,86 @@ async def conversations(test: str = "false", format: str = "html", admin: str = 
   </table>
 </body>
 </html>"""
+
+
+@app.get("/backfill-incomplete-leads", response_class=JSONResponse)
+async def backfill_incomplete_leads(admin: str = Query(default="")):
+    """
+    One-shot backfill: scan conversations from the last 24 hours and send
+    incomplete leads to Sheets for manual follow-up.
+
+    Criteria for inclusion:
+      • firstContact within last 24 hours
+      • Last bot activity > 2 hours ago
+      • At least one topic detected
+      • Complete lead NOT already sent (sheets_sent=False)
+      • Partial lead NOT already sent (partial_lead_sent=False)
+    """
+    if (denied := _check_admin(admin)):
+        return denied
+    if not config.GOOGLE_SHEETS_WEBHOOK_URL:
+        return JSONResponse({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK_URL not set"}, status_code=400)
+
+    now         = time.time()
+    cutoff_24h  = now - 24 * 3600
+    cutoff_2h   = now -  2 * 3600
+
+    leads      = _load_leads(config.TEST_MODE)
+    processed  = []
+    skipped    = []
+
+    # All candidate senders: from leads file + active conv history in memory
+    candidates = set(leads.keys()) | set(_conv_history.keys())
+
+    for sender in candidates:
+        lead_rec   = leads.get(sender, {})
+        conv_state = _router_conv_state.get(sender, {})
+
+        # Filter: only last 24 hours (based on firstContact)
+        first_contact_str = lead_rec.get("firstContact", "")
+        try:
+            first_contact_ts = datetime.fromisoformat(first_contact_str).timestamp()
+        except Exception:
+            first_contact_ts = 0.0
+        if first_contact_ts < cutoff_24h:
+            skipped.append({"sender": sender[-10:], "reason": "older than 24h"})
+            continue
+
+        # Filter: already in Sheets
+        if lead_rec.get("sheets_sent") or lead_rec.get("partial_lead_sent"):
+            skipped.append({"sender": sender[-10:], "reason": "already in sheets"})
+            continue
+
+        # Filter: at least one topic detected
+        active_topics = conv_state.get("active_topics") or []
+        if not active_topics:
+            skipped.append({"sender": sender[-10:], "reason": "no topics detected"})
+            continue
+
+        # Filter: last bot activity > 2 hours ago
+        followup_state = _followup.get(sender, {})
+        last_activity  = followup_state.get("last_bot_time") or first_contact_ts
+        if last_activity > cutoff_2h:
+            skipped.append({"sender": sender[-10:], "reason": "activity < 2h ago"})
+            continue
+
+        # Eligible — send partial lead to Sheets
+        try:
+            await _send_incomplete_lead_to_sheets(sender, config.TEST_MODE)
+            processed.append({
+                "sender": sender[-10:],
+                "topics": active_topics,
+                "name":   conv_state.get("full_name") or "",
+            })
+            logger.info("[BACKFILL] Sent | sender=%s | topics=%s", sender, active_topics)
+        except Exception as exc:
+            skipped.append({"sender": sender[-10:], "reason": f"error: {exc}"})
+            logger.error("[BACKFILL_ERR] sender=%s | %s", sender, exc)
+
+    return JSONResponse({
+        "ok":        True,
+        "sent":      len(processed),
+        "skipped":   len(skipped),
+        "processed": processed,
+        "skip_log":  skipped,
+    })
