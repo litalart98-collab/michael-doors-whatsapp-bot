@@ -2520,17 +2520,57 @@ async def get_reply(
 # ── Follow-up message (15-min silence reminder) ───────────────────────────────
 async def get_followup_message(sender: str, anthropic_api_key: str) -> str:
     """
-    Build a follow-up reminder without calling AI.
-    Uses the stored conversation state to name the exact topic — prevents
-    hallucinated content like "יבואנים בסין" that Claude would sometimes invent.
+    Build a follow-up reminder based on the last bot message.
+    Claude receives ONLY that one message so it cannot hallucinate unrelated topics.
+    Falls back to a topic-based static string if AI call fails.
     """
-    state = _conv_state.get(sender, {})
+    state    = _conv_state.get(sender, {})
     topic_he = _topic_label_he(state) if state else ""
 
+    # Static fallback (used when AI fails or no history exists)
     if topic_he and topic_he != "שירות דלתות":
-        msg = f"היי, עדיין כאן 😊 אם נשארו שאלות לגבי {topic_he}, אנחנו זמינים לעזור!"
+        _FALLBACK = f"היי, עדיין כאן 😊 אם נשארו שאלות לגבי {topic_he}, אנחנו זמינים לעזור!"
     else:
-        msg = "היי, עדיין כאן 😊 אם נשארו שאלות, אנחנו זמינים לעזור!"
+        _FALLBACK = "היי, עדיין כאן 😊 אם נשארו שאלות, אנחנו זמינים לעזור!"
+
+    # Find the last assistant message in history
+    history       = _conversations.get(sender, [])
+    last_bot_msg  = next(
+        (m["content"] for m in reversed(history) if m.get("role") == "assistant"),
+        None,
+    )
+
+    if not last_bot_msg:
+        _conversations.setdefault(sender, []).append({"role": "assistant", "content": _FALLBACK})
+        _save_conversations()
+        return _FALLBACK
+
+    system = (
+        "אתה נציגת שירות של מיכאל דלתות. "
+        "הלקוח לא ענה כבר 30 דקות להודעה האחרונה שנשלחה אליו. "
+        "כתוב הודעת תזכורת קצרה — שורה אחת עד שתיים — שמתייחסת ישירות לאותה הודעה. "
+        "טון קל, אנושי, ללא לחץ. בעברית בלבד. ללא JSON. ללא מרכאות. "
+        "אל תוסיף נושאים שאינם בהודעה האחרונה."
+    )
+    prompt = (
+        f"ההודעה האחרונה שנשלחה ללקוח:\n{last_bot_msg}\n\n"
+        "הלקוח לא ענה 30 דקות. כתוב תזכורת קצרה שמתייחסת להודעה הזו."
+    )
+
+    try:
+        msg = await _call_ai(
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            api_key=anthropic_api_key,
+            timeout=15.0,
+        )
+        msg = msg.strip()
+        if not msg:
+            msg = _FALLBACK
+    except Exception as exc:
+        logger.error("get_followup_message error | sender=%s | %s", sender, exc)
+        msg = _FALLBACK
 
     _conversations.setdefault(sender, []).append({"role": "assistant", "content": msg})
     _save_conversations()
