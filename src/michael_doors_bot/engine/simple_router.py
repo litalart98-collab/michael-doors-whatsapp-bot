@@ -2617,20 +2617,86 @@ def is_closing_intent(text: str, conv_turns: int) -> bool:
         stripped, re.IGNORECASE
     ):
         return True
+    if _is_deferral_intent(stripped):
+        return True
+    if _is_already_handled_intent(stripped):
+        return True
+    return False
+
+
+def _is_already_handled_intent(text: str) -> bool:
+    """Return True if the customer signals the matter is already arranged with a human rep."""
+    # "דברתי עם מישהו" / "כבר תיאמנו" / "יבוא לראות" / "יגיע למדוד" / "סוכם" etc.
+    if re.search(
+        r'(כבר\s+)?(דברתי|שוחחתי|תיאמתי|סגרתי|סוכם|סודר|מסודר|הכל\s+בסדר)',
+        text, re.IGNORECASE
+    ):
+        return True
+    if re.search(
+        r'(יבוא|יגיע|יעלה|ישלח)\s+(לראות|למדוד|לבדוק|אלינו|אלי)',
+        text, re.IGNORECASE
+    ):
+        return True
+    if re.search(
+        r'(דברתי|שוחחתי)\s+(עם\s+)?(מישהו|נציג|הצוות|החברה|אדם)',
+        text, re.IGNORECASE
+    ):
+        return True
+    return False
+
+
+def _is_deferral_intent(text: str) -> bool:
+    """Return True if the customer says they'll call / come back on their own initiative."""
+    # "אתקשר מחר" / "אחזור בבוקר" / "נדבר בהמשך" etc.
+    if re.search(
+        r'(אני\s+)?(א|נ)(תקשר|חזור|פנה|דבר|כתוב)'
+        r'(\s+(אליכם|אליך|אלייך|אל[- ]?המספר|שוב))?'
+        r'\s*(מחר|הערב|בבוקר|אחר[- ]?הצהריים|בערב|בשבוע|ביום|בקרוב|מאוחר\s+יותר|בהמשך|אח[״\"]?כ)',
+        text, re.IGNORECASE
+    ):
+        return True
+    # "אבדוק ואחזור" / "אתייעץ ואתקשר" etc.
+    if re.search(
+        r'(אבדוק|אתייעץ|אחשוב|אראה|אסתכל)\s+(ו)?(א|נ)(חזור|תקשר|פנה)',
+        text, re.IGNORECASE
+    ):
+        return True
     return False
 
 
 # ── Closing message (farewell AI reply) ───────────────────────────────────────
-async def get_closing_message(sender: str, anthropic_api_key: str) -> str:
-    """Generate a warm farewell message when the customer closes the conversation."""
+async def get_closing_message(sender: str, anthropic_api_key: str, reason: str = "farewell") -> str:
+    """Generate a warm farewell message when the customer closes the conversation.
+
+    reason:
+      "farewell"  — customer said goodbye (תודה / ביי / etc.)
+      "deferred"  — customer said they'll call/come back (אתקשר מחר / אחזור / etc.)
+      "handled"   — customer says it's already arranged with a rep (דברתי עם מישהו / יבוא לראות / etc.)
+    """
     history = _conversations.get(sender, [])
     _FALLBACK = "תודה שפניתם לדלתות מיכאל 😊 אם תרצו לחזור — אנחנו כאן! יום נפלא! 💙"
-    system = (
-        "אתה נציג מכירות ידידותי של דלתות מיכאל. "
-        "הלקוח מסיים את השיחה. כתוב הודעת פרידה קצרה (1–2 שורות), חמה ואנושית. "
-        "אם נמסרו פרטי קשר, ציין שנחזור בהקדם. "
-        "בעברית בלבד. ללא JSON."
-    )
+    if reason == "deferred":
+        system = (
+            "אתה נציג מכירות ידידותי של דלתות מיכאל. "
+            "הלקוח אמר שהוא יחזור / יתקשר מאוחר יותר. "
+            "כתוב הודעה קצרה (1–2 שורות) שמאשרת בחמימות שמחכים לו — "
+            "לא 'נחזור אליך' אלא 'מחכים לשיחה שלך' / 'נשמח לשמוע ממך'. "
+            "בעברית בלבד. ללא JSON."
+        )
+    elif reason == "handled":
+        system = (
+            "אתה נציג מכירות ידידותי של דלתות מיכאל. "
+            "הלקוח ציין שכבר תיאם עם נציג שיגיע / שהכל מסודר. "
+            "כתוב הודעה קצרה (1 שורה בלבד), חמה ומסכמת — כמו 'מעולה, נתראה בקרוב 😊'. "
+            "אל תשאל שאלות נוספות. בעברית בלבד. ללא JSON."
+        )
+    else:
+        system = (
+            "אתה נציג מכירות ידידותי של דלתות מיכאל. "
+            "הלקוח מסיים את השיחה. כתוב הודעת פרידה קצרה (1–2 שורות), חמה ואנושית. "
+            "אם נמסרו פרטי קשר, ציין שנחזור בהקדם. "
+            "בעברית בלבד. ללא JSON."
+        )
     try:
         msg = await _call_ai(
             system=system,

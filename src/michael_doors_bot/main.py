@@ -27,6 +27,8 @@ from .engine.simple_router import (
     get_followup_message,
     get_reply,
     is_closing_intent,
+    _is_deferral_intent,
+    _is_already_handled_intent,
     _normalize_callback_time,
     _refresh_system_prompt,
     _refresh_faq,
@@ -495,8 +497,15 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         )
         return
 
-    # ── Handoff guard: send only at Stage 7 ──────────────────────────────────
-    if not result.get("handoff_to_human"):
+    # ── Handoff guard: send at Stage 7 OR when all 5 fields just completed ──────
+    # Primary: Claude set handoff_to_human = true (normal farewell flow).
+    # Fallback: all 5 required fields are present — the lead is complete even if
+    #   Claude failed to set handoff_to_human (e.g. sent a wrong message).
+    #   preferred_contact_hours being set implies callback step was reached.
+    all_fields_complete = all(
+        lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type", "preferred_contact_hours")
+    )
+    if not result.get("handoff_to_human") and not all_fields_complete:
         logger.debug(
             "[SHEETS:SKIP] not at handoff yet — deferring | sender=%s | full_name=%r",
             lead.get("phone", ""), lead.get("full_name", ""),
@@ -963,6 +972,19 @@ async def _followup_loop() -> None:
                     _save_followup()
                     continue
 
+                # Guard 4: last bot message is not a question — nothing to wait for.
+                # If the bot's last reply has no "?" it wasn't waiting for a customer
+                # answer (e.g. "אשמח לעזור כשנחזור לעבודה ביום רביעי 😊"), so skip
+                # the follow-up entirely and close the watch entry quietly.
+                if "?" not in last_bot_text:
+                    logger.info(
+                        "[BOT:FOLLOWUP_SKIP] Last bot message has no question — nothing to follow up | sender=%s",
+                        sender,
+                    )
+                    state["closed"] = True
+                    _save_followup()
+                    continue
+
                 try:
                     msg = await get_followup_message(sender, config.ANTHROPIC_API_KEY)
                     await green.send_message(sender, msg)
@@ -975,15 +997,16 @@ async def _followup_loop() -> None:
                     logger.error("[BOT:FOLLOWUP_ERR] sender=%s | %s", sender, exc)
 
             elif followup_sent and now - followup_time >= CLOSE_AFTER_FOLLOWUP:
+                # Close silently — no message sent to customer.
+                # We still close the state internally and save the incomplete lead to Sheets.
+                state["closed"] = True
+                _save_followup()
+                logger.info("[BOT:CLOSE] Inquiry closed silently (no-response) | sender=%s", sender)
                 try:
-                    await green.send_message(sender, _CLOSE_MSG)
-                    state["closed"] = True
-                    _save_followup()
-                    logger.info("[BOT:CLOSE] Inquiry closed (no-response) | sender=%s", sender)
                     await _attach_summary(sender, "נסגרה ללא מענה", config.TEST_MODE)
                     await _send_incomplete_lead_to_sheets(sender, config.TEST_MODE)
                 except Exception as exc:
-                    logger.error("Close message error | sender=%s | %s", sender, exc)
+                    logger.error("Close (silent) error | sender=%s | %s", sender, exc)
 
 
 # ── Session helpers (test mode) ───────────────────────────────────────────────
@@ -1139,8 +1162,15 @@ async def _process_message(sender: str, text: str) -> None:
             # (covers "הכל נכון?", "מה מספרך?", "מתי נוח?", etc.)
             bot_last_is_question = "?" in last_bot_msg
             if is_closing_intent(text, conv_turns) and not bot_last_is_question:
-                logger.info("[BOT:CLOSE] Closing intent | sender=%s", sender)
-                closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY)
+                stripped_text = text.strip()
+                if _is_already_handled_intent(stripped_text):
+                    close_reason = "handled"
+                elif _is_deferral_intent(stripped_text):
+                    close_reason = "deferred"
+                else:
+                    close_reason = "farewell"
+                logger.info("[BOT:CLOSE] Closing intent | reason=%s | sender=%s", close_reason, sender)
+                closing_msg = await get_closing_message(sender, config.ANTHROPIC_API_KEY, reason=close_reason)
                 try:
                     await green.send_message(sender, closing_msg)
                     logger.info("[BOT:SEND] Closing message sent | sender=%s", sender)
@@ -1973,6 +2003,26 @@ async def conversations(test: str = "false", format: str = "html", admin: str = 
   </table>
 </body>
 </html>"""
+
+
+@app.get("/close-followup", response_class=JSONResponse)
+async def close_followup(sender: str = Query(default=""), admin: str = Query(default="")):
+    """Close the follow-up timer for a specific sender so no reminder is sent.
+    Usage: /close-followup?sender=972535248428&admin=<secret>
+    Sender can be with or without @c.us suffix.
+    """
+    if (denied := _check_admin(admin)):
+        return denied
+    if not sender:
+        return JSONResponse({"ok": False, "error": "sender required"}, status_code=400)
+    # Normalize — ensure @c.us suffix
+    chat_id = sender if sender.endswith("@c.us") else f"{sender}@c.us"
+    if chat_id in _followup:
+        _followup[chat_id]["closed"] = True
+        _save_followup()
+        logger.info("[ADMIN] Follow-up closed manually | sender=%s", chat_id)
+        return {"ok": True, "sender": chat_id, "action": "closed"}
+    return {"ok": False, "sender": chat_id, "error": "sender not found in followup state"}
 
 
 @app.get("/backfill-incomplete-leads", response_class=JSONResponse)
