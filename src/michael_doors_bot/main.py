@@ -2064,6 +2064,72 @@ async def conversations(test: str = "false", format: str = "html", admin: str = 
 </html>"""
 
 
+@app.post("/inject-state", response_class=JSONResponse)
+async def inject_state(request: Request, admin: str = Query(default="")):
+    """Inject contact fields into an existing conversation state.
+    Useful after a server restart wipes in-memory state mid-conversation.
+
+    Body (JSON):
+      sender   — phone number (with or without @c.us)
+      full_name, phone, city, service_type, active_topics (list), preferred_contact_hours
+      (all optional — only provided fields are updated)
+
+    Usage: POST /inject-state?admin=<secret>
+    """
+    if (denied := _check_admin(admin)):
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON body"}, status_code=400)
+
+    sender_raw = body.get("sender", "")
+    if not sender_raw:
+        return JSONResponse({"ok": False, "error": "sender required"}, status_code=400)
+
+    chat_id = sender_raw if sender_raw.endswith("@c.us") else f"{sender_raw}@c.us"
+
+    # Load or create state
+    state = _router_conv_state.get(chat_id, {})
+    if not state:
+        from .engine.simple_router import _NEW_STATE
+        state = _NEW_STATE()
+
+    # Apply provided fields
+    updatable = ("full_name", "phone", "city", "service_type", "preferred_contact_hours",
+                 "active_topics", "entrance_scope", "entrance_style", "entrance_model",
+                 "interior_project_type", "interior_quantity", "interior_style",
+                 "interior_model", "mamad_type", "customer_gender")
+    updated = {}
+    for field in updatable:
+        if field in body and body[field] is not None:
+            state[field] = body[field]
+            updated[field] = body[field]
+
+    _router_conv_state[chat_id] = state
+    from .engine.simple_router import _save_conv_state
+    _save_conv_state()
+
+    # Also persist in leads file
+    leads = _load_leads(config.TEST_MODE)
+    if chat_id not in leads:
+        leads[chat_id] = {"phone": chat_id, "firstContact": datetime.utcnow().isoformat()}
+    for field in ("full_name", "city", "service_type", "preferred_contact_hours"):
+        if field in updated:
+            leads[chat_id][field] = updated[field]
+    if "phone" in updated:
+        leads[chat_id]["callback_phone"] = updated["phone"]
+    if "active_topics" in updated:
+        leads[chat_id]["active_topics"] = updated["active_topics"]
+    _save_leads(leads, config.TEST_MODE)
+
+    logger.info("[ADMIN] State injected | sender=%s | fields=%s", chat_id, list(updated.keys()))
+    return {"ok": True, "sender": chat_id, "updated_fields": updated, "state_snapshot": {
+        k: state.get(k) for k in ("full_name", "phone", "city", "service_type",
+                                   "active_topics", "preferred_contact_hours")
+    }}
+
+
 @app.get("/close-followup", response_class=JSONResponse)
 async def close_followup(sender: str = Query(default=""), admin: str = Query(default="")):
     """Close the follow-up timer for a specific sender so no reminder is sent.
