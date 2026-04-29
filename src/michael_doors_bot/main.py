@@ -98,6 +98,56 @@ CLOSE_AFTER_FOLLOWUP  = 90 * 60  # 90 min after follow-up → close inquiry (2 h
 
 _BOT_ERROR_MSG    = "רגע, בודקת 😊 תכתבו לי שוב בעוד רגע ואענה לכם"
 _CONTACT_FALLBACK = "תודה, קיבלנו את ההודעה שלכם. ניצור איתכם קשר בהקדם להמשך טיפול."
+
+# Matches strings that contain ONLY emoji characters (and whitespace).
+# Covers: basic emoji, flags, skin-tone/gender modifiers, ZWJ sequences.
+_EMOJI_ONLY_RE = re.compile(
+    r'^[\s'
+    r'\U0001F300-\U0001F9FF'   # Misc symbols, emoticons, transport, etc.
+    r'\U00002600-\U000027BF'   # Misc symbols, dingbats
+    r'\U0001FA00-\U0001FAFF'   # Extended pictographic
+    r'\U00002702-\U000027B0'
+    r'\U0000200D'              # ZWJ
+    r'\U0000FE0F'              # variation selector
+    r'\U00002194-\U00002199'
+    r'\U00002B05-\U00002B07'
+    r'\U0001F1E0-\U0001F1FF'   # flags
+    r'\U0000231A-\U0000231B'
+    r'\U000023E9-\U000023F3'
+    r'\U000025AA-\U000025AB'
+    r'\U000025B6\U000025C0'
+    r'\U000025FB-\U000025FE'
+    r'\U00002614-\U00002615'
+    r'\U00002648-\U00002653'
+    r'\U0000267F\U00002693'
+    r'\U000026A1\U000026AA-\U000026AB'
+    r'\U000026BD-\U000026BE'
+    r'\U000026C4-\U000026C5'
+    r'\U000026CE\U000026D4'
+    r'\U000026EA\U000026F2-\U000026F3'
+    r'\U000026F5\U000026FA\U000026FD'
+    r'\U00002702\U00002705'
+    r'\U00002708-\U0000270D'
+    r'\U0000270F\U00002712\U00002714'
+    r'\U00002716\U0000271D\U00002721'
+    r'\U00002728\U00002733-\U00002734'
+    r'\U00002744\U00002747\U0000274C'
+    r'\U0000274E\U00002753-\U00002755'
+    r'\U00002757\U00002763-\U00002764'
+    r'\U00002795-\U00002797\U000027A1'
+    r'\U000027B0\U000027BF'
+    r'\U00002934-\U00002935'
+    r'\U00003030\U0000303D'
+    r'\U00003297\U00003299'
+    r'\U0001F004\U0001F0CF'
+    r']+$'
+)
+
+def _is_emoji_only(text: str) -> bool:
+    """Return True if the message contains nothing but emoji (and whitespace)."""
+    return bool(_EMOJI_ONLY_RE.match(text)) and len(text.strip()) > 0
+
+
 async def _handle_non_text(sender: str) -> None:
     """
     Handle image / voice / sticker from a customer.
@@ -1297,8 +1347,13 @@ async def _poll_loop() -> None:
                 elif sender and text:
                     _image_catalog_sent.discard(sender)  # text reply clears image escalation
                     _track_msg_id(msg_id)
-                    logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
-                    _schedule_debounced(sender, text)
+                    if _is_emoji_only(text):
+                        # Emoji-only = acknowledgment ("👌", "😊" etc.) — reset timer, no reply.
+                        _followup_reset(sender)
+                        logger.info("[BOT:EMOJI_ACK] Emoji-only msg, timer reset | sender=%s", sender)
+                    else:
+                        logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
+                        _schedule_debounced(sender, text)
 
             if receipt_id:
                 await green.delete_notification(receipt_id)
@@ -1486,6 +1541,10 @@ async def webhook(request: Request, token: str = Query(default="")):
 
     if sender and text:
         _image_catalog_sent.discard(sender)  # text reply clears image escalation state
+        if _is_emoji_only(text):
+            _followup_reset(sender)
+            logger.info("[BOT:EMOJI_ACK] Emoji-only msg, timer reset | sender=%s", sender)
+            return JSONResponse({"ok": True})
         logger.info("[BOT:RECV] Webhook | sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
         # Fire-and-forget: buffer the message and let the debounce timer decide
         # when to process.  Multiple messages sent in quick succession are merged
