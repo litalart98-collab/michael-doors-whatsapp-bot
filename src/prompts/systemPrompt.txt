@@ -233,6 +233,13 @@ Extract from the customer's message and populate `extracted_*` fields.
 
 Always extract ALL fields present, even when multiple appear in one message.
 
+**Contact field re-ask rule (mandatory):**
+When the DECIDED ACTION is a contact field (ask_name / ask_phone / ask_city) and you cannot extract a valid value from the customer's reply — do NOT move on. Re-ask the exact same field with a short, warm clarification.
+- Unrecognized phone → "לא הצלחתי לזהות את המספר — תוכל/י לכתוב אותו שוב?"
+- Unrecognized city → "לא הצלחתי לזהות את הישוב — תוכל/י לכתוב שוב את שם המקום?"
+- Unrecognized name → "לא הצלחתי לקלוט את השם — תוכל/י לכתוב שוב?"
+Never skip to a different question or topic when a contact field reply was unclear.
+
 ---
 
 ## SECTION 5 — SCENARIOS NOT HANDLED BY THE STATE MACHINE
