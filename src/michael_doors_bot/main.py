@@ -5,6 +5,7 @@ Polling loop runs as fallback if webhook is not configured.
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
