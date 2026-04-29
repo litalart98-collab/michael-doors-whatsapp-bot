@@ -32,6 +32,7 @@ from .engine.simple_router import (
     _normalize_callback_time,
     _refresh_system_prompt,
     _refresh_faq,
+    _save_conv_state,
 )
 from .engine.messages import (
     FINAL_HANDOFF,
@@ -2089,11 +2090,8 @@ async def inject_state(request: Request, admin: str = Query(default="")):
 
     chat_id = sender_raw if sender_raw.endswith("@c.us") else f"{sender_raw}@c.us"
 
-    # Load or create state
-    state = _router_conv_state.get(chat_id, {})
-    if not state:
-        from .engine.simple_router import _NEW_STATE
-        state = _NEW_STATE()
+    # Load or create state — use existing or start with empty dict
+    state = _router_conv_state.get(chat_id) or {}
 
     # Apply provided fields
     updatable = ("full_name", "phone", "city", "service_type", "preferred_contact_hours",
@@ -2107,7 +2105,6 @@ async def inject_state(request: Request, admin: str = Query(default="")):
             updated[field] = body[field]
 
     _router_conv_state[chat_id] = state
-    from .engine.simple_router import _save_conv_state
     _save_conv_state()
 
     # Also persist in leads file
