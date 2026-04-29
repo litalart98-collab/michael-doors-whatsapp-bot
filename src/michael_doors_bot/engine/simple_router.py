@@ -491,8 +491,9 @@ def _needs_hebrew_fallback(text: str) -> bool:
 _PHONE_RE = re.compile(
     r'(?<!\d)'
     r'(\+?972[-\s]?|0)'
-    r'([5][0-9][-\s]?[0-9]{3}[-\s]?[0-9]{4}'
-    r'|[5][0-9]{8})'
+    r'([5][0-9][-\s]?[0-9]{3}[-\s]?[0-9]{2}[-\s]?[0-9]{2}'  # e.g. 050-551-51 25
+    r'|[5][0-9][-\s]?[0-9]{3}[-\s]?[0-9]{4}'                 # e.g. 050-551-5125
+    r'|[5][0-9]{8})'                                           # e.g. 0505515125 no separators
     r'(?!\d)'
 )
 
@@ -2363,6 +2364,28 @@ async def get_reply(
     if state.get("interior_quantity") is not None:
         logger.debug("[QTY:CHECK] interior_quantity=%d is set before _decide_next_action | sender=%s",
                      state["interior_quantity"], sender)
+
+    # Step 5d: Contact fields pre-guard.
+    # If the customer's message contains a phone number AND we haven't collected
+    # contact details yet, run field extraction NOW so _decide_next_action sees
+    # the full contact state and skips catalog / product questions.
+    # Without this, the flow would send the catalog AFTER the customer already
+    # gave their name+phone+city (because decided action is set before Claude runs).
+    if _PHONE_RE.search(user_message) and not state.get("phone"):
+        _pre = _extract_fields_from_message(user_message, state)
+        if _pre.get("phone"):
+            if _pre.get("phone"):
+                state["phone"] = _pre["phone"]
+            if _pre.get("full_name") and not state.get("full_name"):
+                state["full_name"] = _pre["full_name"]
+            if _pre.get("city") and not state.get("city"):
+                state["city"] = _pre["city"]
+            _conv_state[sender] = state
+            logger.info(
+                "[CONTACT:PREGUARD] Pre-extracted contact before _decide_next_action | "
+                "phone=%s name=%r city=%r | sender=%s",
+                _pre.get("phone"), _pre.get("full_name"), _pre.get("city"), sender,
+            )
 
     # Step 6: Decide next action (pure state function)
     action = _decide_next_action(state)
