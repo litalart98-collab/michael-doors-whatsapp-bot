@@ -67,7 +67,10 @@ except Exception:
     _TZ_IL = None  # type: ignore[assignment]
 
 def _utc_iso_to_il(utc_iso: str) -> str:
-    """Convert a UTC ISO timestamp string to Israel local time (DD/MM/YYYY HH:MM)."""
+    """Convert a UTC ISO timestamp string to Israel local time.
+    Returns ISO-8601 with offset (e.g. '2026-04-30T08:20:00+03:00') so that
+    the Google Apps Script can reliably parse it with new Date() and Google
+    Sheets displays it in whatever date format the column is set to."""
     if not utc_iso:
         return utc_iso
     try:
@@ -78,7 +81,9 @@ def _utc_iso_to_il(utc_iso: str) -> str:
             dt_il = dt_utc.astimezone(_TZ_IL)
         else:
             dt_il = dt_utc.astimezone(timezone(timedelta(hours=3)))  # fallback UTC+3
-        return dt_il.strftime("%d/%m/%Y %H:%M")
+        # Use isoformat() for "+03:00" (colon) — standard ISO 8601 with timezone offset.
+        # JavaScript's new Date("2026-04-30T08:20:14+03:00") parses reliably.
+        return dt_il.replace(microsecond=0).isoformat()
     except Exception:
         return utc_iso
 
