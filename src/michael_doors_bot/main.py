@@ -475,6 +475,14 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["service_type"] = result["service_type"]
     if result.get("city"):
         lead["city"] = result["city"]
+
+    # Record the exact moment all 3 core contact fields are first complete.
+    # Used as the Sheets datetime so the timestamp reflects when details were given.
+    if (not lead.get("contact_collected_at")
+            and lead.get("full_name")
+            and lead.get("callback_phone")
+            and lead.get("city")):
+        lead["contact_collected_at"] = datetime.utcnow().isoformat()
     if result.get("design_preference"):
         lead["design_preference"] = result["design_preference"]
     if result.get("doors_count"):
@@ -538,29 +546,17 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         )
         return
 
-    # ── Required fields: all 5 must be non-empty ─────────────────────────────
-    if not all(lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type", "preferred_contact_hours")):
+    # ── Required fields: 3 core contact fields must be present ──────────────
+    # Send to Sheets as soon as name + phone + city are collected — don't wait
+    # for preferred_contact_hours.  This ensures every lead that gives contact
+    # details reaches Sheets even if the conversation ends early.
+    has_core_contact = all(lead.get(f) for f in ("full_name", "callback_phone", "city"))
+    if not has_core_contact:
         logger.debug(
-            "[SHEETS:SKIP] incomplete lead — missing required fields | sender=%s | "
-            "full_name=%r city=%r callback_phone=%r service_type=%r callback_hours=%r",
+            "[SHEETS:SKIP] missing core contact fields | sender=%s | "
+            "full_name=%r city=%r callback_phone=%r",
             lead.get("phone", ""), lead.get("full_name"), lead.get("city"),
-            lead.get("callback_phone"), lead.get("service_type"),
-            lead.get("preferred_contact_hours"),
-        )
-        return
-
-    # ── Handoff guard: send at Stage 7 OR when all 5 fields just completed ──────
-    # Primary: Claude set handoff_to_human = true (normal farewell flow).
-    # Fallback: all 5 required fields are present — the lead is complete even if
-    #   Claude failed to set handoff_to_human (e.g. sent a wrong message).
-    #   preferred_contact_hours being set implies callback step was reached.
-    all_fields_complete = all(
-        lead.get(f) for f in ("full_name", "callback_phone", "city", "service_type", "preferred_contact_hours")
-    )
-    if not result.get("handoff_to_human") and not all_fields_complete:
-        logger.debug(
-            "[SHEETS:SKIP] not at handoff yet — deferring | sender=%s | full_name=%r",
-            lead.get("phone", ""), lead.get("full_name", ""),
+            lead.get("callback_phone"),
         )
         return
 
@@ -680,7 +676,11 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
         "service_type":            service_field,
-        "datetime":                _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
+        "datetime":                _utc_iso_to_il(
+            lead.get("contact_collected_at")   # exact moment contact details were given
+            or lead.get("firstContact")        # fallback: start of conversation
+            or datetime.utcnow().isoformat()   # last-resort fallback
+        ),
         "preferred_contact_hours": callback_hours,
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
