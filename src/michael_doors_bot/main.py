@@ -680,7 +680,7 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         "full_name":               lead.get("full_name", ""),
         "city":                    lead.get("city", ""),
         "service_type":            service_field,
-        "datetime":                _utc_iso_to_il(lead.get("firstContact", "")),
+        "datetime":                _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
         "preferred_contact_hours": callback_hours,
         "phone":                   phone_clean,
         "notes":                   " | ".join(notes_parts),
