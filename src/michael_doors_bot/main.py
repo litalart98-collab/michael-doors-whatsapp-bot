@@ -2148,6 +2148,49 @@ async def close_followup(sender: str = Query(default=""), admin: str = Query(def
     return {"ok": False, "sender": chat_id, "error": "sender not found in followup state"}
 
 
+@app.post("/force-send-lead", response_class=JSONResponse)
+async def force_send_lead(request: Request, admin: str = Query(default="")):
+    """Force-send a specific lead to Google Sheets by phone number.
+    Builds the row using the same code path as the real bot.
+    Ignores sheets_sent guard so it can be used to fix/resend a specific lead.
+
+    POST body: { "sender": "972XXXXXXXXX" }
+    """
+    if (denied := _check_admin(admin)):
+        return denied
+    body = await request.json()
+    raw_sender = str(body.get("sender", "")).strip()
+    if not raw_sender:
+        return JSONResponse({"ok": False, "error": "sender required"}, status_code=400)
+
+    # Normalise: accept with or without @c.us
+    chat_id = raw_sender if raw_sender.endswith("@c.us") else raw_sender + "@c.us"
+
+    leads = _load_leads(config.TEST_MODE)
+    lead = leads.get(chat_id)
+    if not lead:
+        return JSONResponse({"ok": False, "error": f"Lead not found: {chat_id}"}, status_code=404)
+
+    # Temporarily clear sheets_sent so _maybe_send_to_sheets won't skip it
+    was_sent = lead.pop("sheets_sent", None)
+    try:
+        await _maybe_send_to_sheets(lead, {"handoff_to_human": True}, config.TEST_MODE)
+        result_flag = lead.get("sheets_sent", False)
+    except Exception as exc:
+        if was_sent:
+            lead["sheets_sent"] = was_sent
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    if result_flag:
+        _save_leads(leads, config.TEST_MODE)
+        return {"ok": True, "sender": chat_id, "full_name": lead.get("full_name"),
+                "phone": lead.get("callback_phone"), "city": lead.get("city")}
+    else:
+        if was_sent:
+            lead["sheets_sent"] = was_sent
+        return JSONResponse({"ok": False, "error": "Lead incomplete — missing full_name, callback_phone, or city"}, status_code=422)
+
+
 @app.get("/backfill-incomplete-leads", response_class=JSONResponse)
 async def backfill_incomplete_leads(admin: str = Query(default="")):
     """
