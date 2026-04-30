@@ -690,10 +690,10 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
     # Pre-send audit log.
     logger.info(
         "[SHEETS:PRE-SEND] sender=%s | full_name=%r | phone=%s | "
-        "service=%r | callback=%r | handoff=%s",
+        "service=%r | callback=%r | datetime=%r | handoff=%s",
         lead.get("phone", ""), row["full_name"], row["phone"],
         row["service_type"], row["preferred_contact_hours"],
-        result.get("handoff_to_human"),
+        row["datetime"], result.get("handoff_to_human"),
     )
 
     sender_id = lead.get("phone", "")
@@ -2184,7 +2184,12 @@ async def force_send_lead(request: Request, admin: str = Query(default="")):
     if result_flag:
         _save_leads(leads, config.TEST_MODE)
         return {"ok": True, "sender": chat_id, "full_name": lead.get("full_name"),
-                "phone": lead.get("callback_phone"), "city": lead.get("city")}
+                "phone": lead.get("callback_phone"), "city": lead.get("city"),
+                "firstContact": lead.get("firstContact"),
+                "contact_collected_at": lead.get("contact_collected_at"),
+                "datetime_sent": _utc_iso_to_il(
+                    lead.get("contact_collected_at") or lead.get("firstContact") or datetime.utcnow().isoformat()
+                )}
     else:
         if was_sent:
             lead["sheets_sent"] = was_sent
