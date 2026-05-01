@@ -614,15 +614,25 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         r'(?:יחידות|יחידה|דלתות|דלת|פנים|פולימר|פולימרי|פולימריות)',
         re.IGNORECASE | re.UNICODE,
     )
+    # Design-descriptor words: a number next to these describes the door's
+    # appearance (e.g. "2 פסים", "3 חריצים") NOT the quantity of doors.
+    _DESIGN_WORD_RE = re.compile(
+        r'(?:פסים|פס\b|חריצים|חריץ\b|מרובעים|מרובע\b|קשתות|קשת\b)',
+        re.IGNORECASE | re.UNICODE,
+    )
     if not phone_match and _FAST_QTY_CTX.search(t):
         _fq_m = re.search(r'(?<!\d)(\d{1,2})(?!\d)', t)
         if _fq_m:
             _fq = int(_fq_m.group(1))
             if 1 <= _fq <= 50:
-                extracted['interior_quantity'] = _fq
-                _rt = extracted.setdefault('_new_topics', [])
-                if isinstance(_rt, list) and 'interior_doors' not in _rt:
-                    _rt.append('interior_doors')
+                # Guard: skip if the number is adjacent to a design word
+                # (e.g. "2 פסים" → design descriptor, not door count)
+                after_num = t[_fq_m.end(): _fq_m.end() + 15]
+                if not _DESIGN_WORD_RE.search(after_num):
+                    extracted['interior_quantity'] = _fq
+                    _rt = extracted.setdefault('_new_topics', [])
+                    if isinstance(_rt, list) and 'interior_doors' not in _rt:
+                        _rt.append('interior_doors')
 
     # ── City ──────────────────────────────────────────────────────────────────
     # Priority 1: locality-type prefix patterns.
@@ -825,8 +835,10 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         r'|\bקשת\b|\bקרוס\b|\bאסם\b|\bבארן\b|\bkaro\b',
         t, re.IGNORECASE
     ):
-        # Descriptive design terms → clearly a designed door
+        # Descriptive design terms → clearly a designed door AND customer
+        # already knows the model → no need to send catalog.
         _maybe_set_style("designed")
+        extracted['interior_design_described'] = True
 
     # ── Interior project type ─────────────────────────────────────────────────
     if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
@@ -1227,10 +1239,17 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
             return NextAction(2, "interior_style", "ask_interior_style", False,
                               "interior: ask style (flat or designed)")
         if state.get("interior_style") in ("designed", "undecided"):
-            if not state.get("interior_catalog_sent"):
+            # Skip catalog if customer already described a specific design
+            # (e.g. "2 פסים", "3 חריצים") — they know what they want.
+            customer_knows_model = (
+                state.get("interior_catalog_sent")
+                or state.get("interior_model")
+                or state.get("interior_design_described")
+            )
+            if not customer_knows_model:
                 return NextAction(2, "interior_catalog", "interior_catalog", True,
                                   "interior: send catalog URL (informational — does not block flow)")
-            # catalog sent → interior topic complete; model saved passively if mentioned
+            # catalog sent or model already known → interior topic complete
         return None
 
     if topic == "mamad":

@@ -577,6 +577,8 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
         lead["interior_style"] = result["interior_style"]
     if result.get("interior_model"):
         lead["interior_model"] = result["interior_model"]
+    if result.get("interior_design_described"):
+        lead["interior_design_described"] = True
     if result.get("mamad_type"):
         lead["mamad_type"] = result["mamad_type"]
 
