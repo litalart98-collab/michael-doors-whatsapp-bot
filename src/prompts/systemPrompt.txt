@@ -232,6 +232,15 @@ Extract from the customer's message and populate `extracted_*` fields.
 - "צריך 3 דלתות פנים" → interior_quantity: 3
 - "דלת מעוצבת" / "דלת פנים" → interior_quantity: null (no explicit count — do NOT infer 1)
 
+**Interior style extraction from descriptions (extract immediately — do NOT ask again):**
+If the customer describes a door pattern or design detail, extract `interior_style` directly:
+- "פסים" / "2 פסים" / "3 פסים" / "פסים אורך" / "פסים רוחב" → `interior_style: "designed"`
+- "חריצים" / "מרובעים" / "קשת" / "קרוס" / "קו אפס" / "עיצוב" / "דוגמה" → `interior_style: "designed"`
+- "חלקה" / "חלק" / "פשוטה" / "בלי עיצוב" → `interior_style: "flat"`
+- "פולימר" alone (without design description) → `interior_style: "flat"` (polymer doors are flat)
+
+⛔ If `interior_style` was already extracted from the customer's description — NEVER ask "חלקה או מעוצבת?" again. Skip directly to the next missing field.
+
 Always extract ALL fields present, even when multiple appear in one message.
 
 **Contact field re-ask rule (mandatory):**

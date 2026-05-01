@@ -820,6 +820,13 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         _maybe_set_style("flat")
     elif re.search(r'\bמעוצבת\b|\bמעוצבות\b', t, re.IGNORECASE):
         _maybe_set_style("designed")
+    elif re.search(
+        r'\bפסים\b|\bפס\b|\bחריצים\b|\bחריץ\b|\bמרובעים\b|\bמרובע\b'
+        r'|\bקשת\b|\bקרוס\b|\bאסם\b|\bבארן\b|\bkaro\b',
+        t, re.IGNORECASE
+    ):
+        # Descriptive design terms → clearly a designed door
+        _maybe_set_style("designed")
 
     # ── Interior project type ─────────────────────────────────────────────────
     if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
