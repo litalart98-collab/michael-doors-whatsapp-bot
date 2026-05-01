@@ -150,7 +150,38 @@ _EMOJI_ONLY_RE = re.compile(
     r']+$'
 )
 
-def _is_emoji_only(text: str) -> bool:
+_SHABBAT_MSG = (
+    "שבת שלום 🕯️\n"
+    "המשרד סגור לכבוד שבת — נחזור לפעילות מוצאי שבת לאחר השעה 20:00.\n"
+    "השאירו פרטים ונטפל בפנייתכם בהקדם 😊"
+)
+# Track senders who already received the Shabbat notice this session
+_shabbat_notified: set[str] = set()
+
+
+def _is_shabbat_il() -> bool:
+    """Return True if current Israel time is within Shabbat:
+    Friday 16:00 – Saturday 20:00 (Israel local time)."""
+    try:
+        if _TZ_IL:
+            now_il = datetime.now(_TZ_IL)
+        else:
+            now_il = datetime.now(timezone(timedelta(hours=3)))
+        weekday = now_il.weekday()   # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+        hour    = now_il.hour
+        minute  = now_il.minute
+        # Friday from 16:00
+        if weekday == 4 and (hour > 16 or (hour == 16 and minute >= 0)):
+            return True
+        # Saturday until 20:00
+        if weekday == 5 and hour < 20:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_emoji_only(text: str):
     """Return True if the message contains nothing but emoji (and whitespace)."""
     return bool(_EMOJI_ONLY_RE.match(text)) and len(text.strip()) > 0
 
@@ -1304,6 +1335,20 @@ async def _process_message(sender: str, text: str) -> None:
                     _record_error("send_fail", sender, f"pulse2: {send_err2}")
                     logger.error("[BOT:SEND2_FAIL] Second pulse failed | sender=%s | %s", sender, send_err2)
                     _queue_send_retry(sender, reply_text_2)
+
+            # Shabbat notice — sent once per sender, right after the pitch,
+            # only during Shabbat hours (Friday 16:00 – Saturday 20:00 IL).
+            if (not is_fallback
+                    and sender not in _shabbat_notified
+                    and reply_text_2  # pitch was just sent (opening turn)
+                    and _is_shabbat_il()):
+                try:
+                    await asyncio.sleep(1.5)
+                    await green.send_message(sender, _SHABBAT_MSG)
+                    _shabbat_notified.add(sender)
+                    logger.info("[BOT:SHABBAT] Shabbat notice sent | sender=%s", sender)
+                except Exception as shabbat_err:
+                    logger.error("[BOT:SHABBAT_FAIL] Shabbat notice failed | sender=%s | %s", sender, shabbat_err)
 
             # Update follow-up state regardless of whether the second pulse succeeded
             if result.get("handoff_to_human"):
