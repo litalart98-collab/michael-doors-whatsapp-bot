@@ -155,6 +155,32 @@ def _is_emoji_only(text: str) -> bool:
     return bool(_EMOJI_ONLY_RE.match(text)) and len(text.strip()) > 0
 
 
+def _enforce_single_question(text: str) -> str:
+    """Hard guard: ensure the bot never sends more than one question in a message.
+
+    If the reply contains multiple '?' characters, truncate after the FIRST
+    sentence that ends with '?' — keeping only that question and discarding
+    everything that follows (including courtesy questions like
+    'אפשר לסייע בעוד משהו?').
+
+    This guard runs on every outgoing bot message, regardless of what the LLM
+    produced, so it cannot be bypassed by prompt drift or model behaviour.
+    """
+    q_positions = [i for i, ch in enumerate(text) if ch == "?"]
+    if len(q_positions) <= 1:
+        return text  # nothing to do
+
+    # Find the first '?' and cut there (strip trailing whitespace/newlines)
+    first_q = q_positions[0]
+    truncated = text[: first_q + 1].rstrip()
+    logger.warning(
+        "[GUARD:MULTI_Q] Truncated reply with %d question marks to single question | "
+        "original=%r | truncated=%r",
+        len(q_positions), text[:120], truncated,
+    )
+    return truncated
+
+
 async def _handle_non_text(sender: str) -> None:
     """
     Handle image / voice / sticker from a customer.
@@ -1251,7 +1277,7 @@ async def _process_message(sender: str, text: str) -> None:
             await upsert_lead(lead)
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
-            reply_text = result["reply_text"]
+            reply_text = _enforce_single_question(result["reply_text"])
             reply_text_2 = result.get("reply_text_2")  # second pulse (opening message only)
             is_fallback = reply_text in ERROR_REPLIES
             try:
