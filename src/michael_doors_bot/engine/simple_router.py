@@ -1167,14 +1167,8 @@ def _topic_complete(topic: str, state: dict) -> bool:
             return False
         if state.get("interior_quantity") is None:
             return False
-        style = state.get("interior_style")
-        if style is None:
-            return False
-        if style == "flat":
-            return True
-        # designed/undecided → complete once catalog has been sent.
-        # interior_model is saved passively if the customer mentions one.
-        return bool(state.get("interior_catalog_sent"))
+        # Complete once style is known (any value) — no catalog step for interior doors.
+        return state.get("interior_style") is not None
 
     if topic == "mamad":
         # mamad is complete once mamad_type is known — no scope question
@@ -1238,18 +1232,8 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
         if state.get("interior_style") is None:
             return NextAction(2, "interior_style", "ask_interior_style", False,
                               "interior: ask style (flat or designed)")
-        if state.get("interior_style") in ("designed", "undecided"):
-            # Skip catalog if customer already described a specific design
-            # (e.g. "2 פסים", "3 חריצים") — they know what they want.
-            customer_knows_model = (
-                state.get("interior_catalog_sent")
-                or state.get("interior_model")
-                or state.get("interior_design_described")
-            )
-            if not customer_knows_model:
-                return NextAction(2, "interior_catalog", "interior_catalog", True,
-                                  "interior: send catalog URL (informational — does not block flow)")
-            # catalog sent or model already known → interior topic complete
+        # All required info collected — no catalog needed for interior doors.
+        # The salesperson will present options when calling back.
         return None
 
     if topic == "mamad":
@@ -1501,7 +1485,7 @@ def _state_summary_block(state: dict) -> str:
         f"Entrance:  scope={v(state.get('entrance_scope'))}  style={v(state.get('entrance_style'))}"
         + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('entrance_style') == 'flat' else f"  catalog_sent={v(state.get('entrance_catalog_sent'))}  model={v(state.get('entrance_model'))}"),
         f"Interior:  type={v(state.get('interior_project_type'))}  qty={v(state.get('interior_quantity'))}  style={v(state.get('interior_style'))}"
-        + ("  catalog=N/A(flat style needs no catalog — DO NOT send any URL)" if state.get('interior_style') == 'flat' else f"  catalog_sent={v(state.get('interior_catalog_sent'))}  model={v(state.get('interior_model'))}"),
+        + "  catalog=N/A(interior doors never send a catalog — DO NOT send any URL)",
         f"Mamad:     type={v(state.get('mamad_type'))}",
         f"Showroom:  requested={v(state.get('showroom_requested'))}",
         "",
