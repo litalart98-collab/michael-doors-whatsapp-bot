@@ -1302,17 +1302,12 @@ def _decide_next_action(state: dict) -> NextAction:
         # showroom-only skips pre-contact Stage 3; does post-contact Stage 3 instead
         is_showroom_only = (set(active) == {"showroom_meeting"})
 
-        # Stage 3: pre-contact wrap-up (gender-aware)
-        # Skip for repair-only AND showroom-only (showroom Stage 3 comes after contacts)
-        if not state.get("stage3_done") and not is_repair_only and not is_showroom_only:
-            gender = state.get("customer_gender_locked")
-            stage3_key = (
-                "stage3_question_female" if gender == "female" else
-                "stage3_question_male"   if gender == "male"   else
-                "stage3_question"
-            )
-            return NextAction(3, "stage3_question", stage3_key, True,
-                              "stage 3: ask if anything else before contact collection")
+        # Stage 3: REMOVED for purchase topics (entrance / interior / mamad).
+        # Asking "anything else?" after product questions creates a barrier that
+        # causes customers to drop off.  Multi-topic detection already handles
+        # customers who mention multiple products in the same conversation —
+        # they are added to active_topics automatically and processed in sequence.
+        # Stage 3 is kept only for showroom (post-contact, see below).
 
         # Stage 4: contact opener
         # Guard: if any contact field is already known, skip the opener entirely.
@@ -1389,14 +1384,19 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
     Update all stage flags based on conversation history.
     Called before _decide_next_action() and again after the AI reply is stored.
     """
-    # stage3_done — only advance when all topic queues are already complete.
-    # Prevents false-positive: Claude occasionally writes "יש עוד משהו" during
-    # topic qualification; if the customer replies to THAT message, the old code
-    # would incorrectly mark Stage 3 as done and skip straight to contact opener.
+    # stage3_done — Stage 3 is no longer sent for purchase topics (entrance/interior/mamad).
+    # Mark it True automatically once all topic queues are complete so the flow
+    # skips straight to Stage 4 (contact collection).
+    # For showroom-only flows the post-contact Stage 3 is handled separately below.
     if not state.get("stage3_done"):
-        if _compute_current_topic(state) is None:  # every active topic is complete
-            if _compute_stage3_done_from_history(history):
-                state["stage3_done"] = True
+        active_topics = state.get("active_topics") or []
+        is_showroom_only = (set(active_topics) == {"showroom_meeting"})
+        if not is_showroom_only and _compute_current_topic(state) is None:
+            # All purchase topic queues are complete → stage3 is implicitly done
+            state["stage3_done"] = True
+        elif _compute_stage3_done_from_history(history):
+            # Legacy: history already has the stage3 marker (old conversations)
+            state["stage3_done"] = True
 
     # stage4_opener_sent — check for contact opener in history.
     # "אשמח לשם" is the common prefix in ALL opener variants:

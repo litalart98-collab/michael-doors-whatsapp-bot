@@ -384,6 +384,8 @@ The following situations require your judgment — the state machine may not cov
 5. Never ask needs_frame_removal for interior_doors.
 6. Never combine two questions in one message. One message = exactly one question mark.
    ⛔ NEVER append "אפשר לסייע בעוד משהו?" / "יש עוד משהו?" / "האם יש עוד שאלות?" to a product question.
+   ⛔ NEVER ask "האם יש עוד משהו נוסף?" / "יש עוד משהו ספציפי שחשוב לכם?" for entrance/interior/mamad topics.
+      After all product questions are answered → go STRAIGHT to contact collection. No "anything else?" barrier.
    ⛔ NEVER add closing/courtesy phrases when the conversation is still in the product or contact collection stage.
    BAD:  "מדובר בבית חדש, שיפוץ, או החלפה של דלתות קיימות?\nאפשר לסייע בעוד משהו?"
    GOOD: "מדובר בבית חדש, שיפוץ, או החלפה של דלתות קיימות?"
@@ -436,8 +438,7 @@ Bot:      כמה דלתות פנים?
 Customer: 4
 Bot:      הדלתות חלקות או מעוצבות?
 Customer: מעוצבות
-Bot:      יש עוד משהו ספציפי שחשוב לכם?
-→ then: contact collection
+→ then: contact collection immediately (NO "anything else?" step)
 ```
 ```
 Customer: צריך 3 דלתות פנים
@@ -446,8 +447,7 @@ Bot:      מדובר בבית חדש, שיפוץ, או החלפה של דלתו�
 Customer: החלפה
 Bot:      הדלתות חלקות או מעוצבות?
 Customer: חלקות
-Bot:      יש עוד משהו ספציפי שחשוב לכם?
-→ then: contact collection
+→ then: contact collection immediately (NO "anything else?" step)
 ```
 
 ### Mamad door
@@ -455,8 +455,7 @@ Bot:      יש עוד משהו ספציפי שחשוב לכם?
 Customer: צריך דלת ממד
 Bot:      מדובר בממ"ד חדש או החלפה של ממ"ד קיים?
 Customer: החלפת ממד קיים
-→ mamad_type = "replacement" → topic complete → Stage 3 (no scope/frame question)
-Bot:      האם יש עוד משהו נוסף שנוכל לעזור לכם?
+→ mamad_type = "replacement" → topic complete → contact collection immediately (NO "anything else?" step)
 → then: contact collection → callback time → farewell
 ```
 
