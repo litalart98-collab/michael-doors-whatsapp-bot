@@ -2124,6 +2124,48 @@ def _validate_history(sender: str) -> None:
         _conversations[sender] = valid
 
 
+def _recover_state_from_history(sender: str) -> dict:
+    """Reconstruct conversation state by replaying field extraction over conversation history.
+
+    Called when _conv_state is missing for a sender whose history IS available
+    (e.g. after a server restart that wiped in-memory state but Supabase restored
+    the conversation).  Re-running extraction on each past user message recreates
+    topics, collected fields, and stage flags so the conversation continues from
+    exactly where it left off instead of starting over.
+    """
+    history = _conversations.get(sender, [])
+    if not history:
+        return _empty_conv_state()
+
+    state = _empty_conv_state()
+
+    for msg in history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "").strip()
+        if not content:
+            continue
+        # Recompute current topic before each extraction so style answers
+        # ("חלקות"/"מעוצבות") are correctly routed to the right topic field.
+        state["current_active_topic"] = _compute_current_topic(state)
+        extracted = _extract_fields_from_message(content, state)
+        state = _merge_state(state, extracted)
+
+    # Reconstruct binary stage flags (stage3_done, catalog_sent, etc.) from history
+    _advance_stage(state, history)
+    state["current_active_topic"] = _compute_current_topic(state)
+
+    recovered_fields = {
+        k: v for k, v in state.items()
+        if v not in (None, False, [], {}) and not k.startswith("_") and k != "_v"
+    }
+    logger.warning(
+        "[STATE:RECOVER] State rebuilt from %d history turns | sender=%s | topics=%s | fields=%s",
+        len(history), sender, state.get("active_topics"), recovered_fields,
+    )
+    return state
+
+
 # ── Last-seen timestamps ──────────────────────────────────────────────────────
 _last_seen: dict[str, float] = {}
 try:
@@ -2272,8 +2314,17 @@ async def get_reply(
 
     # ── State initialization / migration ──────────────────────────────────────
     if sender not in _conv_state or not _is_v2_state(_conv_state[sender]):
-        _conv_state[sender] = _empty_conv_state()
-        logger.info("[STATE:INIT] Fresh v2 state | sender=%s", sender)
+        # Check if we have prior conversation history (e.g. Supabase restored it
+        # after a server restart that wiped in-memory state).
+        # If so, reconstruct state from history so the conversation continues
+        # from where it left off rather than starting over.
+        prior_history = [m for m in _conversations.get(sender, []) if m.get("role") == "user"]
+        # prior_history includes the message we just appended → >1 means there's a real past
+        if len(prior_history) > 1:
+            _conv_state[sender] = _recover_state_from_history(sender)
+        else:
+            _conv_state[sender] = _empty_conv_state()
+            logger.info("[STATE:INIT] Fresh v2 state | sender=%s", sender)
 
     state   = _conv_state[sender]
     history = _conversations[sender]
