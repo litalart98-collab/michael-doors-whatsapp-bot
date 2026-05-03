@@ -2183,6 +2183,12 @@ async def inject_state(request: Request, admin: str = Query(default="")):
             state[field] = body[field]
             updated[field] = body[field]
 
+    # Support explicit field clearing: "clear_fields": ["full_name", "phone", ...]
+    for field in (body.get("clear_fields") or []):
+        if field in updatable:
+            state[field] = None
+            updated[f"CLEARED:{field}"] = None
+
     _router_conv_state[chat_id] = state
     _save_conv_state()
 
