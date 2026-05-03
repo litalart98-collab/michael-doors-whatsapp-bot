@@ -60,7 +60,8 @@ _DATA_DIR       = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
 _CONV_PATH      = _DATA_DIR / "conversations.json"
 _LAST_SEEN_PATH = _DATA_DIR / "last_seen.json"
 
-_SESSION_GAP = 24 * 3600  # seconds before treating customer as new
+_SESSION_GAP_COMPLETE = 24 * 3600       # reset after 24 h if contact info was collected
+_SESSION_GAP_OPEN    = 7 * 24 * 3600   # keep memory 7 days for open (no contact) conversations
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 def _load_system_prompt_sync() -> str:
@@ -785,9 +786,9 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             extracted['entrance_zero_line'] = True
             extracted['entrance_scope']     = 'with_frame'   # always included
             extracted['entrance_style']     = 'zero_line'    # locks style
-        elif re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף', t, re.IGNORECASE):
+        elif re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף|כולל הצד|כולל המסגרת|כולל פריים', t, re.IGNORECASE):
             extracted['entrance_scope'] = "with_frame"
-        elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד', t, re.IGNORECASE):
+        elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד|רק הדלת|בלי מסגרת', t, re.IGNORECASE):
             extracted['entrance_scope'] = "door_only"
         # Retroactive topic inference: entrance context was confirmed by the regex
         # (e.g. message contains "ראשית" / "דלת כניסה") OR the current_topic is
@@ -826,9 +827,9 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             # No active topic needs style yet — buffer for when topic becomes known
             extracted['_raw_style'] = val
 
-    if re.search(r'\bחלקה\b|\bחלקות\b', t, re.IGNORECASE):
+    if re.search(r'\bחלקה\b|\bחלקות\b|\bחלק\b|ללא עיצוב|בלי עיצוב|\bפשוטה\b|\bפשוטות\b|\bסטנדרטי\b|\bסטנדרטית\b', t, re.IGNORECASE):
         _maybe_set_style("flat")
-    elif re.search(r'\bמעוצבת\b|\bמעוצבות\b', t, re.IGNORECASE):
+    elif re.search(r'\bמעוצבת\b|\bמעוצבות\b|\bמעוצב\b|עם עיצוב', t, re.IGNORECASE):
         _maybe_set_style("designed")
     elif re.search(
         r'\bפסים\b|\bפס\b|\bחריצים\b|\bחריץ\b|\bמרובעים\b|\bמרובע\b'
@@ -841,11 +842,11 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         extracted['interior_design_described'] = True
 
     # ── Interior project type ─────────────────────────────────────────────────
-    if re.search(r'בית חדש|דירה חדשה|נכס חדש', t, re.IGNORECASE):
+    if re.search(r'בית חדש|דירה חדשה|נכס חדש|בנייה חדשה|בניה חדשה|פרויקט חדש', t, re.IGNORECASE):
         extracted['interior_project_type'] = 'new'
-    elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים', t, re.IGNORECASE):
+    elif re.search(r'\bשיפוץ\b|בשיפוץ\b|משפצים|שיפוצים|אחרי שיפוץ', t, re.IGNORECASE):
         extracted['interior_project_type'] = 'renovation'
-    elif re.search(r'\bהחלפה\b|להחליף\b|דלת ישנה|קיימות', t, re.IGNORECASE):
+    elif re.search(r'\bהחלפה\b|להחליף\b|מחליף\b|מחליפה\b|מחליפים\b|דלת ישנה|קיימות|ישנות|דלתות ישנות', t, re.IGNORECASE):
         extracted['interior_project_type'] = 'replacement'
     # Retroactive: project type is interior-specific — register the topic
     if 'interior_project_type' in extracted:
@@ -2295,11 +2296,26 @@ async def get_reply(
         logger.info("[SESSION:FORCED] Fresh start | sender=%s", sender)
     elif not _cfg.TEST_MODE:
         last = _last_seen.get(sender, 0.0)
-        if last > 0 and (now - last) > _SESSION_GAP:
-            gap_h = (now - last) / 3600
-            logger.info("[SESSION:RESET] %.1fh gap — fresh start | sender=%s", gap_h, sender)
-            _conversations.pop(sender, None)
-            _conv_state.pop(sender, None)
+        if last > 0:
+            gap = now - last
+            # Determine gap threshold: shorter for completed conversations,
+            # longer for open conversations where the customer hasn't left contact
+            # details yet — they may return hours or days later with an answer.
+            existing_state = _conv_state.get(sender, {})
+            contact_complete = bool(
+                existing_state.get("phone") and
+                existing_state.get("full_name") and
+                existing_state.get("city")
+            )
+            gap_threshold = _SESSION_GAP_COMPLETE if contact_complete else _SESSION_GAP_OPEN
+            if gap > gap_threshold:
+                gap_h = gap / 3600
+                logger.info(
+                    "[SESSION:RESET] %.1fh gap (threshold=%.0fh, complete=%s) — fresh start | sender=%s",
+                    gap_h, gap_threshold / 3600, contact_complete, sender,
+                )
+                _conversations.pop(sender, None)
+                _conv_state.pop(sender, None)
     _last_seen[sender] = now
     _save_last_seen()
 
@@ -2420,6 +2436,42 @@ async def get_reply(
                 "forced to %d | sender=%s | msg=%r",
                 _hg, sender, user_message[:80],
             )
+
+    # Step 5d: Bare-number quantity — when bot just asked "כמה דלתות?"
+    # If interior_quantity is still None AND the last bot message was asking
+    # about quantity AND the customer replied with just a bare number → extract it.
+    # This catches short answers like "4", "6", "שמונה" that lack a context word.
+    if state.get("interior_quantity") is None and not _PHONE_RE.search(user_message):
+        if "interior_doors" in (state.get("active_topics") or []):
+            _last_bot = next(
+                (m["content"] for m in reversed(history[:-1])   # exclude just-appended user msg
+                 if m.get("role") == "assistant"),
+                ""
+            )
+            _qty_question_markers = ("כמה דלת", "כמה דלתות", "כמות הדלתות", "몇 개")
+            if any(mk in _last_bot for mk in ("כמה דלת", "כמות הדלת")):
+                _bare = re.search(r'^(\d{1,2})$', user_message.strip())
+                if not _bare:
+                    # also try Hebrew number words
+                    _HE_NUMS = {
+                        "אחת": 1, "אחד": 1, "שתיים": 2, "שניים": 2, "שתי": 2, "שני": 2,
+                        "שלוש": 3, "שלושה": 3, "ארבע": 4, "ארבעה": 4, "חמש": 5, "חמישה": 5,
+                        "שש": 6, "שישה": 6, "שבע": 7, "שבעה": 7, "שמונה": 8, "תשע": 9,
+                        "תשעה": 9, "עשר": 10, "עשרה": 10,
+                    }
+                    _word = user_message.strip().rstrip(".,!?")
+                    if _word in _HE_NUMS:
+                        state["interior_quantity"] = _HE_NUMS[_word]
+                        _conv_state[sender] = state
+                        logger.info("[QTY:BARE_WORD] qty=%d from Hebrew number | sender=%s",
+                                    state["interior_quantity"], sender)
+                else:
+                    _n = int(_bare.group(1))
+                    if 1 <= _n <= 50:
+                        state["interior_quantity"] = _n
+                        _conv_state[sender] = state
+                        logger.info("[QTY:BARE_NUM] qty=%d from bare number after qty-question | sender=%s",
+                                    _n, sender)
 
     # Diagnostic log: assert qty is set when context words are present
     if state.get("interior_quantity") is not None:
