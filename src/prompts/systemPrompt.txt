@@ -112,6 +112,8 @@ Every reply must include ALL fields below. Use `null` for fields not found.
   | כניסה לבית / כניסה לדירה / כניסה לבניין | `entrance_doors` |
   | דגם כניסה: נפחות / פנורמי / יווני / מרקורי / עדן / קלאסי / סביליה | `entrance_doors` |
   | דלת פנים / דלתות פנים / פולימר / דלת חדר / דלת שינה | `interior_doors` |
+  | דלת הזזה / דלת כיס / דלת אסם / דלת מקלחת / דלת למקלחת | `interior_doors` |
+  | חדר שינה / חדר ילדים / מקלחת / אמבטיה / שירותים (room type → door needed) | `interior_doors` |
   | ממ"ד / ממד / מרחב מוגן / חדר ביטחון | `mamad` |
   | תיקון / תקלה / בעיה בדלת / פריצה | `repair` |
   | לבוא לאולם / אולם תצוגה / לקבוע פגישה / לראות דגמים | `showroom_meeting` |

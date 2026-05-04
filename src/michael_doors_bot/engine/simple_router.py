@@ -537,6 +537,19 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         r"|דלת לחדר|דלת חדר|דלתות חדר"
         r"|דלת שינה|דלת שירותים|דלת אמבטיה|דלת מטבח|דלת סלון"
         r"|דלתות פנימיות|פולימר"
+        # Door subtypes that are always interior
+        r"|דלת הזזה|דלתות הזזה"
+        r"|דלת כיס|דלתות כיס"
+        r"|דלת אסם|דלתות אסם"
+        r"|דלת מקלחת|דלת למקלחת|דלתות מקלחת"
+        # Room-type keywords: in a door-company context these always mean interior door needed.
+        # "חדר שינה" / "חדרי שינה" — bedroom
+        r"|חדר שינה|חדרי שינה"
+        r"|חדר ילדים|חדרי ילדים"
+        # Standalone room words (bathroom / shower / toilet) — safe in door-company context
+        r"|(?<![א-ת])אמבטיה(?![א-ת])"
+        r"|(?<![א-ת])מקלחת(?![א-ת])"
+        r"|(?<![א-ת])שירותים(?![א-ת])"
         # standalone "פנים" / "ופנים" = interior doors in colloquial shorthand
         # e.g. "פנים וראשית" / "בית חדש ופנים וראשית"
         # Hebrew-aware boundary: not preceded/followed by another Hebrew letter,
