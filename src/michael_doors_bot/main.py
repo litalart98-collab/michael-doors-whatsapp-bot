@@ -212,19 +212,44 @@ def _enforce_single_question(text: str) -> str:
     return truncated
 
 
-async def _handle_non_text(sender: str) -> None:
+# Message types that are audio / voice recordings — ignored silently.
+_AUDIO_MSG_TYPES: frozenset[str] = frozenset({
+    "audioMessage",   # audio file
+    "pttMessage",     # push-to-talk voice note
+})
+
+# Message types treated as images (customer is showing us a door model).
+_IMAGE_MSG_TYPES: frozenset[str] = frozenset({
+    "imageMessage",
+    "videoMessage",
+})
+
+
+async def _handle_non_text(sender: str, msg_type: str = "") -> None:
     """
     Handle image / voice / sticker from a customer.
 
-    First non-text:
-      Send catalog link and ask for the model name.
-      Mark sender in _image_catalog_sent.
+    Audio / voice recordings (audioMessage, pttMessage):
+      Ignored silently — reset the follow-up timer but send no reply.
 
-    Second non-text (no text reply in between):
-      Customer hasn't given a model name → escalate to contact collection.
-      Clear the mark so a third image would restart the cycle.
+    Images / videos (imageMessage, videoMessage):
+      First: send catalog link and ask for model name.
+      Second (no text reply in between): escalate to contact collection.
+
+    Other types (sticker, document, location …): ignored silently.
     """
     _followup_reset(sender)
+
+    # Audio / voice note → silently ignore (reset timer, no reply)
+    if msg_type in _AUDIO_MSG_TYPES:
+        logger.info("[BOT:AUDIO_SKIP] Voice recording ignored | type=%s | sender=%s", msg_type, sender)
+        return
+
+    # Only respond to image / video types
+    if msg_type not in _IMAGE_MSG_TYPES:
+        logger.info("[BOT:NON_TEXT_SKIP] Non-image type ignored | type=%s | sender=%s", msg_type, sender)
+        return
+
     if sender in _image_catalog_sent:
         # Second image — give up on model name, move to contact collection
         _image_catalog_sent.discard(sender)
@@ -1439,7 +1464,7 @@ async def _poll_loop() -> None:
                     msg_type = msg_data.get("typeMessage", "")
                     if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
                         logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
-                        await _handle_non_text(sender)
+                        await _handle_non_text(sender, msg_type)
                 elif sender and text:
                     _image_catalog_sent.discard(sender)  # text reply clears image escalation
                     _track_msg_id(msg_id)
@@ -1632,7 +1657,7 @@ async def webhook(request: Request, token: str = Query(default="")):
         msg_type = msg_data.get("typeMessage", "")
         if msg_type and msg_type not in ("textMessage", "extendedTextMessage", ""):
             logger.info("[BOT:NON_TEXT] type=%s | sender=%s", msg_type, sender)
-            await _handle_non_text(sender)
+            await _handle_non_text(sender, msg_type)
         return JSONResponse({"ok": True})
 
     if sender and text:
