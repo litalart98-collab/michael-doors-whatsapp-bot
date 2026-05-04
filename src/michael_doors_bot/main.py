@@ -915,8 +915,21 @@ _CLOSE_MSG = (
 
 
 def _followup_reset(sender: str) -> None:
+    """Called when the customer sends a message.
+
+    Policy: one follow-up reminder per conversation at most.
+    If a reminder was already sent and the customer now responds,
+    remove the tracking entry entirely — no more automated messages
+    will be sent for this conversation.
+    """
     state = _followup.get(sender)
-    if state and state.get("closed"):
+    if state and state.get("followup_sent"):
+        # Customer replied after a reminder was already sent — stop tracking.
+        # The conversation is clearly alive; no more automated reminders needed.
+        _followup.pop(sender, None)
+        logger.info("[FOLLOWUP:DONE] Customer replied after reminder — no more follow-ups | sender=%s", sender)
+    elif state and state.get("closed"):
+        # Conversation was closed but customer wrote again → fresh cycle allowed
         _followup[sender] = {"last_bot_time": time.time(), "followup_sent": False, "followup_time": 0.0, "closed": False}
     elif state:
         state["last_bot_time"] = time.time()
