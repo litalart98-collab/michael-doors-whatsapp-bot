@@ -27,17 +27,19 @@ CONTACT_OPENER: str = (
 STAGE3_QUESTION: str = "האם יש עוד משהו נוסף שנוכל לעזור לכם?"  # neutral/plural (gender unknown)
 
 # ── Farewell messages ─────────────────────────────────────────────────────────
-FINAL_HANDOFF: str                  = "הפרטים שלכם הועברו, ניצור איתכם קשר בקרוב 😊\nהמשך יום טוב!"
-FINAL_HANDOFF_FEMALE: str           = "הפרטים שלך הועברו, ניצור איתך קשר בקרוב 😊\nהמשך יום טוב!"
-FINAL_HANDOFF_MALE: str             = "הפרטים שלך הועברו, ניצור איתך קשר בקרוב 😊\nהמשך יום טוב!"
-FINAL_HANDOFF_SERVICE: str          = "הפרטים שלכם הועברו, ניצור איתכם קשר בקרוב 😊\nהמשך יום טוב!"
-FINAL_HANDOFF_SERVICE_FEMALE: str   = "הפרטים שלך הועברו, ניצור איתך קשר בקרוב 😊\nהמשך יום טוב!"
-FINAL_HANDOFF_SERVICE_MALE: str     = "הפרטים שלך הועברו, ניצור איתך קשר בקרוב 😊\nהמשך יום טוב!"
+# Note: no timing promise — the bot gives initial response only.
+# Human availability is not guaranteed by the bot.
+FINAL_HANDOFF: str                  = "הפרטים שלכם הועברו לצוות שלנו 😊\nהמשך יום טוב!"
+FINAL_HANDOFF_FEMALE: str           = "הפרטים שלך הועברו לצוות שלנו 😊\nהמשך יום טוב!"
+FINAL_HANDOFF_MALE: str             = "הפרטים שלך הועברו לצוות שלנו 😊\nהמשך יום טוב!"
+FINAL_HANDOFF_SERVICE: str          = "הפרטים שלכם הועברו לצוות שלנו 😊\nהמשך יום טוב!"
+FINAL_HANDOFF_SERVICE_FEMALE: str   = "הפרטים שלך הועברו לצוות שלנו 😊\nהמשך יום טוב!"
+FINAL_HANDOFF_SERVICE_MALE: str     = "הפרטים שלך הועברו לצוות שלנו 😊\nהמשך יום טוב!"
 
 # Showroom-specific farewells — mention visit scheduling, not "הפרטים הועברו"
-FINAL_HANDOFF_SHOWROOM: str         = "מצוין, ניצור איתכם קשר לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
-FINAL_HANDOFF_SHOWROOM_FEMALE: str  = "מצוין, ניצור איתך קשר לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
-FINAL_HANDOFF_SHOWROOM_MALE: str    = "מצוין, ניצור איתך קשר לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
+FINAL_HANDOFF_SHOWROOM: str         = "הפרטים שלכם הועברו לצוות לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
+FINAL_HANDOFF_SHOWROOM_FEMALE: str  = "הפרטים שלך הועברו לצוות לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
+FINAL_HANDOFF_SHOWROOM_MALE: str    = "הפרטים שלך הועברו לצוות לתיאום פגישה 😊\nשיהיה המשך יום טוב!"
 
 # ── Phrasing templates ────────────────────────────────────────────────────────
 # Keyed by template_key from NextAction.
@@ -70,10 +72,10 @@ QUESTION_TEMPLATES: dict[str, str] = {
     "stage3_question_female":    "האם יש עוד משהו נוסף שנוכל לעזור לך?",
     "stage3_question_male":      "האם יש עוד משהו נוסף שנוכל לעזור לך?",
 
-    # Callback time (gender-specific variants)
-    "ask_callback_time_neutral": "מתי נוח שנחזור אליכם?",
-    "ask_callback_time_female":  "מתי נוח שנחזור אלייך?",
-    "ask_callback_time_male":    "מתי נוח שנחזור אליך?",
+    # Callback time (gender-specific variants) — "שיצרו" not "שנחזור" — no timing promise
+    "ask_callback_time_neutral": "מתי נוח שיצרו איתכם קשר?",
+    "ask_callback_time_female":  "מתי נוח שיצרו איתך קשר?",
+    "ask_callback_time_male":    "מתי נוח שיצרו איתך קשר?",
 
     # Fallbacks
     "ask_topic_clarification":   'לגבי איזה סוג דלת מדובר — כניסה, פנים, או ממ"ד?',
