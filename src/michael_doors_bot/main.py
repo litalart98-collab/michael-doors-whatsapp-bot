@@ -1366,7 +1366,10 @@ async def _process_message(sender: str, text: str) -> None:
                     logger.error("[BOT:SHABBAT_FAIL] Shabbat notice failed | sender=%s | %s", sender, shabbat_err)
 
             # Update follow-up state regardless of whether the second pulse succeeded
-            if result.get("handoff_to_human"):
+            if result.get("handoff_to_human") or result.get("close_followup"):
+                # Conversation complete OR customer expressed frustration — stop tracking
+                if result.get("close_followup") and not result.get("handoff_to_human"):
+                    logger.info("[FOLLOWUP:FRUSTRATED] Closing follow-up after customer frustration | sender=%s", sender)
                 if sender in _followup:
                     _followup[sender]["closed"] = True
                 else:

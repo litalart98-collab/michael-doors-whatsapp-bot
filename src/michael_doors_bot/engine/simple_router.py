@@ -1659,6 +1659,20 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
                 "  reply_text_2: null",
             ]
 
+    # ── Frustration abort ─────────────────────────────────────────────────────
+    elif action.template_key == "frustration_abort":
+        lines += [
+            "INSTRUCTION: Customer expressed frustration / wants to stop.",
+            "  1. One short empathy line — warm, not over-explaining.",
+            "  2. Offer the direct phone number 054-2787578 OR invite to leave name+phone for callback.",
+            "  3. Do NOT ask ANY product question (no style / scope / quantity / mamad type).",
+            "  4. Do NOT continue the sales flow.",
+            "  5. No rhetorical questions, no apologies longer than one line.",
+            "  Example: 'מבינה 💙 אם תרצי/תרצה לדבר עם נציג ישירות — 054-2787578'",
+            f"  {gender_note}",
+            "  reply_text_2: null",
+        ]
+
     # ── Near-miss phone — targeted correction ────────────────────────────────
     elif action.field_to_ask == "phone" and state.get("_near_miss_phone"):
         near_miss = state["_near_miss_phone"]
@@ -2500,8 +2514,28 @@ async def get_reply(
                 _pre.get("phone"), _pre.get("full_name"), _pre.get("city"), sender,
             )
 
+    # Step 5e: Frustration guard — when customer clearly wants to stop.
+    # Detected BEFORE _decide_next_action so we never ask another product question.
+    _FRUSTRATION_RE = re.compile(
+        r'\b(סגרי|תסגרי|סגרו|תסגרו|סגור(?!\s*שעות)|תסגור|עזבי\b|עזוב\b|עזבו\b'
+        r'|אין טעם|לא מעניין|מספיק\b|ביי\b|bye\b|להתראות|פספסתם|נמאס|נעזוב|תעזבי'
+        r'|לא צריך|לא רוצה|תשכחי|תשכח|ויתרתי|ויתרנו)',
+        re.IGNORECASE,
+    )
+    _is_frustrated = bool(_FRUSTRATION_RE.search(user_message))
+
     # Step 6: Decide next action (pure state function)
     action = _decide_next_action(state)
+
+    # Frustration override: replace product/contact action with empathy+exit
+    if _is_frustrated and action.stage not in (6, 7):
+        action = NextAction(
+            5, "frustration_abort", "frustration_abort", False,
+            "customer expressed frustration — offer empathy + direct phone option",
+        )
+        logger.info("[FRUSTRATED] Overriding action to frustration_abort | sender=%s | msg=%r",
+                    sender, user_message[:60])
+
     logger.info("[ACTION] sender=%s | stage=%d | field=%s | template=%s | context=%s",
                 sender, action.stage, action.field_to_ask, action.template_key, action.context)
 
@@ -2645,7 +2679,11 @@ async def get_reply(
     asyncio.create_task(_supabase_save_conv(sender))
     _save_conv_state()
 
-    return _structured_to_return(structured, state)
+    result = _structured_to_return(structured, state)
+    # Tell main.py to close the follow-up tracker when customer expressed frustration
+    if _is_frustrated:
+        result["close_followup"] = True
+    return result
 
 
 # ── Follow-up message (15-min silence reminder) ───────────────────────────────
