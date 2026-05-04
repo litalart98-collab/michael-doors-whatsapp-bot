@@ -845,6 +845,13 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     elif re.search(r'\bמעוצבת\b|\bמעוצבות\b|\bמעוצב\b|עם עיצוב', t, re.IGNORECASE):
         _maybe_set_style("designed")
     elif re.search(
+        # "גם וגם" / "שניהם" / "לא יודע" / "לא החלטתי" — customer undecided → treat as undecided
+        # so the flow can advance to contact collection instead of looping on the style question.
+        r'גם וגם|גם וגם|שניהם|שניהן|כל הסוגים|לא יודע|לא יודעת|לא החלטתי|לא בטוח|לא בטוחה|לא משנה',
+        t, re.IGNORECASE,
+    ):
+        _maybe_set_style("undecided")
+    elif re.search(
         r'\bפסים\b|\bפס\b|\bחריצים\b|\bחריץ\b|\bמרובעים\b|\bמרובע\b'
         r'|\bקשת\b|\bקרוס\b|\bאסם\b|\bבארן\b|\bkaro\b',
         t, re.IGNORECASE
@@ -1726,6 +1733,10 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
             "  - 1–3 lines max. WhatsApp style.",
             "  - A brief warm acknowledgment of the customer's last message is allowed",
             "    (max 1 line), then ask the question directly.",
+            "  - If you are RE-ASKING the same question (customer's answer was ambiguous):",
+            "    ⛔ NEVER explain WHY you are asking again — just ask the question simply.",
+            "    ⛔ NEVER say 'מכיוון ש...' / 'כיוון ש...' / 'כדי שאוכל...' etc.",
+            "    ✅ Keep it to ONE short line: e.g. 'חלקות או מעוצבות?'",
             f"  - {gender_note}",
         ]
 
