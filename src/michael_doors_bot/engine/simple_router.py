@@ -236,6 +236,7 @@ def _empty_conv_state() -> dict:
         # ── Showroom ──
         "showroom_requested": False,
         "showroom_intent":    None,   # "address" | "hours" | None (general interest)
+        "contact_requested":  False,  # True when customer explicitly asked to be contacted/called
 
         # ── Style buffer ──
         "_raw_style": None,  # temporary until topic is known
@@ -524,6 +525,9 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         # Use Hebrew-aware boundary: not preceded/followed by another Hebrew letter,
         # with optional conjunction-ו prefix (e.g. "וראשית" → "and entrance door").
         r"|(?<![א-ת])ו?ראשית(?![א-ת])"
+        # standalone "חוץ" / "וגם חוץ" / "וחוץ" in door-shopping context = entrance door
+        # e.g. "דלתות פנים וגם חוץ" / "פנים וחוץ" / "פנים וגם כניסה וחוץ"
+        r"|(?:וגם|וגם |גם |ו)חוץ(?![א-ת])"
         r"|דלת ברזל|דלת פלדה|דלתות ברזל|דלתות פלדה"
         r"|דלת לבית|דלתות לבית"
         r"|כניסה לבית|כניסה לדירה|כניסה לבניין"
@@ -1013,6 +1017,19 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
                 extracted['interior_quantity'] = num
                 break
 
+    # ── Contact explicitly requested ─────────────────────────────────────────
+    # When customer asks to be called / contacted → skip product questions,
+    # go straight to contact collection (Stage 4).
+    if re.search(
+        r'תיצרו קשר|ליצור קשר|תתקשרו|תחזרו אליי|תחזרו אלי|חזרו אליי|חזרו אלי'
+        r'|תחזור אליי|תחזור אלי|תתקשר אליי|תתקשר אלי'
+        r'|קשר טלפוני|ליצור קשר טלפוני|יצירת קשר|יצרו קשר'
+        r'|אשמח שתתקשרו|אשמח שתיצרו|אשמח לשיחה'
+        r'|שלחו לי מחיר|תשלחו לי הצעה|הצעת מחיר בטלפון',
+        t, re.IGNORECASE,
+    ):
+        extracted['contact_requested'] = True
+
     # ── Showroom requested ────────────────────────────────────────────────────
     if re.search(
         r'לבוא לאולם|לבקר|לבוא אליכם|לקבוע פגישה|ביקור באולם|מתי אפשר לבוא'
@@ -1169,7 +1186,7 @@ def _merge_state(existing: dict, new_fields: dict) -> dict:
 
         elif key in ('stage3_done', 'stage4_opener_sent', 'summary_sent',
                      'entrance_catalog_sent', 'interior_catalog_sent',
-                     'showroom_requested'):
+                     'showroom_requested', 'contact_requested'):
             # Boolean flags — only update False→True
             if value and not merged.get(key):
                 merged[key] = True
@@ -1333,6 +1350,17 @@ def _decide_next_action(state: dict) -> NextAction:
             # No topics detected yet
             return NextAction(2, "topic_detection", "ask_topic_clarification", False,
                               "no topics detected — ask what type of door they need")
+
+        # ── contact_requested shortcut ────────────────────────────────────────
+        # When customer explicitly asked to be called/contacted AND topic is known,
+        # skip all remaining product questions and go straight to contact collection.
+        if state.get("contact_requested") and not state.get("phone"):
+            _any_contact_known = bool(state.get("phone") or state.get("full_name") or state.get("city"))
+            if _any_contact_known and not state.get("stage4_opener_sent"):
+                state["stage4_opener_sent"] = True
+            if not state.get("stage4_opener_sent"):
+                return NextAction(4, "contact_opener", "contact_opener", True,
+                                  "customer requested contact — skip product questions")
 
         # Always recompute current_topic fresh — never rely solely on the cached
         # current_active_topic value, which may be stale if topics were added to
