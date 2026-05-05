@@ -375,6 +375,20 @@ except Exception as e:
     logger.warning("[BOOT] Could not load pre-existing contacts: %s", e)
 
 
+# ── Manual blocklist ─────────────────────────────────────────────────────────
+# Numbers that must never receive a bot reply (silently ignored).
+# Format: "972XXXXXXXXX" (no @c.us suffix — normalized below).
+_BLOCKED_SENDERS: frozenset[str] = frozenset({
+    "972546222482",
+})
+
+
+def _is_blocked(sender: str) -> bool:
+    """Return True if this sender is on the manual blocklist."""
+    bare = sender.replace("@c.us", "")
+    return bare in _BLOCKED_SENDERS
+
+
 # ── Message deduplication ─────────────────────────────────────────────────────
 # Ordered deque so we evict the OLDEST IDs (not a random half) when full.
 _MAX_PROCESSED_IDS  = 500
@@ -1273,6 +1287,11 @@ async def _flush_pending(sender: str) -> None:
 
 
 async def _process_message(sender: str, text: str) -> None:
+    # Manual blocklist — silently ignore without any reply
+    if _is_blocked(sender):
+        logger.info("[BOT:BLOCKED_MANUAL] Silently ignoring blocked sender | sender=%s", sender)
+        return
+
     # Rate limiting — checked before acquiring lock so flooded senders don't queue (Fix 6)
     if _is_rate_limited(sender):
         logger.warning("[BOT:RATE_LIMIT] Dropped message | sender=%s | text=%s", sender, text[:40])
@@ -1651,6 +1670,11 @@ async def webhook(request: Request, token: str = Query(default="")):
             logger.info("[BOT:DEDUP] Webhook duplicate skipped | id=%s | sender=%s", msg_id, sender)
             return JSONResponse({"ok": True})
         _track_msg_id(msg_id)
+
+    # Manual blocklist check — before any processing
+    if sender and _is_blocked(sender):
+        logger.info("[BOT:BLOCKED_MANUAL] Webhook: silently ignoring blocked sender | sender=%s", sender)
+        return JSONResponse({"ok": True})
 
     # Non-text messages (images, voice notes, stickers, etc.)
     if sender and not text and _is_individual_chat(sender):
