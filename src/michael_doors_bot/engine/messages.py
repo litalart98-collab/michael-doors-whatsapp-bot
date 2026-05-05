@@ -105,6 +105,23 @@ QUESTION_TEMPLATES: dict[str, str] = {
         "כדי שנוכל לתאם איתכם מועד מתאים, אשמח לשם מלא, עיר ומספר טלפון."
     ),
 
+    # Showroom opener — customer asked for the address
+    "contact_opener_showroom_address": (
+        "האולם שלנו נמצא בבעלי המלאכה 15, נתיבות 📍\n\n"
+        "מומלץ לתאם ביקור מראש — כך נוכל להכין לכם זמן פנוי ולקבל אתכם כמו שמגיע, בלי לדלג בין לקוחות 😊\n\n"
+        "אשמח לשם מלא, עיר ומספר טלפון כדי לתאם."
+    ),
+
+    # Showroom opener — customer asked about opening hours
+    "contact_opener_showroom_hours": (
+        "שעות האולם שלנו:\n"
+        "ראשון–חמישי: 09:00–18:00\n"
+        "שישי: 09:00–13:00\n"
+        "שבת: סגור\n\n"
+        "מומלץ לתאם ביקור מראש כדי שנהיה מוכנים לקבל אתכם 😊\n"
+        "אשמח לשם מלא, עיר ומספר טלפון כדי לתאם."
+    ),
+
     # Showroom Stage 3 — asked AFTER contact collected (gender variants)
     "ask_showroom_stage3_neutral": "יש עוד משהו ספציפי שחשוב לכם לגבי דלתות כניסה או דלתות פנים?",
     "ask_showroom_stage3_female":  "יש עוד משהו ספציפי שחשוב לך לגבי דלתות כניסה או דלתות פנים?",

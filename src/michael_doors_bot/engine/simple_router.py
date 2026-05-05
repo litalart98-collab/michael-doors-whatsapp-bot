@@ -235,6 +235,7 @@ def _empty_conv_state() -> dict:
 
         # ── Showroom ──
         "showroom_requested": False,
+        "showroom_intent":    None,   # "address" | "hours" | None (general interest)
 
         # ── Style buffer ──
         "_raw_style": None,  # temporary until topic is known
@@ -570,7 +571,14 @@ _TOPIC_PATTERNS: dict[str, re.Pattern] = {
         r"|אולם תצוגה|אולם התצוגה"
         r"|איפה אתם נמצאים|היכן אתם נמצאים|איפה אתם|היכן אתם"
         r"|יש לכם אולם|יש אולם|יש לכם חנות|יש לכם מקום"
-        r"|אפשר להגיע לאולם|לראות דגמים|לבוא לראות",
+        r"|אפשר להגיע לאולם|לראות דגמים|לבוא לראות"
+        # Address / location queries
+        r"|איפה האולם|איפה החנות|מה הכתובת|כתובת האולם|כתובת החנות"
+        r"|איפה אתם יושבים|איפה ממוקמים|איך מגיעים אליכם"
+        # Hours queries
+        r"|שעות פעילות|שעות פתיחה|מה השעות|מתי פתוחים|מתי סגורים"
+        r"|מתי אתם פתוחים|מתי ניתן לבוא|מתי אפשר להגיע"
+        r"|מה ימי הפעילות|ימי עבודה|שעות עבודה",
         re.IGNORECASE,
     ),
     "repair": re.compile(
@@ -1010,10 +1018,32 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
         r'לבוא לאולם|לבקר|לבוא אליכם|לקבוע פגישה|ביקור באולם|מתי אפשר לבוא'
         r'|אפשר להגיע|רוצה להגיע|לראות מקרוב'
         r'|אולם תצוגה|אולם התצוגה|איפה אתם נמצאים|היכן אתם'
-        r'|יש לכם אולם|יש אולם|אפשר להגיע לאולם|לראות דגמים|לבוא לראות',
+        r'|יש לכם אולם|יש אולם|אפשר להגיע לאולם|לראות דגמים|לבוא לראות'
+        r'|מה הכתובת|כתובת האולם|כתובת החנות|איפה האולם|איפה החנות'
+        r'|איפה אתם יושבים|איפה ממוקמים|איך מגיעים'
+        r'|שעות פעילות|שעות פתיחה|מה השעות|מתי פתוחים|שעות עבודה',
         t, re.IGNORECASE
     ):
         extracted['showroom_requested'] = True
+
+    # ── Showroom intent: address vs hours vs general ──────────────────────────
+    # Set once on first message; never overwrite if already set.
+    if (state or {}).get("showroom_intent") is None:
+        _is_hours_q = bool(re.search(
+            r'שעות פעילות|שעות פתיחה|שעות עבודה|מה השעות'
+            r'|מתי פתוחים|מתי סגורים|מתי אתם פתוחים'
+            r'|מתי ניתן לבוא|מתי אפשר להגיע|ימי פעילות|ימי עבודה',
+            t, re.IGNORECASE,
+        ))
+        _is_address_q = bool(re.search(
+            r'איפה אתם|היכן אתם|מה הכתובת|כתובת|איפה האולם|איפה החנות'
+            r'|איפה אתם יושבים|איפה ממוקמים|איך מגיעים|כתובת האולם',
+            t, re.IGNORECASE,
+        ))
+        if _is_hours_q:
+            extracted['showroom_intent'] = 'hours'
+        elif _is_address_q:
+            extracted['showroom_intent'] = 'address'
 
     # ── Preferred contact hours ───────────────────────────────────────────────
     # Priority order: numeric "אחרי X" → anytime → time-of-day → day/date → clock time
@@ -1337,11 +1367,15 @@ def _decide_next_action(state: dict) -> NextAction:
         if _any_contact_known and not state.get("stage4_opener_sent"):
             state["stage4_opener_sent"] = True  # sync state so _advance_stage agrees
         if not state.get("stage4_opener_sent"):
-            opener_key = (
-                "contact_opener_showroom"
-                if "showroom_meeting" in active
-                else "contact_opener"
-            )
+            if "showroom_meeting" in active:
+                _intent = state.get("showroom_intent")
+                opener_key = (
+                    "contact_opener_showroom_address" if _intent == "address" else
+                    "contact_opener_showroom_hours"   if _intent == "hours"   else
+                    "contact_opener_showroom"
+                )
+            else:
+                opener_key = "contact_opener"
             return NextAction(4, "contact_opener", opener_key, True,
                               "stage 4: send contact-collection opener (no question appended)")
 

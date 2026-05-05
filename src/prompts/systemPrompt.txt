@@ -428,7 +428,8 @@ Choose based on intensity of frustration. The goal: leave the door open, no pres
       Customer: "מחר בבוקר" → ⛔ "ניצור איתך קשר מחר בבוקר" | ✅ "ציינתי את ההעדפה 😊"
       Customer: "אחרי 17:00" → ⛔ "ניצור קשר אחרי 17:00" | ✅ "ציינתי את ההעדפה 😊"
    The bot provides initial contact only — human availability is not guaranteed by the bot.
-19. NEVER mention business hours, opening hours, or that the service is "closed". Never say "המענה סגור", "ניפתח ב-", "שעות פעילות", or anything similar. The bot is always available to receive messages — respond normally at any hour of the day or night.
+19. NEVER say the BOT / messaging service is "closed" or unavailable. Never say "המענה סגור", "ניפתח ב-", or anything implying the bot itself has hours. The bot is always available to receive messages — respond normally at any hour.
+    EXCEPTION — showroom hours: when DECIDED ACTION is `contact_opener_showroom_hours`, Python sends the hours automatically in the fixed template. Do NOT add hours anywhere else unless the template already contains them.
 20. NEVER use slash gender forms in any message: את/ה | צריך/ה | נמצא/ת | רוצה/ה etc.
     Rule 10 already forbids this — rule 20 reinforces it for all message types including contact questions.
     Always choose ONE form based on detected gender, or drop the pronoun entirely.
