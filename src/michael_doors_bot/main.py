@@ -36,6 +36,7 @@ from .engine.simple_router import (
     _save_conv_state,
 )
 from .engine.messages import (
+    PITCH,
     FINAL_HANDOFF,
     FINAL_HANDOFF_FEMALE,
     FINAL_HANDOFF_MALE,
@@ -1383,6 +1384,30 @@ async def _process_message(sender: str, text: str) -> None:
                 if not is_fallback:
                     _queue_send_retry(sender, reply_text)
 
+            # Shabbat notice — sent once per sender, right after the pitch,
+            # only during Shabbat hours (Friday 16:00 – Saturday 20:00 IL).
+            # Condition: reply_text is exactly the PITCH string (opening turn),
+            # which is more reliable than checking reply_text_2 (can be non-null
+            # on other turns too, e.g. after catalog).
+            # On the opening Shabbat turn, we SKIP reply_text_2 (the product question)
+            # entirely — the Shabbat notice already says "leave your details".
+            # Subsequent messages during Shabbat are processed normally.
+            _is_opening_shabbat = (
+                not is_fallback
+                and sender not in _shabbat_notified
+                and reply_text == PITCH
+                and _is_shabbat_il()
+            )
+            if _is_opening_shabbat:
+                reply_text_2 = None  # suppress product question — Shabbat notice takes its place
+                try:
+                    await asyncio.sleep(1.5)
+                    await green.send_message(sender, _SHABBAT_MSG)
+                    _shabbat_notified.add(sender)
+                    logger.info("[BOT:SHABBAT] Shabbat notice sent (replaced product question) | sender=%s", sender)
+                except Exception as shabbat_err:
+                    logger.error("[BOT:SHABBAT_FAIL] Shabbat notice failed | sender=%s | %s", sender, shabbat_err)
+
             # Second pulse (opening message split) — separate try so a failure here
             # never blocks follow-up tracking or retries the first pulse redundantly.
             if reply_text_2 and not is_fallback:
@@ -1394,20 +1419,6 @@ async def _process_message(sender: str, text: str) -> None:
                     _record_error("send_fail", sender, f"pulse2: {send_err2}")
                     logger.error("[BOT:SEND2_FAIL] Second pulse failed | sender=%s | %s", sender, send_err2)
                     _queue_send_retry(sender, reply_text_2)
-
-            # Shabbat notice — sent once per sender, right after the pitch,
-            # only during Shabbat hours (Friday 16:00 – Saturday 20:00 IL).
-            if (not is_fallback
-                    and sender not in _shabbat_notified
-                    and reply_text_2  # pitch was just sent (opening turn)
-                    and _is_shabbat_il()):
-                try:
-                    await asyncio.sleep(1.5)
-                    await green.send_message(sender, _SHABBAT_MSG)
-                    _shabbat_notified.add(sender)
-                    logger.info("[BOT:SHABBAT] Shabbat notice sent | sender=%s", sender)
-                except Exception as shabbat_err:
-                    logger.error("[BOT:SHABBAT_FAIL] Shabbat notice failed | sender=%s | %s", sender, shabbat_err)
 
             # Update follow-up state regardless of whether the second pulse succeeded
             if result.get("handoff_to_human") or result.get("close_followup"):
