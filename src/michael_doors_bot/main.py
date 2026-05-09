@@ -187,6 +187,52 @@ def _is_emoji_only(text: str):
     return bool(_EMOJI_ONLY_RE.match(text)) and len(text.strip()) > 0
 
 
+# ── Per-turn outbound message guard ──────────────────────────────────────────
+# Hard limit: the bot must never send more than MAX_OUTBOUND_PER_TURN messages
+# in response to a single customer message.  Any attempt beyond the limit is
+# blocked and logged as CRITICAL so it shows up immediately in Render logs.
+#
+# Normal maximums:
+#   - Regular turn:  1 message  (Claude's reply)
+#   - Opening turn:  2 messages (PITCH  +  Claude's question)
+#   - On Shabbat:    2 messages (PITCH  +  Shabbat notice, product question suppressed)
+#
+# The limit is set to 2.  A 3rd send in one turn is almost certainly a bug.
+MAX_OUTBOUND_PER_TURN: int = 2
+
+class _TurnGuard:
+    """Counts outgoing messages within one customer-message processing turn.
+
+    Usage (inside _process_message):
+        guard = _TurnGuard(sender)
+        ...
+        await guard.send(green, msg)   # replaces direct green.send_message(sender, msg)
+
+    Raises nothing — silently blocks the offending send so the customer gets a
+    clean experience, but writes a CRITICAL log entry for investigation.
+    """
+    __slots__ = ("sender", "_count")
+
+    def __init__(self, sender: str) -> None:
+        self.sender = sender
+        self._count = 0
+
+    async def send(self, client, msg: str) -> bool:
+        """Send msg via client.send_message.  Returns True on success, False if blocked."""
+        self._count += 1
+        if self._count > MAX_OUTBOUND_PER_TURN:
+            logger.critical(
+                "[GUARD:OVERFLOW] Outbound message #%d blocked (limit=%d) | "
+                "sender=%s | msg_preview=%r",
+                self._count, MAX_OUTBOUND_PER_TURN, self.sender, msg[:80],
+            )
+            _record_error("send_fail", self.sender,
+                          f"turn_overflow: attempted message #{self._count} blocked")
+            return False
+        await client.send_message(self.sender, msg)
+        return True
+
+
 def _enforce_single_question(text: str) -> str:
     """Hard guard: ensure the bot never sends more than one question in a message.
 
@@ -1371,8 +1417,13 @@ async def _process_message(sender: str, text: str) -> None:
             reply_text = _enforce_single_question(result["reply_text"])
             reply_text_2 = result.get("reply_text_2")  # second pulse (opening message only)
             is_fallback = reply_text in ERROR_REPLIES
+
+            # ── Per-turn outbound guard ──────────────────────────────────────
+            # Counts every send in this turn; blocks + logs CRITICAL if > MAX_OUTBOUND_PER_TURN.
+            _guard = _TurnGuard(sender)
+
             try:
-                await green.send_message(sender, reply_text)
+                await _guard.send(green, reply_text)
                 if is_fallback:
                     _record_error("parse", sender, "fallback reply sent after error")
                     logger.warning("[BOT:FALLBACK] Error fallback sent | sender=%s", sender)
@@ -1402,7 +1453,7 @@ async def _process_message(sender: str, text: str) -> None:
                 reply_text_2 = None  # suppress product question — Shabbat notice takes its place
                 try:
                     await asyncio.sleep(1.5)
-                    await green.send_message(sender, _SHABBAT_MSG)
+                    await _guard.send(green, _SHABBAT_MSG)
                     _shabbat_notified.add(sender)
                     logger.info("[BOT:SHABBAT] Shabbat notice sent (replaced product question) | sender=%s", sender)
                 except Exception as shabbat_err:
@@ -1413,7 +1464,7 @@ async def _process_message(sender: str, text: str) -> None:
             if reply_text_2 and not is_fallback:
                 try:
                     await asyncio.sleep(2.5)  # generous pause to avoid Green API rate limit
-                    await green.send_message(sender, reply_text_2)
+                    await _guard.send(green, reply_text_2)
                     logger.info("[BOT:SEND2] Second pulse sent | sender=%s", sender)
                 except Exception as send_err2:
                     _record_error("send_fail", sender, f"pulse2: {send_err2}")
