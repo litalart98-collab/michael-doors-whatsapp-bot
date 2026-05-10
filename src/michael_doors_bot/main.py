@@ -1648,10 +1648,11 @@ async def _lifespan(app: FastAPI):
             logger.warning("[BOOT] Could not fetch pre-existing contacts: %s — no contacts blocked", exc)
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
-    _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
+    # Follow-up reminders disabled — bot does not send "still here?" messages.
+    # _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
     yield
     _poll_task.cancel()
-    _followup_task.cancel()
+    # if _followup_task: _followup_task.cancel()
     logger.info("=== BOT SHUTTING DOWN ===")
 
 

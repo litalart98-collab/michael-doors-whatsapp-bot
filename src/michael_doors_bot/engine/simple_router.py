@@ -60,8 +60,9 @@ _DATA_DIR       = Path(_cfg.DATA_DIR) if _cfg.DATA_DIR else _ROOT
 _CONV_PATH      = _DATA_DIR / "conversations.json"
 _LAST_SEEN_PATH = _DATA_DIR / "last_seen.json"
 
-_SESSION_GAP_COMPLETE = 24 * 3600       # reset after 24 h if contact info was collected
-_SESSION_GAP_OPEN    = 7 * 24 * 3600   # keep memory 7 days for open (no contact) conversations
+# Session gap resets disabled — conversation memory is kept indefinitely.
+# _SESSION_GAP_COMPLETE = 24 * 3600
+# _SESSION_GAP_OPEN    = 7 * 24 * 3600
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 def _load_system_prompt_sync() -> str:
@@ -2457,28 +2458,11 @@ async def get_reply(
         _conv_state.pop(sender, None)
         _last_seen.pop(sender, None)
         logger.info("[SESSION:FORCED] Fresh start | sender=%s", sender)
+    # Session gap resets disabled — conversation memory is kept indefinitely.
+    # Customers who return days or weeks later will be recognised and the bot
+    # will not repeat questions it already asked.
     elif not _cfg.TEST_MODE:
-        last = _last_seen.get(sender, 0.0)
-        if last > 0:
-            gap = now - last
-            # Determine gap threshold: shorter for completed conversations,
-            # longer for open conversations where the customer hasn't left contact
-            # details yet — they may return hours or days later with an answer.
-            existing_state = _conv_state.get(sender, {})
-            contact_complete = bool(
-                existing_state.get("phone") and
-                existing_state.get("full_name") and
-                existing_state.get("city")
-            )
-            gap_threshold = _SESSION_GAP_COMPLETE if contact_complete else _SESSION_GAP_OPEN
-            if gap > gap_threshold:
-                gap_h = gap / 3600
-                logger.info(
-                    "[SESSION:RESET] %.1fh gap (threshold=%.0fh, complete=%s) — fresh start | sender=%s",
-                    gap_h, gap_threshold / 3600, contact_complete, sender,
-                )
-                _conversations.pop(sender, None)
-                _conv_state.pop(sender, None)
+        pass  # no session reset
     _last_seen[sender] = now
     _save_last_seen()
 
