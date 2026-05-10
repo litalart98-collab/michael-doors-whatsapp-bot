@@ -1439,12 +1439,8 @@ def _decide_next_action(state: dict) -> NextAction:
             return NextAction(3, "stage3_question", showroom_s3_key, True,
                               "showroom stage 3: ask about door preferences after contact collection")
 
-        # Stage 6: callback time — is_fixed=True so Claude sends the exact template
-        if not state.get("preferred_contact_hours"):
-            return NextAction(6, "preferred_contact_hours", _get_callback_key(state), True,
-                              "stage 6: ask preferred callback time")
-
-        # Stage 7: farewell + handoff
+        # Stage 7: farewell + handoff (callback-time question removed — bot does not
+        # promise specific contact times; the team calls when available)
         return NextAction(7, "farewell", "_farewell_dynamic", True,
                           "stage 7: send farewell message, set handoff_to_human=true")
 
@@ -2681,7 +2677,7 @@ async def get_reply(
     action = _decide_next_action(state)
 
     # Frustration override: replace product/contact action with empathy+exit
-    if _is_frustrated and action.stage not in (6, 7):
+    if _is_frustrated and action.stage not in (7,):
         action = NextAction(
             5, "frustration_abort", "frustration_abort", False,
             "customer expressed frustration — offer empathy + direct phone option",
@@ -2769,19 +2765,6 @@ async def get_reply(
     if state.get("phone") and state.get("_near_miss_phone"):
         state["_near_miss_phone"] = None
         logger.info("[NEAR_MISS:CLEAR] Valid phone collected via Claude | sender=%s", sender)
-
-    # ── Stage 6→7 bridge: callback time just collected → apply farewell now ──────
-    # When the regex layer misses a callback-time pattern (e.g. "בערב") but
-    # Claude extracts it, preferred_contact_hours is set here for the first time.
-    # Without this bridge Python would return Claude's improvised farewell instead
-    # of the exact template. The bridge fires in the same turn so the customer
-    # always sees the correct final message.
-    if (action.field_to_ask == "preferred_contact_hours"
-            and state.get("preferred_contact_hours")):
-        structured["reply_text"] = _get_farewell_text(state)
-        structured["reply_text_2"] = None
-        structured["handoff_to_human"] = True
-        logger.info("[FAREWELL:STAGE6_BRIDGE] sender=%s | text=%s", sender, structured["reply_text"])
 
     # ── Stage 7 safety: hard-override farewell text ───────────────────────────
     # Claude sometimes adds names, blessings, or times around the farewell.
