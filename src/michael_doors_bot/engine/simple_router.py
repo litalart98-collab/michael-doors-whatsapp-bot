@@ -2091,6 +2091,60 @@ def _scrub_prices(text: str, sender: str) -> str:
     return scrubbed
 
 
+# ── Mid-conversation greeting stripper ───────────────────────────────────────
+# Greeting openers ("היי,", "שלום,", "אהלן,") are never appropriate once a
+# conversation is underway.  Claude is instructed (Rule 22) not to use them, but
+# this guard enforces the rule at the output level so no greeting can slip through
+# regardless of model drift.
+#
+# Also strips "תודה על התשובה" / "תודה שענית" style filler that adds no value.
+#
+# The guard applies ONLY to reply_text on non-first turns.  The PITCH (first
+# message) is a fixed string passed straight from messages.py — it never goes
+# through Claude parsing, so this function is never called on it.
+
+_GREETING_OPENER_RE = re.compile(
+    r'^(היי|שלום|אהלן|הי)\s*[,!]?\s*',
+    re.IGNORECASE | re.UNICODE,
+)
+
+_FILLER_OPENER_RE = re.compile(
+    r'^(תודה\s+(על\s+(הת?שובה|הפרטים|שענית)|שציינת|רבה|!)'
+    r'|תודה\s+על\s+הפרט'
+    r'|תודה\s+שענית'
+    r')\s*[!,.]?\s*',
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_mid_conv_greeting(text: str, sender: str, is_first_message: bool) -> str:
+    """Remove greeting/filler openers from mid-conversation bot replies.
+
+    Only active on turns 2+.  The PITCH (first turn) is a fixed string from
+    messages.py and never reaches this function.
+    """
+    if is_first_message or not text:
+        return text
+
+    original = text
+
+    # Strip greeting opener ("היי, " / "שלום, " / "אהלן, ")
+    text = _GREETING_OPENER_RE.sub("", text).lstrip()
+
+    # Strip filler opener ("תודה על התשובה! " / "תודה שענית, " etc.)
+    text = _FILLER_OPENER_RE.sub("", text).lstrip()
+
+    # Capitalise first letter if stripping lowered it (Hebrew — no-op for most chars)
+    if text and text != original:
+        # Log so we can track how often Claude ignores Rule 22
+        logger.warning(
+            "[GUARD:GREETING] Stripped greeting opener | sender=%s | original=%r | result=%r",
+            sender, original[:80], text[:80],
+        )
+
+    return text or original  # fallback: never return empty string
+
+
 def _extract_json(text: str) -> str:
     marker = '"reply_text"'
     last_pos = text.rfind(marker)
@@ -2698,6 +2752,13 @@ async def get_reply(
 
     # ── Parse response ─────────────────────────────────────────────────────────
     structured = _parse_response(raw_text, sender)
+
+    # ── Strip mid-conversation greeting openers (Rule 22 enforcement) ─────────
+    # Removes "היי, " / "שלום, " and filler like "תודה על התשובה" from turn 2+.
+    # The PITCH (first turn) is overwritten by the safety check below anyway.
+    structured["reply_text"] = _strip_mid_conv_greeting(
+        structured["reply_text"], sender, is_first_message
+    )
 
     # ── Merge Claude's extracted fields into state ─────────────────────────────
     claude_fields = _extract_claude_fields(structured)
