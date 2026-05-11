@@ -696,17 +696,31 @@ async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None
         )
         return
 
-    # ── Required fields: 3 core contact fields must be present ──────────────
-    # Send to Sheets as soon as name + phone + city are collected — don't wait
-    # for preferred_contact_hours.  This ensures every lead that gives contact
-    # details reaches Sheets even if the conversation ends early.
+    # ── Required fields: core contact AND farewell must be complete ───────────
+    # Send to Sheets only at the farewell turn (handoff_to_human=True) so that
+    # ALL available data — including preferred_contact_hours the customer may
+    # have mentioned at any point — is included in the row.
+    # Previously the send fired as soon as name+phone+city were collected, which
+    # meant preferred_contact_hours arrived too late (after sheets_sent=True).
     has_core_contact = all(lead.get(f) for f in ("full_name", "callback_phone", "city"))
+    is_handoff       = bool(result.get("handoff_to_human"))
+
     if not has_core_contact:
         logger.debug(
             "[SHEETS:SKIP] missing core contact fields | sender=%s | "
             "full_name=%r city=%r callback_phone=%r",
             lead.get("phone", ""), lead.get("full_name"), lead.get("city"),
             lead.get("callback_phone"),
+        )
+        return
+
+    if not is_handoff:
+        # Contact is complete but farewell not yet sent — wait for the handoff
+        # turn so preferred_contact_hours (if the customer mentions it) is captured.
+        # Abandoned leads with contact info are sent via /backfill-incomplete-leads.
+        logger.debug(
+            "[SHEETS:SKIP] waiting for handoff turn | sender=%s",
+            lead.get("phone", ""),
         )
         return
 
