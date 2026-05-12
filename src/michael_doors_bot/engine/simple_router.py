@@ -1237,12 +1237,9 @@ def _topic_complete(topic: str, state: dict) -> bool:
         style = state.get("entrance_style")
         if scope is None or style is None:
             return False
-        if style == "flat":
-            return True
-        # designed/undecided → complete once catalog has been sent.
-        # entrance_model is saved passively if the customer mentions one,
-        # but it never blocks progression to the next topic.
-        return bool(state.get("entrance_catalog_sent"))
+        # Any style value (flat / designed / undecided) → topic complete.
+        # No catalog step — salesperson presents options during the callback.
+        return True
 
     if topic == "interior_doors":
         if state.get("interior_project_type") is None:
@@ -1297,11 +1294,9 @@ def _next_topic_action(topic: str, state: dict) -> NextAction | None:
         if state.get("entrance_style") is None:
             return NextAction(2, "entrance_style", "ask_entrance_style", False,
                               "entrance: ask style (flat or designed)")
-        if state.get("entrance_style") in ("designed", "undecided"):
-            if not state.get("entrance_catalog_sent"):
-                return NextAction(2, "entrance_catalog", "entrance_catalog", True,
-                                  "entrance: send catalog URL (informational — does not block flow)")
-            # catalog sent → entrance topic complete; model saved passively if mentioned
+        # Style known → entrance topic complete. No catalog sent — salesperson
+        # presents options during the callback. (Catalog step removed: it added
+        # friction and wasn't needed before collecting contact info.)
         return None  # complete
 
     if topic == "interior_doors":
