@@ -821,7 +821,19 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
             extracted['entrance_zero_line'] = True
             extracted['entrance_scope']     = 'with_frame'   # always included
             extracted['entrance_style']     = 'zero_line'    # locks style
-        elif re.search(r'כולל משקוף|עם משקוף|דלת ומשקוף|כולל הצד|כולל המסגרת|כולל פריים', t, re.IGNORECASE):
+        elif re.search(
+            # explicit "with frame" phrasing
+            r'כולל משקוף|עם משקוף|דלת ומשקוף|ומשקוף|כולל הצד|כולל המסגרת|כולל פריים'
+            # removal/replacement of frame → customer clearly needs a new frame too
+            r'|פירוק משקוף|החלפת משקוף|לפרק משקוף|להוריד משקוף|הסרת משקוף'
+            # "כולל + anything + משקוף" (e.g. "כולל פירוק משקוף ישן")
+            r'|כולל\s+\S+\s+משקוף'
+            # natural phrasing: "גם המשקוף" / "גם משקוף"
+            r'|גם\s+(?:ה)?משקוף'
+            # shorthand confirmations implying frame included
+            r'|דלת\s+ומשקוף|דלת\s+עם\s+משקוף',
+            t, re.IGNORECASE,
+        ):
             extracted['entrance_scope'] = "with_frame"
         elif re.search(r'דלת בלבד|דלת.*\bבלבד\b|בלי משקוף|רק דלת\b|ללא משקוף|דלת לבד|רק הדלת|בלי מסגרת', t, re.IGNORECASE):
             extracted['entrance_scope'] = "door_only"
@@ -2654,6 +2666,32 @@ async def get_reply(
 
     # Step 6: Decide next action (pure state function)
     action = _decide_next_action(state)
+
+    # ── Repeated-question guard ────────────────────────────────────────────────
+    # If the bot's LAST message already asked the exact same question it's about
+    # to ask again (meaning the customer replied but the field wasn't extracted),
+    # switch to ask_safe_fallback so Claude can interpret the answer freely
+    # instead of creating an infinite re-ask loop.
+    # Only applies to product/contact Stage 2–5 questions (not farewell).
+    if action.stage not in (7,) and action.template_key not in (
+        "_farewell_dynamic", "frustration_abort",
+    ):
+        _last_bot_msg = next(
+            (m["content"] for m in reversed(history[:-1])   # exclude just-appended user msg
+             if m.get("role") == "assistant"),
+            "",
+        )
+        _tmpl_text = QUESTION_TEMPLATES.get(action.template_key, "")
+        if _tmpl_text and _tmpl_text in _last_bot_msg:
+            logger.warning(
+                "[GUARD:REPEAT_Q] Same question asked twice — switching to safe fallback | "
+                "template=%s | sender=%s",
+                action.template_key, sender,
+            )
+            action = NextAction(
+                action.stage, action.field_to_ask, "ask_safe_fallback", False,
+                f"repeat-question guard: bot already asked {action.template_key!r}",
+            )
 
     # Frustration override: replace product/contact action with empathy+exit
     if _is_frustrated and action.stage not in (7,):
