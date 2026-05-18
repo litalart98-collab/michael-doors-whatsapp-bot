@@ -1677,9 +1677,12 @@ def _build_action_block(action: NextAction, state: dict, is_first_message: bool)
         elif action.template_key == "ask_topic_clarification" and not state.get("active_topics"):
             lines += [
                 "  For reply_text_2: customer hasn't stated a specific need.",
-                "  Greet warmly + invite them to share what they're looking for.",
-                "  Use time-based greeting from business context above.",
-                "  ⛔ Use EXACTLY the phrase 'שמחים שפניתם אלינו' — never 'שקשרתם איתנו' or any other variant.",
+                "  If the customer asked about price/cost: acknowledge briefly that pricing is custom,",
+                "  then IMMEDIATELY ask what type of door they need — כניסה / פנים / ממ\"ד.",
+                "  Example: 'המחיר תלוי בסוג הדלת — לגבי מה מדובר? כניסה, פנים, או ממ\"ד? 😊'",
+                "  If NO price question: greet warmly + ask what they are looking for.",
+                "  ⛔ Use EXACTLY the phrase 'שמחים שפניתם אלינו' when greeting (non-price case).",
+                "  ⛔ Do NOT jump to contact collection — topic must be known first.",
                 f"  {gender_note}",
             ]
         else:
@@ -1983,9 +1986,12 @@ def _build_system(
     parts.append(
         "## ABSOLUTE RULE — PRICE/DELIVERY DISCLOSURE FORBIDDEN\n"
         "NEVER state, estimate, hint at, or compare any price, price range, cost, or delivery time. "
-        "This rule overrides every other instruction. "
-        "If asked about price: "
-        "'המחיר מותאם אישית לפי סוג ועיצוב — אשמח שתשאירו פרטים ונחזור עם הצעה מסודרת 😊'"
+        "This rule overrides every other instruction.\n"
+        "If asked about price AND the door type is already known: "
+        "'המחיר מותאם אישית לפי סוג ועיצוב — אשמח שתשאירו פרטים ונחזור עם הצעה מסודרת 😊'\n"
+        "If asked about price AND the door type is NOT yet known (no topic collected): "
+        "FIRST ask what type of door they need — כניסה / פנים / ממ\"ד — so you can continue. "
+        "Do NOT jump to contact collection before knowing the product type."
     )
 
     # Suppress FAQ for fixed-message actions — Claude must send EXACTLY the
