@@ -72,6 +72,54 @@ class GreenAPIClient:
             logger.warning("Green-API getChats failed: %s", exc)
             return []
 
+    async def enable_outgoing_webhook(self) -> bool:
+        """
+        Enable outgoingMessageReceived webhook in Green API settings.
+        This is required for the human-takeover feature: when the business owner
+        manually sends a message from WhatsApp Web / connected device, Green API
+        fires outgoingMessageReceived so the bot knows to step back.
+
+        Green API setSettings docs:
+          outgoingWebhook            — "yes"/"no" for manually sent messages
+          outgoingAPIMessageWebhook  — "yes"/"no" for API-sent messages (bot)
+        We enable the first and disable the second to avoid the bot triggering
+        its own takeover when it sends replies.
+
+        Called once at startup.  Safe to call repeatedly — idempotent.
+        """
+        url = f"{self._base}/setSettings/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.post(url, json={
+                    "outgoingWebhook": "yes",
+                    "outgoingAPIMessageWebhook": "no",
+                })
+                data = r.json() if r.content else {}
+                if r.status_code == 200 and data.get("saveSettings"):
+                    logger.info("[GREEN-API] outgoingWebhook=yes saved — human-takeover ready")
+                    return True
+                else:
+                    logger.warning(
+                        "[GREEN-API] setSettings response unexpected: status=%d body=%s",
+                        r.status_code, str(data)[:200],
+                    )
+                    return False
+        except Exception as exc:
+            logger.warning("[GREEN-API] enable_outgoing_webhook failed: %s", exc)
+            return False
+
+    async def get_settings(self) -> dict:
+        """Return current Green API instance settings (for diagnostics)."""
+        url = f"{self._base}/getSettings/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                return r.json()
+        except Exception as exc:
+            logger.warning("[GREEN-API] getSettings failed: %s", exc)
+            return {}
+
     async def get_contact_name(self, chat_id: str) -> str:
         """Return the WhatsApp display name for a contact, or empty string on failure."""
         url = f"{self._base}/getContactInfo/{self._token}"

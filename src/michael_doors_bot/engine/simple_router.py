@@ -1056,6 +1056,21 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
     ):
         extracted['contact_requested'] = True
 
+    # ── Phone-primary detection ───────────────────────────────────────────────
+    # When the customer's message is essentially just a phone number (very little
+    # other meaningful text), treat it as an implicit contact request — they are
+    # leaving their number so we call them back.  Skip all product questions.
+    if phone_match and not extracted.get('contact_requested'):
+        # Strip the phone number from the text and see what's left
+        _remaining = _PHONE_RE.sub('', t).strip()
+        # Remove digits, spaces, punctuation, dashes, plus signs, parentheses
+        _remaining_clean = re.sub(r'[\s\-\+\(\)\d\.\,]+', '', _remaining).strip()
+        if len(_remaining_clean) < 12:
+            # Almost nothing besides the phone number (at most a short name/greeting)
+            # → implicit contact request — they are leaving their number for callback
+            extracted['contact_requested'] = True
+            logger.info("[PHONE-PRIMARY] Phone-only message detected → contact_requested=True")
+
     # ── Showroom requested ────────────────────────────────────────────────────
     if re.search(
         r'לבוא לאולם|לבקר|לבוא אליכם|לקבוע פגישה|ביקור באולם|מתי אפשר לבוא'
@@ -1366,22 +1381,62 @@ def _decide_next_action(state: dict) -> NextAction:
     try:
         active = state.get("active_topics") or []
 
+        # ── contact_requested shortcut ────────────────────────────────────────
+        # When customer explicitly asked to be contacted (or sent just a phone
+        # number), skip ALL product questions and go straight to contact collection.
+        # This fires before the topic-detection check so phone-primary messages
+        # (no active topics) don't get bounced to ask_topic_clarification.
+        if state.get("contact_requested"):
+            _any_contact_known = bool(state.get("phone") or state.get("full_name") or state.get("city"))
+            if _any_contact_known and not state.get("stage4_opener_sent"):
+                state["stage4_opener_sent"] = True  # skip opener; already have some contact info
+            if not state.get("stage4_opener_sent"):
+                return NextAction(4, "contact_opener", "contact_opener", True,
+                                  "customer requested contact — skip product questions")
+            # Opener already sent (or skipped) — collect remaining contact fields
+            if not state.get("phone"):
+                return NextAction(4, "phone", "ask_phone", False,
+                                  "contact_requested: ask phone")
+            if not state.get("full_name"):
+                return NextAction(4, "full_name", "ask_name", False,
+                                  "contact_requested: ask name")
+            if not state.get("city"):
+                return NextAction(4, "city", "ask_city", False,
+                                  "contact_requested: ask city")
+            # All contact fields collected → farewell
+            if not state.get("handoff_to_human"):
+                state["handoff_to_human"] = True
+            return NextAction(7, "farewell", "_farewell_dynamic", True,
+                              "contact_requested: all fields collected → farewell")
+
         # ── Stage 2: topic qualification ──────────────────────────────────────
         if not active:
             # No topics detected yet
             return NextAction(2, "topic_detection", "ask_topic_clarification", False,
                               "no topics detected — ask what type of door they need")
 
-        # ── contact_requested shortcut ────────────────────────────────────────
-        # When customer explicitly asked to be called/contacted AND topic is known,
-        # skip all remaining product questions and go straight to contact collection.
-        if state.get("contact_requested") and not state.get("phone"):
-            _any_contact_known = bool(state.get("phone") or state.get("full_name") or state.get("city"))
-            if _any_contact_known and not state.get("stage4_opener_sent"):
-                state["stage4_opener_sent"] = True
-            if not state.get("stage4_opener_sent"):
-                return NextAction(4, "contact_opener", "contact_opener", True,
-                                  "customer requested contact — skip product questions")
+        # ── Stage 4 lock-in guard ─────────────────────────────────────────────
+        # Once the contact opener was truly sent to the customer (evidenced by
+        # "_stage4_committed" — set in _advance_stage ONLY via history scan,
+        # NOT via the auto-skip guard for early contact fields), we are committed
+        # to Stage 4 and must NEVER bounce back to product questions.
+        # This prevents a spurious topic added retroactively (e.g. interior_doors
+        # via Claude hallucination in detected_new_topics) from interrupting
+        # contact collection mid-flow.
+        if state.get("_stage4_committed"):
+            # Already mid-Stage 4 — skip topic queue entirely, go straight to
+            # collecting remaining contact fields (then farewell).
+            if not state.get("phone"):
+                return NextAction(4, "phone", "ask_phone", False, "stage4-locked: ask phone")
+            if not state.get("full_name"):
+                return NextAction(4, "full_name", "ask_name", False, "stage4-locked: ask name")
+            if not state.get("city"):
+                return NextAction(4, "city", "ask_city", False, "stage4-locked: ask city")
+            # All contact fields collected → farewell
+            if not state.get("handoff_to_human"):
+                state["handoff_to_human"] = True
+            return NextAction(7, "farewell", "_farewell_dynamic", True,
+                              "stage4-locked: all contact fields collected → farewell")
 
         # Always recompute current_topic fresh — never rely solely on the cached
         # current_active_topic value, which may be stale if topics were added to
@@ -1502,11 +1557,34 @@ def _advance_stage(state: dict, history: list[dict]) -> None:
     # "אשמח לשם" is the common prefix in ALL opener variants:
     #   standard:  "אשמח לשם, עיר ומספר טלפון"
     #   showroom:  "אשמח לשם מלא, עיר ומספר טלפון"
+    _opener_in_history = False
     if not state.get("stage4_opener_sent"):
         for m in history:
             if m.get("role") == "assistant" and "אשמח לשם" in m.get("content", ""):
                 state["stage4_opener_sent"] = True
+                _opener_in_history = True
                 break
+
+    # _stage4_committed — set when Stage 4 contact collection is genuinely in
+    # progress (not just "opener auto-skipped because contact was given early").
+    # Used by _decide_next_action's Stage-4 lock-in guard to prevent spurious
+    # topics from interrupting mid-collection flow.
+    # Set when:
+    #   (a) opener found in history ("אשמח לשם") — normal path, OR
+    #   (b) opener auto-skipped (Claude paraphrased) AND contact fields are known
+    #       but ONLY if the current_active_topic queue is already done (all topics
+    #       complete).  This prevents locking in when contact was given very early.
+    if not state.get("_stage4_committed"):
+        if _opener_in_history:
+            # Opener was sent → definitively in Stage 4
+            state["_stage4_committed"] = True
+        elif (
+            state.get("stage4_opener_sent")
+            and bool(state.get("phone") or state.get("full_name") or state.get("city"))
+            and _compute_current_topic(state) is None  # all topics complete
+        ):
+            # Opener was skipped/paraphrased but topics are done → in Stage 4
+            state["_stage4_committed"] = True
 
     # Contact-field guard: if any contact field is already known, the opener is
     # functionally done — the customer has already provided information.
@@ -2246,8 +2324,26 @@ def _parse_fallback(reply_text: str) -> dict:
     }
 
 
-def _extract_claude_fields(structured: dict) -> dict:
-    """Map Claude's extracted_* fields to state field names."""
+def _extract_claude_fields(structured: dict, user_message: str = "") -> dict:
+    """Map Claude's extracted_* fields to state field names.
+
+    Critical: Claude's extractions are validated against the actual customer
+    message using Python regex before being accepted into state.  This prevents
+    Claude hallucinations (e.g. inventing 'interior_doors' in detected_new_topics)
+    from corrupting the state machine.
+
+    Rules:
+      • detected_new_topics  — accepted ONLY if Python's regex also detects the
+        topic in user_message.  If Claude reports a topic that regex doesn't find,
+        it is silently dropped and logged.
+      • extracted_interior_* — accepted only when interior_doors is a plausible
+        topic (i.e. user_message doesn't exclusively reference entrance/mamad).
+      • extracted_entrance_*  — accepted only when entrance context is plausible.
+      • Contact fields (name/phone/city) — always accepted; no validation needed
+        since Python regex already handles these in the primary extraction pass.
+    """
+    _msg = user_message  # shorthand
+
     mapping = {
         "extracted_full_name":             "full_name",
         "extracted_phone":                 "phone",
@@ -2270,9 +2366,51 @@ def _extract_claude_fields(structured: dict) -> dict:
         if val is not None:
             fields[state_key] = val
 
+    # ── detected_new_topics validation ────────────────────────────────────────
+    # Only accept a topic if Python regex ALSO detects it in the customer's
+    # message.  This eliminates spurious topic additions from Claude hallucination.
     new_topics = structured.get("detected_new_topics") or []
+    if new_topics and _msg:
+        regex_topics = set(_detect_topics_from_message(_msg))
+        validated: list[str] = []
+        for t in new_topics:
+            if t in regex_topics:
+                validated.append(t)
+            else:
+                logger.warning(
+                    "[CLAUDE:TOPIC_REJECTED] Claude reported topic %r but regex "
+                    "found no evidence in message %r — dropping",
+                    t, _msg[:80],
+                )
+        new_topics = validated
     if new_topics:
         fields["_new_topics"] = new_topics
+
+    # ── interior_project_type validation ─────────────────────────────────────
+    # Only accept if the customer's message actually contains project-type keywords.
+    # This prevents Claude from guessing "renovation" or "new" when none was mentioned.
+    if "interior_project_type" in fields and _msg:
+        _proj_keywords = re.compile(
+            r'בית חדש|דירה חדשה|נכס חדש|בנייה חדשה|בניה חדשה|פרויקט חדש'
+            r'|שיפוץ|משפצים|שיפוצים|אחרי שיפוץ'
+            r'|החלפה|להחליף|מחליף|מחליפה|מחליפים|דלת ישנה|קיימות|ישנות|דלתות ישנות',
+            re.IGNORECASE,
+        )
+        if not _proj_keywords.search(_msg):
+            logger.warning(
+                "[CLAUDE:PROJ_TYPE_REJECTED] Claude set interior_project_type=%r "
+                "but no project-type keywords in message %r — dropping",
+                fields["interior_project_type"], _msg[:80],
+            )
+            del fields["interior_project_type"]
+
+    # ── mamad_type validation ─────────────────────────────────────────────────
+    if "mamad_type" in fields and _msg:
+        _mamad_kw = re.compile(r'ממ.?ד חדש|מרחב מוגן חדש|ממ.?ד קיים|להחליף.*ממ.?ד', re.IGNORECASE)
+        if not _mamad_kw.search(_msg):
+            logger.warning("[CLAUDE:MAMAD_TYPE_REJECTED] dropped mamad_type=%r | msg=%r",
+                           fields["mamad_type"], _msg[:80])
+            del fields["mamad_type"]
 
     if structured.get("extracted_showroom_requested"):
         fields["showroom_requested"] = True
@@ -2780,7 +2918,8 @@ async def get_reply(
     )
 
     # ── Merge Claude's extracted fields into state ─────────────────────────────
-    claude_fields = _extract_claude_fields(structured)
+    # Pass user_message so topic extractions can be validated against regex.
+    claude_fields = _extract_claude_fields(structured, user_message=user_message)
     state = _merge_state(state, claude_fields)
     _conv_state[sender] = state
 

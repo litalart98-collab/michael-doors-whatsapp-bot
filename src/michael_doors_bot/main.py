@@ -99,6 +99,7 @@ _SESSIONS_FILE        = _DATA_DIR / "sessions.json"
 _DEDUP_FILE           = _DATA_DIR / "dedup_ids.json"         # persisted dedup cache
 _FOLLOWUP_FILE        = _DATA_DIR / "followup_state.json"    # persisted follow-up timers
 _PRE_EXISTING_FILE    = _DATA_DIR / "pre_existing_contacts.json"  # human chats before bot
+_TAKEOVER_FILE        = _DATA_DIR / "human_takeover.json"    # persisted human-takeover set
 
 SESSION_TIMEOUT       = 30 * 60  # seconds
 FOLLOWUP_DELAY        = 30 * 60  # 30 min silence → send follow-up
@@ -420,6 +421,65 @@ except FileNotFoundError:
     pass  # first boot — will be populated in _lifespan
 except Exception as e:
     logger.warning("[BOOT] Could not load pre-existing contacts: %s", e)
+
+
+# ── Human takeover (persistent) ──────────────────────────────────────────────
+# Customer numbers currently under human (owner) control.
+# While a sender is in this set the bot stays completely silent — no reply,
+# no follow-up, no Sheets write.  The owner communicates directly via the
+# business WhatsApp (WhatsApp Web / another connected device).
+#
+# Populated automatically when Green API fires outgoingMessageReceived
+# (owner sent a manual message to that customer).
+# Cleared when owner sends  "#בוט <phone>"  from their personal number.
+# Persisted to _TAKEOVER_FILE so it survives server restarts.
+_human_takeover: set[str] = set()
+try:
+    _human_takeover = set(
+        json.loads(_TAKEOVER_FILE.read_text(encoding="utf-8"))
+    )
+    logger.info("[BOOT] Human-takeover list loaded: %d sender(s)", len(_human_takeover))
+except FileNotFoundError:
+    pass
+except Exception as e:
+    logger.warning("[BOOT] Could not load human_takeover file: %s", e)
+
+
+def _takeover_save() -> None:
+    """Persist the human_takeover set to disk."""
+    try:
+        _TAKEOVER_FILE.write_text(
+            json.dumps(sorted(_human_takeover), ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("[TAKEOVER] Could not save human_takeover file: %s", e)
+
+
+def _takeover_activate(customer: str) -> None:
+    """Put a customer under human control — bot goes silent."""
+    if customer not in _human_takeover:
+        _human_takeover.add(customer)
+        _takeover_save()
+        logger.info("[TAKEOVER:ON] Bot silenced for %s — owner took over", customer)
+
+
+def _takeover_release(customer: str) -> None:
+    """Release a customer back to bot control."""
+    if customer in _human_takeover:
+        _human_takeover.discard(customer)
+        _takeover_save()
+        logger.info("[TAKEOVER:OFF] Bot resumed for %s", customer)
+
+
+def _normalize_to_chat_id(raw: str) -> str:
+    """Normalize a phone number string to WhatsApp chatId format (972XXXXXXXXX@c.us)."""
+    p = raw.strip().replace("-", "").replace("+", "").replace("@c.us", "").replace(" ", "")
+    if p.startswith("0"):
+        p = "972" + p[1:]
+    if p and not p.startswith("972"):
+        p = "972" + p
+    return p + "@c.us" if p else ""
 
 
 # ── Manual blocklist ─────────────────────────────────────────────────────────
@@ -1347,7 +1407,94 @@ async def _flush_pending(sender: str) -> None:
     await _process_message(sender, combined)
 
 
+async def _handle_owner_command(sender: str, text: str) -> None:
+    """
+    Handle admin commands from the business owner's personal phone.
+    Called when an incoming message arrives from config.OWNER_PHONE.
+
+    Supported commands (case-insensitive, no # required):
+      בוט הכל          — release ALL customers back to bot
+      בוט <phone>       — release one customer (e.g. "בוט 0501234567")
+      סטטוס             — list all customers currently under human takeover
+    """
+    t = text.strip()
+
+    # ── Release ALL customers back to bot ─────────────────────────────────────
+    if re.match(r'^(?:#?בוט|#?bot)\s+(?:הכל|all)$', t, re.IGNORECASE):
+        count = len(_human_takeover)
+        if count == 0:
+            await green.send_message(sender, "ℹ️ אין שיחות במצב השתלטות — הבוט כבר פעיל בכולן.")
+        else:
+            _human_takeover.clear()
+            _takeover_save()
+            logger.info("[TAKEOVER:RELEASE_ALL] Owner released all %d takeovers", count)
+            await green.send_message(
+                sender,
+                f"✅ הבוט חזר לפעול בכל {count} השיחות.\n"
+                f"לקוחות יקבלו מענה אוטומטי מהפנייה הבאה שלהם."
+            )
+        return
+
+    # ── Release a specific customer back to bot ───────────────────────────────
+    release_match = re.search(
+        r'^#?(?:בוט|bot)\s+([\d\s\-\+]+)$',
+        t, re.IGNORECASE,
+    )
+    if release_match:
+        raw_phone = release_match.group(1).strip()
+        chat_id   = _normalize_to_chat_id(raw_phone)
+        if not chat_id:
+            await green.send_message(sender, "❌ מספר לא תקין. דוגמה: בוט 0501234567")
+            return
+        if chat_id in _human_takeover:
+            _takeover_release(chat_id)
+            await green.send_message(
+                sender,
+                f"✅ הבוט חזר לפעול עם {raw_phone}\n"
+                f"הלקוח יקבל מענה אוטומטי מהפנייה הבאה שלו."
+            )
+        else:
+            await green.send_message(
+                sender,
+                f"ℹ️ {raw_phone} לא היה במצב השתלטות — הבוט כבר פעיל."
+            )
+        return
+
+    # ── Status: list all active takeovers ─────────────────────────────────────
+    if re.match(r'^#?(?:סטטוס|status)$', t, re.IGNORECASE):
+        if not _human_takeover:
+            await green.send_message(sender, "ℹ️ אין כרגע שיחות במצב השתלטות אנושית.")
+        else:
+            lines = ["📋 שיחות תחת שליטה אנושית כרגע:"]
+            for chat in sorted(_human_takeover):
+                num = chat.replace("@c.us", "")
+                lines.append(f"  • {num}")
+            lines.append("\nלשחרר הכל: בוט הכל\nלשחרר אחד: בוט <מספר>")
+            await green.send_message(sender, "\n".join(lines))
+        return
+
+    # ── Unknown command — show help ────────────────────────────────────────────
+    await green.send_message(
+        sender,
+        "🤖 פקודות זמינות:\n"
+        "  בוט הכל         — החזר את הבוט לכל השיחות\n"
+        "  בוט 0501234567  — החזר לקוח ספציפי לבוט\n"
+        "  סטטוס           — רשימת שיחות בשליטה אנושית"
+    )
+
+
 async def _process_message(sender: str, text: str) -> None:
+    # ── Owner personal phone → admin commands only ────────────────────────────
+    if config.OWNER_PHONE and sender == config.OWNER_PHONE:
+        await _handle_owner_command(sender, text)
+        return
+
+    # ── Human takeover — bot stays completely silent ───────────────────────────
+    if sender in _human_takeover:
+        logger.info("[TAKEOVER] Bot silent — human in control | sender=%s | text=%s",
+                    sender, text[:60])
+        return
+
     # Manual blocklist — silently ignore without any reply
     if _is_blocked(sender):
         logger.info("[BOT:BLOCKED_MANUAL] Silently ignoring blocked sender | sender=%s", sender)
@@ -1423,6 +1570,20 @@ async def _process_message(sender: str, text: str) -> None:
                 return
 
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
+
+            # ── Pre-send takeover check ──────────────────────────────────────
+            # Claude API takes 3-10 seconds. The business owner may have sent a
+            # manual reply to this customer DURING that processing time, which
+            # triggered outgoingMessageReceived and added sender to _human_takeover.
+            # Check here — AFTER Claude but BEFORE sending — so the bot silently
+            # discards its prepared response if the owner beat it.
+            if sender in _human_takeover:
+                logger.info(
+                    "[TAKEOVER:PRESEND] Owner intervened during Claude processing "
+                    "— discarding bot reply | sender=%s", sender,
+                )
+                return
+
             lead = _record_lead(sender, text, result, config.TEST_MODE)
             await _maybe_send_to_sheets(lead, result, config.TEST_MODE)
             await upsert_lead(lead)
@@ -1532,7 +1693,27 @@ async def _poll_loop() -> None:
             receipt_id = notification.get("receiptId")
             body = notification.get("body", {})
 
-            if body.get("typeWebhook") == "incomingMessageReceived":
+            poll_type = body.get("typeWebhook", "")
+
+            # Owner manual reply → activate human takeover (poll mode)
+            if poll_type == "outgoingMessageReceived":
+                # Try all known field locations for the recipient chat ID
+                customer_chat = (
+                    body.get("chatId")
+                    or body.get("senderData", {}).get("chatId")
+                    or body.get("messageData", {}).get("chatId")
+                    or ""
+                )
+                logger.info(
+                    "[TAKEOVER:OUTGOING] outgoingMessageReceived detected | "
+                    "chatId=%s | body_keys=%s",
+                    customer_chat, list(body.keys()),
+                )
+                if customer_chat and _is_individual_chat(customer_chat):
+                    _takeover_activate(customer_chat)
+                    logger.info("[TAKEOVER:AUTO] Poll — owner manual msg to %s → bot silenced", customer_chat)
+
+            if poll_type == "incomingMessageReceived":
                 sender   = body.get("senderData", {}).get("chatId", "")
                 msg_data = body.get("messageData", {})
                 msg_id   = body.get("idMessage", "")
@@ -1661,6 +1842,15 @@ async def _lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("[BOOT] Could not fetch pre-existing contacts: %s — no contacts blocked", exc)
 
+    # ── Enable outgoing webhook for human-takeover feature ────────────────────
+    # Green API must fire outgoingMessageReceived when owner sends manually.
+    # outgoingAPIMessageWebhook is disabled so bot API sends don't trigger takeover.
+    if config.OWNER_PHONE:
+        await green.enable_outgoing_webhook()
+        logger.info("[BOOT] Human-takeover ready | OWNER_PHONE=%s", config.OWNER_PHONE)
+    else:
+        logger.info("[BOOT] OWNER_PHONE not set — human-takeover disabled")
+
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     # Follow-up reminders disabled — bot does not send "still here?" messages.
     # _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
@@ -1686,6 +1876,22 @@ async def health():
         "test_mode": config.TEST_MODE,
         "admin_secret_set": bool(config.ADMIN_SECRET),
         "admin_secret_len": len(config.ADMIN_SECRET),
+        "owner_phone_set": bool(config.OWNER_PHONE),
+        "human_takeover_active": sorted(_human_takeover),
+    }
+
+
+@app.get("/takeover-status", response_class=JSONResponse)
+async def takeover_status(admin: str = Query(default="")):
+    """Show human-takeover state and Green API outgoing webhook setting."""
+    if config.ADMIN_SECRET and admin != config.ADMIN_SECRET:
+        return JSONResponse({"ok": False}, status_code=403)
+    settings = await green.get_settings()
+    return {
+        "human_takeover_active": sorted(_human_takeover),
+        "owner_phone_configured": config.OWNER_PHONE or "(not set)",
+        "green_api_outgoing_webhook": settings.get("outgoingWebhook", "(unknown)"),
+        "green_api_outgoing_api_webhook": settings.get("outgoingAPIMessageWebhook", "(unknown)"),
     }
 
 
@@ -1703,9 +1909,30 @@ async def webhook(request: Request, token: str = Query(default="")):
     except Exception:
         return JSONResponse({"ok": False}, status_code=400)
 
-    logger.info("Webhook received: typeWebhook=%s", body.get("typeWebhook"))
+    webhook_type = body.get("typeWebhook", "")
+    logger.info("Webhook received: typeWebhook=%s", webhook_type)
 
-    if body.get("typeWebhook") != "incomingMessageReceived":
+    # ── Owner manual reply → activate human takeover ─────────────────────────
+    # Green API fires outgoingMessageReceived when the owner sends a message
+    # MANUALLY from the business WhatsApp (WhatsApp Web / connected device),
+    # as opposed to outgoingAPIMessageReceived which is fired for bot API sends.
+    if webhook_type == "outgoingMessageReceived":
+        customer_chat = (
+            body.get("chatId")
+            or body.get("senderData", {}).get("chatId")
+            or body.get("messageData", {}).get("chatId")
+            or ""
+        )
+        logger.info(
+            "[TAKEOVER:OUTGOING] outgoingMessageReceived | chatId=%s | body_keys=%s",
+            customer_chat, list(body.keys()),
+        )
+        if customer_chat and _is_individual_chat(customer_chat):
+            _takeover_activate(customer_chat)
+            logger.info("[TAKEOVER:AUTO] Owner manual msg to %s — bot silenced", customer_chat)
+        return JSONResponse({"ok": True})
+
+    if webhook_type != "incomingMessageReceived":
         return JSONResponse({"ok": True})
 
     sender   = body.get("senderData", {}).get("chatId", "")

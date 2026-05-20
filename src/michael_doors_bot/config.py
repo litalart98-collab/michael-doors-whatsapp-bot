@@ -49,6 +49,21 @@ DATA_DIR: str = os.getenv("DATA_DIR", "")
 # STRONGLY RECOMMENDED — without it, anyone can read all customer conversation data.
 ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "").strip()
 
+# Business owner's personal phone number (NOT the bot's WhatsApp number).
+# Used for two purposes:
+#   1. Incoming messages from this number are treated as admin commands (e.g. "#בוט 0501234567")
+#   2. When the owner manually replies to a customer from the business WhatsApp,
+#      Green API fires outgoingMessageReceived — the bot detects this and freezes
+#      that customer's conversation (human takeover mode).
+# Format: Israeli number without + or dashes, e.g. "972541234567"
+def _normalize_phone(raw: str) -> str:
+    p = raw.strip().replace("-", "").replace("+", "").replace("@c.us", "")
+    if p.startswith("0"):
+        p = "972" + p[1:]
+    return (p + "@c.us") if p else ""
+
+OWNER_PHONE: str = _normalize_phone(os.getenv("OWNER_PHONE", ""))
+
 # Comma-separated phone numbers that bypass business-hours check (e.g. for testing).
 # Format: "972501234567,972509876543"  (no @c.us suffix needed — normalised below)
 def _parse_bypass_phones(raw: str) -> set[str]:
