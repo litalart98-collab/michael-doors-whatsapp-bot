@@ -1541,8 +1541,18 @@ async def _process_message(sender: str, text: str) -> None:
                     break
             # Fix 7: suppress closing intent if the bot's last message was a question
             # (covers "הכל נכון?", "מה מספרך?", "מתי נוח?", etc.)
+            # Exception: holiday/explicit farewells bypass this suppression even after a question.
+            # "תודה אני אברר חג שמח" / "שבוע טוב" / "שנה טובה" etc. are unambiguous closings.
+            import re as _re
+            _HOLIDAY_FAREWELL_RE = _re.compile(
+                r'חג\s+שמח|שנה\s+טובה|שבוע\s+טוב|לילה\s+טוב|יום\s+טוב',
+                _re.IGNORECASE,
+            )
             bot_last_is_question = "?" in last_bot_msg
-            if is_closing_intent(text, conv_turns) and not bot_last_is_question:
+            _is_holiday_farewell = bool(_HOLIDAY_FAREWELL_RE.search(text))
+            # Holiday farewells bypass the "?" suppression — they're always unambiguous
+            _suppress_closing = bot_last_is_question and not _is_holiday_farewell
+            if is_closing_intent(text, conv_turns) and not _suppress_closing:
                 stripped_text = text.strip()
                 if _is_already_handled_intent(stripped_text):
                     close_reason = "handled"
