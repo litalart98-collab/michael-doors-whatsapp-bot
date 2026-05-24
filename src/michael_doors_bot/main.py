@@ -360,11 +360,14 @@ _FAREWELL_TEXTS: frozenset[str] = frozenset({
 _MAX_MSG_CHARS = 2000
 
 # ── Message debounce / batching ───────────────────────────────────────────────
-# When a customer sends 2–3 messages in quick succession, we wait DEBOUNCE_WINDOW
-# seconds after the LAST message before processing anything.  All buffered texts
-# are joined (newline-separated) into a single logical input, so the bot replies
-# once with full context instead of fragmented partial answers.
-DEBOUNCE_WINDOW: float = 3.0   # seconds to wait after the last message
+# Owner-intercept window: after receiving a customer message the bot waits this
+# many seconds before responding.  During this window the business owner can send
+# a manual reply from the business WhatsApp — Green API fires outgoingMessageReceived,
+# the bot cancels the pending task and activates human-takeover for that customer.
+# Multiple messages from the same customer within the window are accumulated and
+# processed together (the timer resets on each new message so the full context
+# is always available when the bot finally responds).
+DEBOUNCE_WINDOW: float = 120.0   # 2-minute owner-intercept window
 
 _pending_messages: dict[str, list[str]] = {}   # sender → buffered texts
 _debounce_tasks:   dict[str, asyncio.Task] = {} # sender → active sleep task
@@ -457,7 +460,19 @@ def _takeover_save() -> None:
 
 
 def _takeover_activate(customer: str) -> None:
-    """Put a customer under human control — bot goes silent."""
+    """Put a customer under human control — bot goes silent.
+
+    Also cancels any pending debounce task so the bot never sends a buffered
+    reply AFTER the owner has already taken over the conversation.
+    """
+    # Cancel any buffered response that hasn't fired yet
+    pending_task = _debounce_tasks.get(customer)
+    if pending_task and not pending_task.done():
+        pending_task.cancel()
+        _debounce_tasks.pop(customer, None)
+        _pending_messages.pop(customer, None)
+        logger.info("[TAKEOVER:CANCEL_PENDING] Cancelled buffered bot reply for %s", customer)
+
     if customer not in _human_takeover:
         _human_takeover.add(customer)
         _takeover_save()
@@ -1397,6 +1412,16 @@ async def _flush_pending(sender: str) -> None:
     parts = _pending_messages.pop(sender, [])
     if not parts:
         return
+
+    # Safety net: if the owner sent a manual reply during the 2-minute window
+    # and triggered human-takeover, discard the buffered bot reply.
+    if sender in _human_takeover:
+        logger.info(
+            "[DEBOUNCE:SKIP] sender=%s — owner took over during window, discarding %d buffered msg(s)",
+            sender, len(parts),
+        )
+        return
+
     combined = "\n".join(parts)
     if len(parts) > 1:
         logger.info(
