@@ -1650,20 +1650,47 @@ async def _process_message(sender: str, text: str) -> None:
                     _queue_send_retry(sender, closing_msg)
                 return
 
+            _claude_call_start = time.time()
             result = await get_reply(sender, text, config.ANTHROPIC_API_KEY)
 
-            # ── Pre-send takeover check ──────────────────────────────────────
-            # Claude API takes 3-10 seconds. The business owner may have sent a
-            # manual reply to this customer DURING that processing time, which
-            # triggered outgoingMessageReceived and added sender to _human_takeover.
-            # Check here — AFTER Claude but BEFORE sending — so the bot silently
-            # discards its prepared response if the owner beat it.
+            # ── Pre-send takeover checks (two layers) ────────────────────────
+            # Layer A — fast: webhook/poll already activated takeover in _human_takeover
             if sender in _human_takeover:
                 logger.info(
-                    "[TAKEOVER:PRESEND] Owner intervened during Claude processing "
+                    "[TAKEOVER:PRESEND_A] outgoingMessageReceived fired during Claude "
                     "— discarding bot reply | sender=%s", sender,
                 )
                 return
+
+            # Layer B — authoritative: query getChatHistory for manual owner messages
+            # sent during Claude's processing time (typically 5-15 s).
+            # sendByApi=False means the owner sent directly from phone / WhatsApp Web,
+            # not through Green API's API.  We look back 90 s to cover the full
+            # window from the last _flush_pending check through now.
+            try:
+                _presend_history = await green.get_chat_history(sender, count=10)
+                _presend_owner = next(
+                    (
+                        m for m in _presend_history
+                        if m.get("type") == "outgoing"
+                        and not m.get("sendByApi", True)
+                        and int(m.get("timestamp", 0)) >= int(_claude_call_start) - 90
+                    ),
+                    None,
+                )
+                if _presend_owner:
+                    logger.info(
+                        "[TAKEOVER:PRESEND_B] Manual owner message detected in history "
+                        "(ts=%s) — discarding bot reply | sender=%s",
+                        _presend_owner.get("timestamp"), sender,
+                    )
+                    _takeover_activate(sender)
+                    return
+            except Exception as _presend_exc:
+                logger.warning(
+                    "[TAKEOVER:PRESEND_B_ERR] getChatHistory failed — sending anyway "
+                    "| sender=%s | %s", sender, _presend_exc,
+                )
 
             lead = _record_lead(sender, text, result, config.TEST_MODE)
             await _maybe_send_to_sheets(lead, result, config.TEST_MODE)
