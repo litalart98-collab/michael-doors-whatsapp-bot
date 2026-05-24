@@ -369,8 +369,9 @@ _MAX_MSG_CHARS = 2000
 # is always available when the bot finally responds).
 DEBOUNCE_WINDOW: float = 120.0   # 2-minute owner-intercept window
 
-_pending_messages: dict[str, list[str]] = {}   # sender → buffered texts
-_debounce_tasks:   dict[str, asyncio.Task] = {} # sender → active sleep task
+_pending_messages:    dict[str, list[str]]    = {}   # sender → buffered texts
+_debounce_tasks:      dict[str, asyncio.Task] = {}   # sender → active sleep task
+_message_batch_start: dict[str, float]        = {}   # sender → unix time of first msg in current batch
 
 # ── Diagnostics — error tracking ──────────────────────────────────────────────
 _recent_errors: deque = deque(maxlen=50)  # last 50 error events
@@ -1388,6 +1389,9 @@ def _schedule_debounced(sender: str, text: str) -> None:
     existing = _debounce_tasks.get(sender)
     if existing and not existing.done():
         existing.cancel()
+    else:
+        # First message in this batch — record start time for history check
+        _message_batch_start[sender] = time.time()
 
     task = asyncio.create_task(_debounce_wrapper(sender))
     _debounce_tasks[sender] = task
@@ -1421,6 +1425,30 @@ async def _flush_pending(sender: str) -> None:
             sender, len(parts),
         )
         return
+
+    # ── Owner-active check via chat history ──────────────────────────────────
+    # Directly query Green API for recent outgoing messages sent manually
+    # (sendByApi=False). This is more reliable than webhook timing — we check
+    # the actual state of the conversation RIGHT BEFORE responding.
+    _batch_start = _message_batch_start.pop(sender, time.time() - DEBOUNCE_WINDOW)
+    try:
+        _history = await green.get_chat_history(sender, count=15)
+        _owner_active = any(
+            m.get("type") == "outgoing"
+            and not m.get("sendByApi", True)   # False = manual, not API
+            and int(m.get("timestamp", 0)) >= int(_batch_start)
+            for m in _history
+        )
+        if _owner_active:
+            logger.info(
+                "[FLUSH:OWNER_ACTIVE] Manual owner message found in chat history "
+                "— activating takeover, discarding bot reply | sender=%s",
+                sender,
+            )
+            _takeover_activate(sender)
+            return
+    except Exception as _hist_exc:
+        logger.warning("[FLUSH:HIST_ERR] getChatHistory failed — proceeding without owner check | sender=%s | %s", sender, _hist_exc)
 
     combined = "\n".join(parts)
     if len(parts) > 1:

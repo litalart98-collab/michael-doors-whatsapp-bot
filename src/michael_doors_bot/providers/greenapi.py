@@ -120,6 +120,24 @@ class GreenAPIClient:
             logger.warning("[GREEN-API] getSettings failed: %s", exc)
             return {}
 
+    async def get_chat_history(self, chat_id: str, count: int = 15) -> list[dict]:
+        """Return recent messages for a chat. Each message has:
+          type: 'outgoing'/'incoming'
+          sendByApi: bool (False = manual owner send, True = API/bot send)
+          timestamp: unix int
+        Returns empty list on failure (non-fatal).
+        """
+        url = f"{self._base}/getChatHistory/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(url, json={"chatId": chat_id, "count": count})
+                r.raise_for_status()
+                data = r.json()
+                return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.warning("Green-API getChatHistory failed | chatId=%s | %s", chat_id, exc)
+            return []
+
     async def get_contact_name(self, chat_id: str) -> str:
         """Return the WhatsApp display name for a contact, or empty string on failure."""
         url = f"{self._base}/getContactInfo/{self._token}"
