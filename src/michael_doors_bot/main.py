@@ -1427,28 +1427,41 @@ async def _flush_pending(sender: str) -> None:
         return
 
     # ── Owner-active check via chat history ──────────────────────────────────
-    # Directly query Green API for recent outgoing messages sent manually
-    # (sendByApi=False). This is more reliable than webhook timing — we check
-    # the actual state of the conversation RIGHT BEFORE responding.
-    _batch_start = _message_batch_start.pop(sender, time.time() - DEBOUNCE_WINDOW)
+    # Query Green API for outgoing messages sent MANUALLY (not via API) from
+    # the business number.  sendByApi=False means the owner sent it directly
+    # from their phone or WhatsApp Web — NOT through Green API's API.
+    #
+    # We look back 30 minutes so we catch:
+    #   • Owner messages sent BEFORE the customer replied (proactive outreach)
+    #   • Owner messages sent DURING the 2-minute window (interception)
+    # Any manual send in that window = human is managing → bot stays silent.
+    _message_batch_start.pop(sender, None)   # clean up; not used for timestamp
+    _OWNER_LOOKBACK = 30 * 60               # 30 minutes in seconds
+    _check_since = time.time() - _OWNER_LOOKBACK
     try:
-        _history = await green.get_chat_history(sender, count=15)
-        _owner_active = any(
-            m.get("type") == "outgoing"
-            and not m.get("sendByApi", True)   # False = manual, not API
-            and int(m.get("timestamp", 0)) >= int(_batch_start)
-            for m in _history
+        _history = await green.get_chat_history(sender, count=20)
+        _owner_msg = next(
+            (
+                m for m in _history
+                if m.get("type") == "outgoing"
+                and not m.get("sendByApi", True)   # False = manual (phone/WhatsApp Web)
+                and int(m.get("timestamp", 0)) >= int(_check_since)
+            ),
+            None,
         )
-        if _owner_active:
+        if _owner_msg:
             logger.info(
-                "[FLUSH:OWNER_ACTIVE] Manual owner message found in chat history "
-                "— activating takeover, discarding bot reply | sender=%s",
-                sender,
+                "[FLUSH:OWNER_ACTIVE] Manual owner message detected (sendByApi=False) "
+                "at ts=%s — activating takeover, discarding bot reply | sender=%s",
+                _owner_msg.get("timestamp"), sender,
             )
             _takeover_activate(sender)
             return
     except Exception as _hist_exc:
-        logger.warning("[FLUSH:HIST_ERR] getChatHistory failed — proceeding without owner check | sender=%s | %s", sender, _hist_exc)
+        logger.warning(
+            "[FLUSH:HIST_ERR] getChatHistory failed — proceeding without owner check "
+            "| sender=%s | %s", sender, _hist_exc,
+        )
 
     combined = "\n".join(parts)
     if len(parts) > 1:
