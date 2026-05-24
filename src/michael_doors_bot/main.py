@@ -1479,7 +1479,9 @@ async def _handle_owner_command(sender: str, text: str) -> None:
         "🤖 פקודות זמינות:\n"
         "  בוט הכל         — החזר את הבוט לכל השיחות\n"
         "  בוט 0501234567  — החזר לקוח ספציפי לבוט\n"
-        "  סטטוס           — רשימת שיחות בשליטה אנושית"
+        "  סטטוס           — רשימת שיחות שהבוט שותק בהן\n\n"
+        "ℹ️ הבוט נשתק אוטומטית גם כשמסיים שיחה עם לקוח.\n"
+        "כדי שיחזור לענות ללקוח ספציפי: בוט <מספר>"
     )
 
 
@@ -1573,6 +1575,9 @@ async def _process_message(sender: str, text: str) -> None:
                     }
                     _save_followup()
                     await _attach_summary(sender, "סגירה בידידות", config.TEST_MODE)
+                    # Silence the bot after farewell — owner takes over from here.
+                    _takeover_activate(sender)
+                    logger.info("[TAKEOVER:AUTO] Bot silenced after closing message | sender=%s", sender)
                 except Exception as send_err:
                     _record_error("send_fail", sender, str(send_err))
                     logger.error("[BOT:SEND_FAIL] Closing send failed | sender=%s | %s", sender, send_err)
@@ -1671,6 +1676,17 @@ async def _process_message(sender: str, text: str) -> None:
                         "closed": True,
                     }
                 _save_followup()
+
+                # ── Auto-takeover after farewell/handoff ─────────────────────
+                # Once the bot sends a farewell (handoff_to_human=True), the human
+                # rep takes over. Activate takeover immediately so the bot stays
+                # silent if the customer replies with "תודה" or any follow-up.
+                # Owner re-activates the bot with "בוט <number>" if needed.
+                if result.get("handoff_to_human") and _is_individual_chat(sender):
+                    _takeover_activate(sender)
+                    logger.info(
+                        "[TAKEOVER:AUTO] Bot silenced after farewell | sender=%s", sender
+                    )
             else:
                 _followup_mark_bot_replied(sender)
         except Exception as exc:
