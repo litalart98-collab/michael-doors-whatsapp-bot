@@ -1748,21 +1748,27 @@ async def _poll_loop() -> None:
 
             # Owner manual reply → activate human takeover (poll mode)
             if poll_type == "outgoingMessageReceived":
-                # Try all known field locations for the recipient chat ID
+                # Try all known field locations for the recipient chat ID.
+                # Log the full senderData so we can spot format mismatches.
+                _sender_data = body.get("senderData", {})
                 customer_chat = (
                     body.get("chatId")
-                    or body.get("senderData", {}).get("chatId")
+                    or _sender_data.get("chatId")
                     or body.get("messageData", {}).get("chatId")
                     or ""
                 )
                 logger.info(
-                    "[TAKEOVER:OUTGOING] outgoingMessageReceived detected | "
-                    "chatId=%s | body_keys=%s",
-                    customer_chat, list(body.keys()),
+                    "[TAKEOVER:OUTGOING] outgoingMessageReceived | "
+                    "chatId=%s | senderData=%s | body_keys=%s",
+                    customer_chat, _sender_data, list(body.keys()),
                 )
                 if customer_chat and _is_individual_chat(customer_chat):
                     _takeover_activate(customer_chat)
-                    logger.info("[TAKEOVER:AUTO] Poll — owner manual msg to %s → bot silenced", customer_chat)
+                elif customer_chat:
+                    logger.warning(
+                        "[TAKEOVER:OUTGOING] chatId=%s not @c.us — skipped (group/broadcast?)",
+                        customer_chat,
+                    )
 
             if poll_type == "incomingMessageReceived":
                 sender   = body.get("senderData", {}).get("chatId", "")
@@ -1799,6 +1805,12 @@ async def _poll_loop() -> None:
                         # Emoji-only = acknowledgment ("👌", "😊" etc.) — reset timer, no reply.
                         _followup_reset(sender)
                         logger.info("[BOT:EMOJI_ACK] Emoji-only msg, timer reset | sender=%s", sender)
+                    elif sender in _human_takeover:
+                        # Human-takeover gate (poll path) — same guard as webhook path.
+                        logger.info(
+                            "[BOT:TAKEOVER_GATE] Poll incoming dropped — owner in control | sender=%s | text=%s",
+                            sender, text[:50],
+                        )
                     else:
                         logger.info("[BOT:RECV] Poll | sender=%s | text=%s", sender, text[:60])
                         _schedule_debounced(sender, text)
@@ -2045,6 +2057,18 @@ async def webhook(request: Request, token: str = Query(default="")):
             _followup_reset(sender)
             logger.info("[BOT:EMOJI_ACK] Emoji-only msg, timer reset | sender=%s", sender)
             return JSONResponse({"ok": True})
+
+        # ── Human-takeover gate ───────────────────────────────────────────────
+        # If the owner already sent a manual message to this customer (takeover
+        # is active), drop the incoming message immediately — do NOT even buffer
+        # it.  This is the primary guard; _flush_pending has a secondary check.
+        if sender in _human_takeover:
+            logger.info(
+                "[BOT:TAKEOVER_GATE] Webhook incoming dropped — owner in control | sender=%s | text=%s",
+                sender, text[:50],
+            )
+            return JSONResponse({"ok": True})
+
         logger.info("[BOT:RECV] Webhook | sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
         # Fire-and-forget: buffer the message and let the debounce timer decide
         # when to process.  Multiple messages sent in quick succession are merged
