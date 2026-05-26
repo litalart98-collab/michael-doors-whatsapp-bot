@@ -266,10 +266,12 @@ _AUDIO_MSG_TYPES: frozenset[str] = frozenset({
     "pttMessage",     # push-to-talk voice note
 })
 
-# Message types treated as images (customer is showing us a door model).
+# Message types treated as images/files (customer is showing us a door model or document).
 _IMAGE_MSG_TYPES: frozenset[str] = frozenset({
     "imageMessage",
     "videoMessage",
+    "documentMessage",
+    "stickerMessage",
 })
 
 
@@ -298,19 +300,14 @@ async def _handle_non_text(sender: str, msg_type: str = "") -> None:
         logger.info("[BOT:NON_TEXT_SKIP] Non-image type ignored | type=%s | sender=%s", msg_type, sender)
         return
 
-    if sender in _image_catalog_sent:
-        # Second image — give up on model name, move to contact collection
-        _image_catalog_sent.discard(sender)
-        msg = (
-            "נראה שקשה לתאר את הדגם בטקסט 😊\n"
-            "נציג שלנו ישמח לעזור אישית — אשמח לשם, עיר ומספר טלפון כדי שיחזרו אליכם."
-        )
-        logger.info("[BOT:IMAGE_ESCALATE] Moving to contact collection | sender=%s", sender)
-    else:
-        # First image — send catalog link
-        _image_catalog_sent.add(sender)
-        msg = _build_image_reply(sender)
-        logger.info("[BOT:IMAGE_CATALOG] Sent catalog link | sender=%s", sender)
+    # Fix: any image / file / drawing → acknowledge receipt, ask for contact info.
+    # The bot is NOT able to interpret images or documents — forward to a human.
+    _image_catalog_sent.discard(sender)   # clear any previous escalation state
+    msg = (
+        "קיבלתי 📎 אעביר לצוות שלנו לטיפול.\n"
+        "כדי שנוכל לחזור אליך — מה השם ומספר הטלפון שלך?"
+    )
+    logger.info("[BOT:IMAGE→CONTACT] File/image received — asking for contact | sender=%s | type=%s", sender, msg_type)
     try:
         await green.send_message(sender, msg)
         _followup_mark_bot_replied(sender)

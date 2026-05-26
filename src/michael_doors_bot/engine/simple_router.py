@@ -1039,6 +1039,24 @@ def _extract_fields_from_message(text: str, state: dict | None = None) -> dict:
                 extracted['interior_quantity'] = num
                 break
 
+    # ── Price inquiry → contact collection ───────────────────────────────────
+    # When customer asks about price, cost or quote → skip all product questions,
+    # go straight to contact collection.  We never give prices; the fastest path
+    # to value is "leave your details and we'll come back with a tailored offer."
+    if not extracted.get('contact_requested') and re.search(
+        r'כמה\s+(?:זה|עולה|עולים|עולות|עול\w+)'
+        r'|(?:מה|מהו|מהם)\s+(?:ה)?מחיר'
+        r'|מחיר(?:ים)?(?:\s+של)?'
+        r'|עלות|תמחיר'
+        r'|הצעת\s+מחיר'
+        r'|כמה\s+(?:ה)?דלת'
+        r'|מה\s+(?:ה)?עלות'
+        r'|כמה\s+(?:ה)?זה\s+עול',
+        t, re.IGNORECASE,
+    ):
+        extracted['contact_requested'] = True
+        logger.info("[PRICE→CONTACT] Price inquiry detected → contact_requested=True | sender=%s", sender)
+
     # ── Contact explicitly requested ─────────────────────────────────────────
     # When customer asks to be called / contacted → skip product questions,
     # go straight to contact collection (Stage 4).
@@ -2816,6 +2834,34 @@ async def get_reply(
 
     # Step 6: Decide next action (pure state function)
     action = _decide_next_action(state)
+
+    # ── Stall guard — 3 turns without progress → skip to contact collection ──
+    # If the bot keeps asking the same product field (active_topics, style,
+    # quantity …) and the customer isn't answering usefully, stop and ask for
+    # contact details so a human can follow up.
+    # Only applies to stage 2–3 product questions; not farewell / contact stage.
+    if action.stage in (2, 3) and action.field_to_ask:
+        _last_field = state.get("_stall_last_field", "")
+        _stall_n    = state.get("_stall_count", 0)
+        if action.field_to_ask == _last_field:
+            _stall_n += 1
+            state["_stall_count"] = _stall_n
+            if _stall_n >= 3:
+                state["contact_requested"] = True
+                state["_stall_count"]      = 0
+                state["_stall_last_field"] = ""
+                action = _decide_next_action(state)   # recalculate → contact opener
+                logger.info(
+                    "[STALL] 3 turns without progress on field=%r → contact collection | sender=%s",
+                    _last_field, sender,
+                )
+        else:
+            state["_stall_count"]      = 0
+            state["_stall_last_field"] = action.field_to_ask
+    else:
+        # Reset on non-product stages (contact, farewell) or when field changes
+        state["_stall_count"]      = 0
+        state["_stall_last_field"] = action.field_to_ask or ""
 
     # ── Repeated-question guard ────────────────────────────────────────────────
     # If the bot's LAST message already asked the exact same question it's about
