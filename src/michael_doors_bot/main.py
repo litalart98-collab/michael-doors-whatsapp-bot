@@ -886,19 +886,23 @@ def _persist_airtable_meta(sender: str, is_test: bool, record_id: Optional[str],
         logger.warning("[AIRTABLE] persist meta failed | sender=%s | %s", sender, exc)
 
 
-async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -> None:
+async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool,
+                         table_id: Optional[str] = None) -> None:
     """Create-or-update the Airtable inquiry record for this sender.
 
     Never raises — an Airtable outage must not interrupt the WhatsApp flow.
 
+    `table_id` targets a specific Airtable table; None uses the production table.
+    The browser test simulator passes the separate test table id.
+
     Dedup / lifecycle rules:
       • First message of an inquiry  → CREATE (status = collecting).
       • Following messages           → UPDATE the same record.
-      • Handoff (details confirmed)  → COMPLETE (status = waiting, completed_at).
+      • Handoff (details confirmed)  → COMPLETE (status = waiting).
       • Returning customer whose previous inquiry was completed → CREATE a fresh
         record so the old one is preserved as history.
       • After a restart lost the mapping → recover the open record via
-        find_active_lead_by_whatsapp_id so we never duplicate an active inquiry.
+        find_active_lead_by_phone so we never duplicate an active inquiry.
     """
     if not airtable_store.enabled():
         return
@@ -921,12 +925,12 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
         # Recover an active record after a restart wiped the local mapping
         # (matched on phone — the table has no WhatsApp-id column).
         if not record_id:
-            record_id = await airtable_store.find_active_lead_by_phone(values.get("phone"))
+            record_id = await airtable_store.find_active_lead_by_phone(values.get("phone"), table_id)
 
         just_created = False
         if not record_id:
             values["status"] = airtable_store.STATUS_COLLECTING
-            record_id = await airtable_store.create_lead(values)
+            record_id = await airtable_store.create_lead(values, table_id)
             if not record_id:
                 return  # create failed — try again on the next message
             just_created = True
@@ -938,7 +942,7 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
         if is_handoff:
             # Completion always PATCHes (even right after a create) so status flips
             # to "waiting" (recorded in the סטטוס column).
-            ok = await airtable_store.complete_lead(record_id, values)
+            ok = await airtable_store.complete_lead(record_id, values, table_id)
             if ok:
                 lead["airtable_record_id"] = record_id
                 lead["airtable_completed"] = True
@@ -947,7 +951,7 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
         elif not just_created:
             # Only UPDATE when we didn't just create — the create already wrote the
             # current values, so an immediate second PATCH would be redundant.
-            await airtable_store.update_lead(record_id, values)
+            await airtable_store.update_lead(record_id, values, table_id)
             lead["airtable_record_id"] = record_id
             _persist_airtable_meta(sender, is_test, record_id, None)
             logger.info("[AIRTABLE] Lead updated | sender=%s | record=%s", sender, record_id)
@@ -2398,8 +2402,20 @@ async def test_chat(request: Request):
 
     api_key = config.ANTHROPIC_API_KEY if not mock else "mock"
     result  = await get_reply(sender, message, api_key, mock_claude=mock)
-    _record_lead(sender, message, result, True)
-    return JSONResponse({"ok": True, **result})
+    lead = _record_lead(sender, message, result, True)
+
+    # End-to-end Airtable pipeline test — writes ONLY to the separate test table
+    # (AIRTABLE_TEST_TABLE_ID). Never touches the customer's production table.
+    airtable_note = None
+    if airtable_store.enabled():
+        test_tid = airtable_store.test_table_id()
+        if test_tid:
+            await _airtable_sync(sender, lead, result, is_test=True, table_id=test_tid)
+            airtable_note = f"synced to test table ({test_tid})"
+        else:
+            airtable_note = "set AIRTABLE_TEST_TABLE_ID in Render to test the Airtable pipeline here"
+
+    return JSONResponse({"ok": True, "airtable": airtable_note, **result})
 
 
 @app.get("/test-ui", response_class=HTMLResponse)
@@ -2717,11 +2733,13 @@ async def test_sheets(admin: str = Query(default="")):
 
 
 @app.get("/test-airtable", response_class=JSONResponse)
-async def test_airtable(admin: str = Query(default="")):
+async def test_airtable(admin: str = Query(default=""), table: str = Query(default="")):
     """Write a test row to Airtable and report the result.
     Use this after setting the AIRTABLE_* env vars to verify the connection and
     that the column names match. The test row is clearly marked and can be
-    deleted from Airtable afterwards. Open: /test-airtable?admin=<secret>"""
+    deleted from Airtable afterwards.
+    Open: /test-airtable?admin=<secret>  (production table)
+          /test-airtable?admin=<secret>&table=test  (the separate test table)"""
     if (denied := _check_admin(admin)):
         return denied
     if not airtable_store.enabled():
@@ -2731,6 +2749,16 @@ async def test_airtable(admin: str = Query(default="")):
                       "AIRTABLE_BASE_ID and AIRTABLE_TABLE_ID in Render."},
             status_code=400,
         )
+
+    target_table = None
+    if table == "test":
+        target_table = airtable_store.test_table_id()
+        if not target_table:
+            return JSONResponse(
+                {"ok": False,
+                 "error": "AIRTABLE_TEST_TABLE_ID is not set — no test table configured."},
+                status_code=400,
+            )
 
     test_values = {
         "full_name":  "בדיקת חיבור",
@@ -2742,7 +2770,8 @@ async def test_airtable(admin: str = Query(default="")):
         "status":     airtable_store.STATUS_COLLECTING,
     }
     t0 = time.time()
-    res = await airtable_store.selftest_create(test_values)
+    res = await airtable_store.selftest_create(test_values, target_table)
+    res["target_table"] = "test" if target_table else "production"
     res["elapsed_s"] = round(time.time() - t0, 2)
     res["columns_expected"] = list(airtable_store.FIELD_MAP.values())
     if res.get("ok"):

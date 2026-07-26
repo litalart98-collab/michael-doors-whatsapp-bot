@@ -30,9 +30,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── Credentials (env only) ────────────────────────────────────────────────────
-_TOKEN    = os.getenv("AIRTABLE_TOKEN", "").strip()
-_BASE_ID  = os.getenv("AIRTABLE_BASE_ID", "").strip()
-_TABLE_ID = os.getenv("AIRTABLE_TABLE_ID", "").strip()
+_TOKEN         = os.getenv("AIRTABLE_TOKEN", "").strip()
+_BASE_ID       = os.getenv("AIRTABLE_BASE_ID", "").strip()
+_TABLE_ID      = os.getenv("AIRTABLE_TABLE_ID", "").strip()
+# Optional separate table for the browser test simulator (/test-ui). When set,
+# test conversations are written here instead of the customer's real table, so
+# the production table stays clean. Falls back to empty (test writes disabled).
+_TEST_TABLE_ID = os.getenv("AIRTABLE_TEST_TABLE_ID", "").strip()
 
 _API_ROOT = "https://api.airtable.com/v0"
 _TIMEOUT  = 8.0  # seconds — keep short so a slow Airtable never stalls WhatsApp
@@ -67,6 +71,11 @@ def enabled() -> bool:
     return bool(_TOKEN and _BASE_ID and _TABLE_ID)
 
 
+def test_table_id() -> str:
+    """The separate test table id, or '' if AIRTABLE_TEST_TABLE_ID is not set."""
+    return _TEST_TABLE_ID
+
+
 def _headers() -> dict:
     return {
         "Authorization": f"Bearer {_TOKEN}",
@@ -74,9 +83,9 @@ def _headers() -> dict:
     }
 
 
-def _table_url() -> str:
+def _table_url(table_id: Optional[str] = None) -> str:
     # httpx URL-encodes the table segment for us when it contains spaces/Hebrew.
-    return f"{_API_ROOT}/{_BASE_ID}/{_TABLE_ID}"
+    return f"{_API_ROOT}/{_BASE_ID}/{table_id or _TABLE_ID}"
 
 
 def _clean_fields(values: dict) -> dict:
@@ -112,7 +121,7 @@ def _escape_formula_value(raw: str) -> str:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-async def find_active_lead_by_phone(phone: str) -> Optional[str]:
+async def find_active_lead_by_phone(phone: str, table_id: Optional[str] = None) -> Optional[str]:
     """Return the record id of the ACTIVE inquiry for this phone number, or None.
 
     "Active" = status is STATUS_COLLECTING. Used to recover the record id after a
@@ -134,7 +143,7 @@ async def find_active_lead_by_phone(phone: str) -> Optional[str]:
     params = {"filterByFormula": formula, "maxRecords": "1"}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(_table_url(), headers=_headers(), params=params)
+            r = await client.get(_table_url(table_id), headers=_headers(), params=params)
         if r.status_code // 100 != 2:
             logger.warning(
                 "[AIRTABLE] find_active_lead non-2xx | status=%d | body=%s",
@@ -148,11 +157,11 @@ async def find_active_lead_by_phone(phone: str) -> Optional[str]:
         return None
 
 
-async def create_lead(values: dict) -> Optional[str]:
+async def create_lead(values: dict, table_id: Optional[str] = None) -> Optional[str]:
     """Create a new inquiry record. Returns the new record id, or None on failure.
 
     `values` uses internal keys (see FIELD_MAP). The caller is expected to set at
-    least whatsapp_id, phone, created_at and status.
+    least phone, created_at and status.
     """
     if not enabled():
         return None
@@ -162,7 +171,7 @@ async def create_lead(values: dict) -> Optional[str]:
     payload = {"fields": fields, "typecast": True}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.post(_table_url(), headers=_headers(), json=payload)
+            r = await client.post(_table_url(table_id), headers=_headers(), json=payload)
         if r.status_code // 100 != 2:
             logger.warning(
                 "[AIRTABLE] create_lead non-2xx | status=%d | body=%s",
@@ -175,7 +184,7 @@ async def create_lead(values: dict) -> Optional[str]:
         return None
 
 
-async def update_lead(record_id: str, values: dict) -> bool:
+async def update_lead(record_id: str, values: dict, table_id: Optional[str] = None) -> bool:
     """PATCH an existing record with the (non-empty) values. Returns success."""
     if not enabled() or not record_id:
         return False
@@ -183,7 +192,7 @@ async def update_lead(record_id: str, values: dict) -> bool:
     if not fields:
         return False
     payload = {"fields": fields, "typecast": True}
-    url = f"{_table_url()}/{record_id}"
+    url = f"{_table_url(table_id)}/{record_id}"
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             r = await client.patch(url, headers=_headers(), json=payload)
@@ -199,7 +208,7 @@ async def update_lead(record_id: str, values: dict) -> bool:
         return False
 
 
-async def complete_lead(record_id: str, values: dict) -> bool:
+async def complete_lead(record_id: str, values: dict, table_id: Optional[str] = None) -> bool:
     """Mark a record complete: status → STATUS_WAITING plus any final values.
 
     The caller passes completed_at / summary inside `values`; this helper just
@@ -209,10 +218,10 @@ async def complete_lead(record_id: str, values: dict) -> bool:
         return False
     final = dict(values)
     final["status"] = STATUS_WAITING
-    return await update_lead(record_id, final)
+    return await update_lead(record_id, final, table_id)
 
 
-async def selftest_create(values: dict) -> dict:
+async def selftest_create(values: dict, table_id: Optional[str] = None) -> dict:
     """Diagnostic create used by the /test-airtable endpoint.
 
     Unlike create_lead (which swallows errors and returns None), this returns the
@@ -231,7 +240,7 @@ async def selftest_create(values: dict) -> dict:
     payload = {"fields": _clean_fields(values), "typecast": True}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.post(_table_url(), headers=_headers(), json=payload)
+            r = await client.post(_table_url(table_id), headers=_headers(), json=payload)
         ok = r.status_code // 100 == 2
         return {
             "ok": ok,
