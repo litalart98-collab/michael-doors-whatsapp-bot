@@ -193,8 +193,6 @@ def _enter_step(state: dict, step: str) -> str:
     """Move to `step`, reset the invalid counter, and return the prompt to send."""
     state["currentStep"] = step
     state["invalidAttempts"] = 0
-    if step == C.CONFIRM_DETAILS:
-        return build_summary(state["collectedData"])
     return C.STEP_PROMPT.get(step, "")
 
 
@@ -221,10 +219,7 @@ def _invalid(state: dict, reprompt: str) -> dict:
 
 
 def _current_prompt(state: dict) -> str:
-    step = state.get("currentStep")
-    if step == C.CONFIRM_DETAILS:
-        return build_summary(state["collectedData"])
-    return C.STEP_PROMPT.get(step, "")
+    return C.STEP_PROMPT.get(state.get("currentStep"), "")
 
 
 def _route_missing_or_confirm(state: dict) -> dict:
@@ -236,7 +231,9 @@ def _route_missing_or_confirm(state: dict) -> dict:
         return _result(state, _enter_step(state, C.ASK_MISSING_CITY), airtable="sync")
     if not cd.get("contactPhone"):
         return _result(state, _enter_step(state, C.ASK_MISSING_PHONE), airtable="sync")
-    return _result(state, _enter_step(state, C.CONFIRM_DETAILS), airtable="sync")
+    # All contact details collected → finish immediately with a thank-you and hand
+    # off to a human. No details-summary / confirmation step is shown.
+    return _handoff(state, C.HANDOFF_READY, C.MSG_READY)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -351,20 +348,6 @@ def process(state: Optional[dict], text: str, is_media: bool = False) -> dict:
             return _invalid(state, C.MSG_MISSING_PHONE)
         state["collectedData"]["contactPhone"] = phone
         return _route_missing_or_confirm(state)
-
-    # ── Confirmation ──────────────────────────────────────────────────────────
-    if step == C.CONFIRM_DETAILS:
-        choice = _match_confirm(text)
-        if choice is None:
-            return _invalid(state, build_summary(state["collectedData"]))
-        if choice == "CONFIRM":
-            return _handoff(state, C.HANDOFF_READY, C.MSG_READY)
-        if choice == "AGENT":
-            return _handoff(state, C.HANDOFF_CUSTOMER_REQUESTED, C.MSG_AGENT_HANDOFF)
-        # RESTART — reset only the current inquiry's data, keep the customer.
-        state["collectedData"] = {}
-        state["savedQuestions"] = []
-        return _result(state, _enter_step(state, C.ASK_INQUIRY_TYPE), airtable="sync")
 
     # ── Unknown step (should never happen) — re-ask safely ────────────────────
     return _result(state, _current_prompt(state) or C.MSG_OPENING)
