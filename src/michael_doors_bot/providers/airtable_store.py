@@ -46,22 +46,19 @@ STATUS_WAITING    = "ממתין לנציג"          # details confirmed — wai
 # ── Field mapping: internal bot key  →  Airtable column name ──────────────────
 # This is the ONE authoritative mapping. To rename an Airtable column, change it
 # here only. Internal keys are stable; Airtable column names are the values.
+#
+# These MUST match the customer's actual Airtable columns character-for-character
+# (including spaces) — Airtable rejects the whole request on an unknown column
+# name. The current mapping targets the customer's 7-column table:
+#     שם לקוח · עיר · טלפון · סוג שירות · נושא פנייה · תאריך פנייה · סטטוס
 FIELD_MAP: dict[str, str] = {
-    "whatsapp_id":  "WhatsApp ID",
-    "phone":        "טלפון",
-    "full_name":    "שם מלא",
-    "city":         "עיר",
-    "topic":        "נושא הפנייה",
-    "frame":        "משקוף",
-    "doors_count":  "כמות דלתות",
-    "project_type": "סוג פרויקט",
-    "notes":        "הערות",
-    "stage":        "שלב נוכחי",
-    "status":       "סטטוס",
-    "created_at":   "תאריך פנייה",
-    "updated_at":   "תאריך עדכון אחרון",
-    "completed_at": "תאריך סיום",
-    "summary":      "סיכום",
+    "full_name":  "שם לקוח",
+    "city":       "עיר",
+    "phone":      "טלפון",
+    "service":    "סוג שירות",   # short category: דלתות כניסה / פנים / ממ"ד / ...
+    "topic":      "נושא פנייה",  # detailed description of what the customer wants
+    "created_at": "תאריך פנייה",
+    "status":     "סטטוס",
 }
 
 
@@ -115,19 +112,22 @@ def _escape_formula_value(raw: str) -> str:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-async def find_active_lead_by_whatsapp_id(whatsapp_id: str) -> Optional[str]:
-    """Return the record id of the ACTIVE inquiry for this WhatsApp id, or None.
+async def find_active_lead_by_phone(phone: str) -> Optional[str]:
+    """Return the record id of the ACTIVE inquiry for this phone number, or None.
 
     "Active" = status is STATUS_COLLECTING. Used to recover the record id after a
     server restart wiped the in-memory / on-disk mapping, so we UPDATE the open
     record instead of creating a duplicate. Completed inquiries (STATUS_WAITING)
     are intentionally NOT matched, so a returning customer opens a fresh record.
+
+    The customer's table has no dedicated WhatsApp-id column, so we match on the
+    phone number (the closest stable per-customer key available).
     """
-    if not enabled():
+    if not enabled() or not phone:
         return None
     formula = (
         f"AND("
-        f"{{{FIELD_MAP['whatsapp_id']}}}='{_escape_formula_value(whatsapp_id)}',"
+        f"{{{FIELD_MAP['phone']}}}='{_escape_formula_value(phone)}',"
         f"{{{FIELD_MAP['status']}}}='{STATUS_COLLECTING}'"
         f")"
     )

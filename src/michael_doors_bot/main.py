@@ -767,8 +767,8 @@ def _format_il_phone(raw: str) -> str:
     return phone_clean
 
 
-# Human-readable topic labels for the Airtable "נושא הפנייה" column.
-_AIRTABLE_TOPIC_LABELS = {
+# Short category labels for the Airtable "סוג שירות" column.
+_AIRTABLE_CATEGORY_LABELS = {
     "entrance_doors":   "דלתות כניסה",
     "interior_doors":   "דלתות פנים",
     "mamad":            'דלת ממ"ד',
@@ -777,86 +777,95 @@ _AIRTABLE_TOPIC_LABELS = {
 }
 
 
-def _airtable_topic_label(lead: dict) -> str:
+def _airtable_category_label(lead: dict) -> str:
+    """Short service category → the 'סוג שירות' column."""
     topics = lead.get("active_topics") or []
-    labels = [_AIRTABLE_TOPIC_LABELS.get(t) for t in topics if _AIRTABLE_TOPIC_LABELS.get(t)]
+    labels = [_AIRTABLE_CATEGORY_LABELS.get(t) for t in topics if _AIRTABLE_CATEGORY_LABELS.get(t)]
     if labels:
         return " | ".join(labels)
-    # Fallback to legacy free-text service_type if no structured topic exists yet.
     return lead.get("service_type") or ""
 
 
-def _airtable_frame_label(lead: dict) -> str:
-    scope = lead.get("entrance_scope")
-    if scope == "with_frame":
-        return "עם משקוף"
-    if scope == "door_only":
-        return "בלי משקוף"
-    frame = lead.get("needs_frame_removal")
-    if frame is True:
-        return "עם משקוף"
-    if frame is False:
-        return "בלי משקוף"
-    return ""
+def _airtable_service_detail(lead: dict) -> str:
+    """Detailed one-line description of the inquiry → the 'נושא פנייה' column.
 
+    Since the customer's table has no dedicated columns for frame / quantity /
+    project-type / notes, we fold all of that detail into this single field so no
+    collected information is lost.
+    """
+    topics = lead.get("active_topics") or []
+    parts: list[str] = []
 
-def _airtable_project_label(lead: dict) -> str:
-    project = lead.get("interior_project_type") or lead.get("project_status")
-    return {
-        "new":         "בית חדש",
-        "renovation":  "שיפוץ",
-        "replacement": "החלפה",
-    }.get(project, project if isinstance(project, str) else "")
+    if "entrance_doors" in topics:
+        lbl = "דלת כניסה"
+        style = lead.get("entrance_style")
+        if style == "flat":        lbl += " חלקה"
+        elif style == "designed":  lbl += " מעוצבת"
+        elif style == "zero_line": lbl += " קו אפס"
+        scope = lead.get("entrance_scope")
+        if scope == "with_frame":  lbl += " כולל משקוף"
+        elif scope == "door_only": lbl += " דלת בלבד"
+        model = lead.get("entrance_model")
+        if model and model not in ("undecided", "לא סוכם"):
+            lbl += f" — {model}"
+        parts.append(lbl)
 
+    if "interior_doors" in topics:
+        lbl = "דלתות פנים"
+        qty = lead.get("interior_quantity") or lead.get("doors_count")
+        if qty:
+            lbl += f" {qty} יח'"
+        style = lead.get("interior_style")
+        if style == "flat":       lbl += " חלקות"
+        elif style == "designed": lbl += " מעוצבות"
+        project = lead.get("interior_project_type") or lead.get("project_status")
+        if project == "new":           lbl += " — בית חדש"
+        elif project == "renovation":  lbl += " — שיפוץ"
+        elif project == "replacement": lbl += " — החלפה"
+        model = lead.get("interior_model")
+        if model and model not in ("undecided", "לא סוכם"):
+            lbl += f" — {model}"
+        parts.append(lbl)
 
-def _airtable_notes(lead: dict) -> str:
-    parts = []
-    referral = lead.get("referral_source")
-    if referral:
-        parts.append(f'הופנה ע"י: {referral}')
+    if "mamad" in topics:
+        lbl = 'דלת ממ"ד'
+        mt = lead.get("mamad_type")
+        if mt == "new":           lbl += " חדשה"
+        elif mt == "replacement": lbl += " — החלפה"
+        parts.append(lbl)
+
+    if "repair" in topics:
+        parts.append("תיקון / שירות")
+    if "showroom_meeting" in topics:
+        parts.append("אולם תצוגה")
+
+    if lead.get("referral_source"):
+        parts.append(f'הופנה ע"י: {lead["referral_source"]}')
     if lead.get("is_returning_customer"):
         parts.append("לקוח חוזר")
+
+    if not parts and lead.get("service_type"):
+        parts.append(lead["service_type"])
+
     return " | ".join(parts)
 
 
-def _airtable_stage_label(lead: dict, result: dict) -> str:
-    """Derive a human-readable 'current stage' from the collected data."""
-    if result.get("handoff_to_human") or lead.get("handoff_to_human"):
-        return "הסתיים — ממתין לנציג"
-    has_contact = all(lead.get(f) for f in ("full_name", "callback_phone", "city"))
-    if has_contact:
-        return "אישור פרטים"
-    if lead.get("full_name") or lead.get("callback_phone") or lead.get("city"):
-        return "איסוף פרטי קשר"
-    if lead.get("active_topics"):
-        return "בירור צרכים"
-    return "פתיחת שיחה"
-
-
-def _build_airtable_values(sender: str, lead: dict, result: dict, summary: str) -> dict:
+def _build_airtable_values(sender: str, lead: dict, result: dict) -> dict:
     """Build the internal-keyed value dict for Airtable from the current lead.
 
     Uses internal field names (see airtable_store.FIELD_MAP). Empty values are
     dropped by airtable_store before sending, so partially-known leads are fine.
+    Only the customer's 7 real columns are produced here; status is added by the
+    caller (create) / forced by complete_lead.
     """
-    now_il = _utc_iso_to_il(datetime.utcnow().isoformat())
     raw_phone = lead.get("callback_phone") or lead.get("phone") or sender
-    doors_count = lead.get("interior_quantity") or lead.get("doors_count")
-
     return {
-        "whatsapp_id":  sender,
-        "phone":        _format_il_phone(raw_phone),
-        "full_name":    lead.get("full_name") or "",
-        "city":         lead.get("city") or "",
-        "topic":        _airtable_topic_label(lead),
-        "frame":        _airtable_frame_label(lead),
-        "doors_count":  str(doors_count) if doors_count else "",
-        "project_type": _airtable_project_label(lead),
-        "notes":        _airtable_notes(lead),
-        "stage":        _airtable_stage_label(lead, result),
-        "created_at":   _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
-        "updated_at":   now_il,
-        "summary":      summary or "",
+        "full_name":  lead.get("full_name") or "",
+        "city":       lead.get("city") or "",
+        "phone":      _format_il_phone(raw_phone),
+        "service":    _airtable_category_label(lead),
+        "topic":      _airtable_service_detail(lead),
+        "created_at": _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
     }
 
 
@@ -895,9 +904,8 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
         return
     try:
         # Re-load the on-disk lead so we pick up the persisted airtable_record_id
-        # / airtable_completed flags and the full conversation summary (conv_summary).
+        # / airtable_completed flags.
         disk = _load_leads(is_test).get(sender, {})
-        summary = disk.get("conv_summary") or lead.get("conv_summary") or lead.get("summary") or ""
 
         record_id = lead.get("airtable_record_id") or disk.get("airtable_record_id")
         completed = lead.get("airtable_completed") or disk.get("airtable_completed") or False
@@ -908,11 +916,12 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
             record_id = None
             completed = False
 
-        # Recover an active record after a restart wiped the local mapping.
-        if not record_id:
-            record_id = await airtable_store.find_active_lead_by_whatsapp_id(sender)
+        values = _build_airtable_values(sender, lead, result)
 
-        values = _build_airtable_values(sender, lead, result, summary)
+        # Recover an active record after a restart wiped the local mapping
+        # (matched on phone — the table has no WhatsApp-id column).
+        if not record_id:
+            record_id = await airtable_store.find_active_lead_by_phone(values.get("phone"))
 
         just_created = False
         if not record_id:
@@ -928,8 +937,7 @@ async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -
 
         if is_handoff:
             # Completion always PATCHes (even right after a create) so status flips
-            # to "waiting" and completed_at is recorded.
-            values["completed_at"] = _utc_iso_to_il(datetime.utcnow().isoformat())
+            # to "waiting" (recorded in the סטטוס column).
             ok = await airtable_store.complete_lead(record_id, values)
             if ok:
                 lead["airtable_record_id"] = record_id
