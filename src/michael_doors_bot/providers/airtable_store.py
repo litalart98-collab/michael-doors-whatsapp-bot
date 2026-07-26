@@ -110,6 +110,12 @@ def _clean_fields(values: dict) -> dict:
     return fields
 
 
+def preview_fields(values: dict) -> dict:
+    """Public helper for dry-run preview: map internal keys → Airtable columns and
+    drop empties, WITHOUT sending anything. Returns exactly what would be written."""
+    return _clean_fields(values)
+
+
 def _escape_formula_value(raw: str) -> str:
     """Escape a value for safe use inside an Airtable filterByFormula string.
 

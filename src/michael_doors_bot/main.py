@@ -886,6 +886,40 @@ def _persist_airtable_meta(sender: str, is_test: bool, record_id: Optional[str],
         logger.warning("[AIRTABLE] persist meta failed | sender=%s | %s", sender, exc)
 
 
+def _airtable_preview(sender: str, lead: dict, result: dict, is_test: bool) -> dict:
+    """Dry-run: return exactly what WOULD be written to Airtable this turn, without
+    sending anything. Used by the /test-ui simulator so the full data pipeline can
+    be validated with no Airtable account, no extra table, and no writes.
+
+    Tracks a lightweight 'seen' flag on the test lead so the action sequence is
+    realistic: first turn = create, later turns = update, handoff = complete.
+    """
+    values = _build_airtable_values(sender, lead, result)
+    is_handoff = bool(result.get("handoff_to_human"))
+    seen = bool(lead.get("airtable_preview_seen"))
+
+    if is_handoff:
+        action = "complete — סטטוס → ממתין לנציג"
+        values["status"] = airtable_store.STATUS_WAITING
+    elif seen:
+        action = "update — עדכון הרשומה הקיימת"
+    else:
+        action = "create — יצירת רשומה חדשה, סטטוס → בתהליך איסוף פרטים"
+        values["status"] = airtable_store.STATUS_COLLECTING
+
+    # Persist the seen flag so subsequent turns preview as updates.
+    if not seen and not is_handoff:
+        try:
+            leads = _load_leads(is_test)
+            if sender in leads:
+                leads[sender]["airtable_preview_seen"] = True
+                _save_leads(leads, is_test)
+        except Exception:
+            pass
+
+    return {"action": action, "fields": airtable_store.preview_fields(values)}
+
+
 async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool,
                          table_id: Optional[str] = None) -> None:
     """Create-or-update the Airtable inquiry record for this sender.
@@ -2404,18 +2438,20 @@ async def test_chat(request: Request):
     result  = await get_reply(sender, message, api_key, mock_claude=mock)
     lead = _record_lead(sender, message, result, True)
 
-    # End-to-end Airtable pipeline test — writes ONLY to the separate test table
-    # (AIRTABLE_TEST_TABLE_ID). Never touches the customer's production table.
-    airtable_note = None
+    # Airtable dry-run preview — ALWAYS computed locally, no network call, no
+    # writes. Shows exactly what would be sent to Airtable this turn, so the full
+    # pipeline can be validated with no Airtable account and no extra table.
+    airtable_preview = _airtable_preview(sender, lead, result, is_test=True)
+
+    # Optional real write — ONLY if a separate test table is configured. Never
+    # touches the customer's production table.
     if airtable_store.enabled():
         test_tid = airtable_store.test_table_id()
         if test_tid:
             await _airtable_sync(sender, lead, result, is_test=True, table_id=test_tid)
-            airtable_note = f"synced to test table ({test_tid})"
-        else:
-            airtable_note = "set AIRTABLE_TEST_TABLE_ID in Render to test the Airtable pipeline here"
+            airtable_preview["written_to_test_table"] = test_tid
 
-    return JSONResponse({"ok": True, "airtable": airtable_note, **result})
+    return JSONResponse({"ok": True, "airtable": airtable_preview, **result})
 
 
 @app.get("/test-ui", response_class=HTMLResponse)
@@ -2457,7 +2493,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#e5ddd5;height:100vh;dis
 .label-mock{background:#fff3cd;color:#856404}
 .label-claude{background:#e1f5fe;color:#01579b}
 .label-handoff{background:#e3f2fd;color:#0d47a1;font-weight:600}
-#meta{background:#f0f0f0;border-top:1px solid #ccc;padding:8px 16px;font-size:12px;color:#555;direction:ltr;min-height:28px;font-family:monospace}
+#meta{background:#f0f0f0;border-top:1px solid #ccc;padding:8px 16px;font-size:12px;color:#555;direction:ltr;min-height:28px;font-family:monospace;white-space:pre-wrap}
 #input-area{background:#f0f0f0;padding:8px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
 #msg-input{flex:1;padding:10px 14px;border-radius:20px;border:none;font-size:14px;font-family:inherit;resize:none;max-height:120px;outline:none;direction:rtl}
 #btn-send{background:#075e54;color:#fff;border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
@@ -2539,7 +2575,14 @@ function setMeta(obj){
   if(obj.phone) parts.push('📞 '+obj.phone);
   if(obj.preferred_contact_hours) parts.push('⏰ '+obj.preferred_contact_hours);
   if(obj.handoff_to_human) parts.push('✅ HANDOFF');
-  meta.textContent = parts.length ? parts.join(' | ') : 'אין מטאדאטה';
+  let line = parts.length ? parts.join(' | ') : 'אין מטאדאטה';
+  if(obj.airtable){
+    const a = obj.airtable;
+    const cols = a.fields ? Object.keys(a.fields).map(k=>k+'='+a.fields[k]).join(' · ') : '';
+    line += '\n🗂️ Airtable ['+a.action+']'+(cols?'  →  '+cols:'')
+          + (a.written_to_test_table ? '  (נכתב לטבלת בדיקה)' : '  (תצוגה בלבד — לא נכתב)');
+  }
+  meta.textContent = line;
 }
 
 async function send(){
