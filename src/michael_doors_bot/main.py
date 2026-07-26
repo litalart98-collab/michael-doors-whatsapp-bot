@@ -2579,7 +2579,7 @@ function setMeta(obj){
   if(obj.airtable){
     const a = obj.airtable;
     const cols = a.fields ? Object.keys(a.fields).map(k=>k+'='+a.fields[k]).join(' · ') : '';
-    line += '\n🗂️ Airtable ['+a.action+']'+(cols?'  →  '+cols:'')
+    line += '\\n🗂️ Airtable ['+a.action+']'+(cols?'  →  '+cols:'')
           + (a.written_to_test_table ? '  (נכתב לטבלת בדיקה)' : '  (תצוגה בלבד — לא נכתב)');
   }
   meta.textContent = line;
