@@ -50,6 +50,7 @@ from .engine.messages import (
 from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
 from .providers.supabase_store import upsert_lead, save_followup, load_all_conversations
+from .providers import airtable_store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -747,6 +748,205 @@ def _record_lead(sender: str, user_msg: str, result: dict, is_test: bool) -> dic
 
     _save_leads(leads, is_test)
     return lead
+
+
+# ── Airtable integration ──────────────────────────────────────────────────────
+# Direct Airtable Web API sync. Runs on every processed message but is careful to
+# CREATE at most one record per inquiry and UPDATE it thereafter (see _airtable_sync).
+# All HTTP lives in providers/airtable_store.py — this section only builds the
+# semantic field values from the existing lead/result data.
+
+def _format_il_phone(raw: str) -> str:
+    """Normalise a raw phone / WhatsApp id to Israeli display format (0XX-XXXXXXX)."""
+    phone_clean = (raw or "").replace("@c.us", "").strip()
+    if phone_clean.startswith("972") and len(phone_clean) >= 11:
+        phone_clean = "0" + phone_clean[3:]
+    digits = phone_clean.replace("-", "").replace(" ", "")
+    if len(digits) == 10 and digits.isdigit():
+        phone_clean = digits[:3] + "-" + digits[3:]
+    return phone_clean
+
+
+# Human-readable topic labels for the Airtable "נושא הפנייה" column.
+_AIRTABLE_TOPIC_LABELS = {
+    "entrance_doors":   "דלתות כניסה",
+    "interior_doors":   "דלתות פנים",
+    "mamad":            'דלת ממ"ד',
+    "repair":           "תיקון / שירות",
+    "showroom_meeting": "אולם תצוגה",
+}
+
+
+def _airtable_topic_label(lead: dict) -> str:
+    topics = lead.get("active_topics") or []
+    labels = [_AIRTABLE_TOPIC_LABELS.get(t) for t in topics if _AIRTABLE_TOPIC_LABELS.get(t)]
+    if labels:
+        return " | ".join(labels)
+    # Fallback to legacy free-text service_type if no structured topic exists yet.
+    return lead.get("service_type") or ""
+
+
+def _airtable_frame_label(lead: dict) -> str:
+    scope = lead.get("entrance_scope")
+    if scope == "with_frame":
+        return "עם משקוף"
+    if scope == "door_only":
+        return "בלי משקוף"
+    frame = lead.get("needs_frame_removal")
+    if frame is True:
+        return "עם משקוף"
+    if frame is False:
+        return "בלי משקוף"
+    return ""
+
+
+def _airtable_project_label(lead: dict) -> str:
+    project = lead.get("interior_project_type") or lead.get("project_status")
+    return {
+        "new":         "בית חדש",
+        "renovation":  "שיפוץ",
+        "replacement": "החלפה",
+    }.get(project, project if isinstance(project, str) else "")
+
+
+def _airtable_notes(lead: dict) -> str:
+    parts = []
+    referral = lead.get("referral_source")
+    if referral:
+        parts.append(f'הופנה ע"י: {referral}')
+    if lead.get("is_returning_customer"):
+        parts.append("לקוח חוזר")
+    return " | ".join(parts)
+
+
+def _airtable_stage_label(lead: dict, result: dict) -> str:
+    """Derive a human-readable 'current stage' from the collected data."""
+    if result.get("handoff_to_human") or lead.get("handoff_to_human"):
+        return "הסתיים — ממתין לנציג"
+    has_contact = all(lead.get(f) for f in ("full_name", "callback_phone", "city"))
+    if has_contact:
+        return "אישור פרטים"
+    if lead.get("full_name") or lead.get("callback_phone") or lead.get("city"):
+        return "איסוף פרטי קשר"
+    if lead.get("active_topics"):
+        return "בירור צרכים"
+    return "פתיחת שיחה"
+
+
+def _build_airtable_values(sender: str, lead: dict, result: dict, summary: str) -> dict:
+    """Build the internal-keyed value dict for Airtable from the current lead.
+
+    Uses internal field names (see airtable_store.FIELD_MAP). Empty values are
+    dropped by airtable_store before sending, so partially-known leads are fine.
+    """
+    now_il = _utc_iso_to_il(datetime.utcnow().isoformat())
+    raw_phone = lead.get("callback_phone") or lead.get("phone") or sender
+    doors_count = lead.get("interior_quantity") or lead.get("doors_count")
+
+    return {
+        "whatsapp_id":  sender,
+        "phone":        _format_il_phone(raw_phone),
+        "full_name":    lead.get("full_name") or "",
+        "city":         lead.get("city") or "",
+        "topic":        _airtable_topic_label(lead),
+        "frame":        _airtable_frame_label(lead),
+        "doors_count":  str(doors_count) if doors_count else "",
+        "project_type": _airtable_project_label(lead),
+        "notes":        _airtable_notes(lead),
+        "stage":        _airtable_stage_label(lead, result),
+        "created_at":   _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
+        "updated_at":   now_il,
+        "summary":      summary or "",
+    }
+
+
+def _persist_airtable_meta(sender: str, is_test: bool, record_id: Optional[str],
+                           completed: Optional[bool]) -> None:
+    """Persist the Airtable record id / completion flag onto the lead on disk so
+    the mapping survives restarts (dedup) — mirrors how sheets_sent is stored."""
+    try:
+        leads = _load_leads(is_test)
+        if sender not in leads:
+            leads[sender] = {"phone": sender, "firstContact": datetime.utcnow().isoformat()}
+        if record_id is not None:
+            leads[sender]["airtable_record_id"] = record_id
+        if completed is not None:
+            leads[sender]["airtable_completed"] = completed
+        _save_leads(leads, is_test)
+    except Exception as exc:
+        logger.warning("[AIRTABLE] persist meta failed | sender=%s | %s", sender, exc)
+
+
+async def _airtable_sync(sender: str, lead: dict, result: dict, is_test: bool) -> None:
+    """Create-or-update the Airtable inquiry record for this sender.
+
+    Never raises — an Airtable outage must not interrupt the WhatsApp flow.
+
+    Dedup / lifecycle rules:
+      • First message of an inquiry  → CREATE (status = collecting).
+      • Following messages           → UPDATE the same record.
+      • Handoff (details confirmed)  → COMPLETE (status = waiting, completed_at).
+      • Returning customer whose previous inquiry was completed → CREATE a fresh
+        record so the old one is preserved as history.
+      • After a restart lost the mapping → recover the open record via
+        find_active_lead_by_whatsapp_id so we never duplicate an active inquiry.
+    """
+    if not airtable_store.enabled():
+        return
+    try:
+        # Re-load the on-disk lead so we pick up the persisted airtable_record_id
+        # / airtable_completed flags and the full conversation summary (conv_summary).
+        disk = _load_leads(is_test).get(sender, {})
+        summary = disk.get("conv_summary") or lead.get("conv_summary") or lead.get("summary") or ""
+
+        record_id = lead.get("airtable_record_id") or disk.get("airtable_record_id")
+        completed = lead.get("airtable_completed") or disk.get("airtable_completed") or False
+        is_handoff = bool(result.get("handoff_to_human"))
+
+        # Returning customer: previous inquiry already completed → open a new one.
+        if record_id and completed:
+            record_id = None
+            completed = False
+
+        # Recover an active record after a restart wiped the local mapping.
+        if not record_id:
+            record_id = await airtable_store.find_active_lead_by_whatsapp_id(sender)
+
+        values = _build_airtable_values(sender, lead, result, summary)
+
+        just_created = False
+        if not record_id:
+            values["status"] = airtable_store.STATUS_COLLECTING
+            record_id = await airtable_store.create_lead(values)
+            if not record_id:
+                return  # create failed — try again on the next message
+            just_created = True
+            lead["airtable_record_id"] = record_id
+            lead["airtable_completed"] = False
+            _persist_airtable_meta(sender, is_test, record_id, False)
+            logger.info("[AIRTABLE] Lead created | sender=%s | record=%s", sender, record_id)
+
+        if is_handoff:
+            # Completion always PATCHes (even right after a create) so status flips
+            # to "waiting" and completed_at is recorded.
+            values["completed_at"] = _utc_iso_to_il(datetime.utcnow().isoformat())
+            ok = await airtable_store.complete_lead(record_id, values)
+            if ok:
+                lead["airtable_record_id"] = record_id
+                lead["airtable_completed"] = True
+                _persist_airtable_meta(sender, is_test, record_id, True)
+                logger.info("[AIRTABLE] Lead completed | sender=%s | record=%s", sender, record_id)
+        elif not just_created:
+            # Only UPDATE when we didn't just create — the create already wrote the
+            # current values, so an immediate second PATCH would be redundant.
+            await airtable_store.update_lead(record_id, values)
+            lead["airtable_record_id"] = record_id
+            _persist_airtable_meta(sender, is_test, record_id, None)
+            logger.info("[AIRTABLE] Lead updated | sender=%s | record=%s", sender, record_id)
+    except Exception as exc:
+        # Belt-and-suspenders: airtable_store already swallows errors, but any
+        # bug here must never break the WhatsApp reply path.
+        logger.warning("[AIRTABLE] sync failed (non-fatal) | sender=%s | %s", sender, exc)
 
 
 async def _maybe_send_to_sheets(lead: dict, result: dict, is_test: bool) -> None:
@@ -1694,6 +1894,9 @@ async def _process_message(sender: str, text: str) -> None:
             await upsert_lead(lead)
             if result.get("handoff_to_human"):
                 await _attach_summary(sender, "הועבר לנציג", config.TEST_MODE)
+            # Direct Airtable sync — runs after _attach_summary so the completed
+            # record can include the full conversation summary. Non-fatal on error.
+            await _airtable_sync(sender, lead, result, config.TEST_MODE)
             reply_text = _enforce_single_question(result["reply_text"])
             reply_text_2 = result.get("reply_text_2")  # second pulse (opening message only)
             is_fallback = reply_text in ERROR_REPLIES
@@ -1921,6 +2124,7 @@ async def _lifespan(app: FastAPI):
     logger.info("GREEN_API_INSTANCE=%s | URL=%s", config.GREEN_API_INSTANCE_ID, config.GREEN_API_URL)
     logger.info("ANTHROPIC_API_KEY set=%s", bool(config.ANTHROPIC_API_KEY))
     logger.info("GOOGLE_SHEETS configured=%s", bool(config.GOOGLE_SHEETS_WEBHOOK_URL))
+    logger.info("AIRTABLE configured=%s", airtable_store.enabled())
     logger.info("WEBHOOK_SECRET set=%s", bool(config.WEBHOOK_SECRET))
     logger.info("DATA_DIR=%s", str(_DATA_DIR))
 
