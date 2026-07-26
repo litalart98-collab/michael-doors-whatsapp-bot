@@ -2716,6 +2716,45 @@ async def test_sheets(admin: str = Query(default="")):
         }, status_code=500)
 
 
+@app.get("/test-airtable", response_class=JSONResponse)
+async def test_airtable(admin: str = Query(default="")):
+    """Write a test row to Airtable and report the result.
+    Use this after setting the AIRTABLE_* env vars to verify the connection and
+    that the column names match. The test row is clearly marked and can be
+    deleted from Airtable afterwards. Open: /test-airtable?admin=<secret>"""
+    if (denied := _check_admin(admin)):
+        return denied
+    if not airtable_store.enabled():
+        return JSONResponse(
+            {"ok": False,
+             "error": "Airtable not configured — set AIRTABLE_TOKEN, "
+                      "AIRTABLE_BASE_ID and AIRTABLE_TABLE_ID in Render."},
+            status_code=400,
+        )
+
+    test_values = {
+        "full_name":  "בדיקת חיבור",
+        "city":       "בדיקה",
+        "phone":      "000-0000000",
+        "service":    "בדיקה",
+        "topic":      "שורת טסט — אפשר למחוק",
+        "created_at": _utc_iso_to_il(datetime.utcnow().isoformat()),
+        "status":     airtable_store.STATUS_COLLECTING,
+    }
+    t0 = time.time()
+    res = await airtable_store.selftest_create(test_values)
+    res["elapsed_s"] = round(time.time() - t0, 2)
+    res["columns_expected"] = list(airtable_store.FIELD_MAP.values())
+    if res.get("ok"):
+        res["note"] = ("החיבור עובד! נוצרה שורת בדיקה ב-Airtable — אפשר למחוק אותה. "
+                       "Connection OK — a test row was created; you may delete it.")
+    else:
+        res["note"] = ("נכשל. אם ה-status הוא 422, בדוק/י ששמות העמודות ב-Airtable "
+                       "זהים בדיוק לרשימה ב-columns_expected (רווחים כלולים).")
+    status_code = 200 if res.get("ok") else 500
+    return JSONResponse(res, status_code=status_code)
+
+
 @app.get("/test-ai", response_class=JSONResponse)
 async def test_ai():
     """Fire a single real AI call and report which provider responded. No auth required."""

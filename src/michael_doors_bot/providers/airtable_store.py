@@ -210,3 +210,36 @@ async def complete_lead(record_id: str, values: dict) -> bool:
     final = dict(values)
     final["status"] = STATUS_WAITING
     return await update_lead(record_id, final)
+
+
+async def selftest_create(values: dict) -> dict:
+    """Diagnostic create used by the /test-airtable endpoint.
+
+    Unlike create_lead (which swallows errors and returns None), this returns the
+    HTTP status and response body so a misconfiguration — wrong column name, bad
+    token, wrong base/table — is visible to the operator. Returns a dict:
+        {"ok": bool, "status": int|None, "id": str|None, "error": str|None,
+         "missing_env": [..]}
+    """
+    missing = [name for name, val in (
+        ("AIRTABLE_TOKEN", _TOKEN), ("AIRTABLE_BASE_ID", _BASE_ID),
+        ("AIRTABLE_TABLE_ID", _TABLE_ID),
+    ) if not val]
+    if missing:
+        return {"ok": False, "status": None, "id": None,
+                "error": "missing env vars", "missing_env": missing}
+    payload = {"fields": _clean_fields(values), "typecast": True}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(_table_url(), headers=_headers(), json=payload)
+        ok = r.status_code // 100 == 2
+        return {
+            "ok": ok,
+            "status": r.status_code,
+            "id": (r.json().get("id") if ok else None),
+            "error": (None if ok else r.text[:400]),
+            "missing_env": [],
+        }
+    except Exception as exc:
+        return {"ok": False, "status": None, "id": None,
+                "error": str(exc)[:400], "missing_env": []}
