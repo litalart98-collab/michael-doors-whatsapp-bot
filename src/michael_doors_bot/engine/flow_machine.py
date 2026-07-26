@@ -189,6 +189,37 @@ def build_summary(collected: dict) -> str:
     return "\n".join(lines)
 
 
+def to_airtable_values(collected: dict) -> dict:
+    """Map the deterministic engine's collectedData to the Airtable internal keys
+    used by providers/airtable_store.FIELD_MAP.
+
+    The door quantity (for interior doors) is folded into the "נושא פנייה" (topic)
+    field, alongside the frame / project-type / free-text details, so the business
+    sees the full request in one cell. Empty parts are dropped.
+    """
+    inquiry = collected.get("inquiryType")
+    category = C.LABELS_INQUIRY_TYPE.get(inquiry, "")
+
+    detail: list[str] = [category] if category else []
+    if inquiry == "ENTRANCE_DOOR" and collected.get("frameType"):
+        detail.append(C.LABELS_FRAME.get(collected["frameType"], ""))
+    if inquiry == "INTERIOR_DOORS" and collected.get("quantityRange"):
+        detail.append("כמות: " + C.LABELS_QUANTITY.get(collected["quantityRange"], ""))
+    if inquiry == "OTHER" and collected.get("otherInquiry"):
+        detail.append(collected["otherInquiry"])
+    if collected.get("projectType"):
+        detail.append(C.LABELS_PROJECT.get(collected["projectType"], ""))
+
+    topic = " · ".join(p for p in detail if p)
+    return {
+        "full_name": collected.get("fullName", ""),
+        "city":      collected.get("city", ""),
+        "phone":     collected.get("contactPhone", ""),
+        "service":   category,   # → "סוג שירות"
+        "topic":     topic,      # → "נושא פנייה" (includes quantity for interior)
+    }
+
+
 def _enter_step(state: dict, step: str) -> str:
     """Move to `step`, reset the invalid counter, and return the prompt to send."""
     state["currentStep"] = step

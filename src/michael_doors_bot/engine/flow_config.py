@@ -150,6 +150,8 @@ OPTIONS_INQUIRY_TYPE = {
     "1": "ENTRANCE_DOOR", "כניסה": "ENTRANCE_DOOR", "דלת כניסה": "ENTRANCE_DOOR",
     "2": "INTERIOR_DOORS", "פנים": "INTERIOR_DOORS",
     "דלת פנים": "INTERIOR_DOORS", "דלתות פנים": "INTERIOR_DOORS",
+    "פולימר": "INTERIOR_DOORS", "דלת פולימר": "INTERIOR_DOORS",
+    "דלתות פולימר": "INTERIOR_DOORS", "דלתות פנים פולימר": "INTERIOR_DOORS",
     "3": "MAMAD_DOOR", "ממד": "MAMAD_DOOR", "ממ\"ד": "MAMAD_DOOR",
     "דלת ממד": "MAMAD_DOOR", "דלת ממ\"ד": "MAMAD_DOOR",
     "4": "OTHER", "אחר": "OTHER",
