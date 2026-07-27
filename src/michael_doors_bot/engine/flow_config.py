@@ -147,15 +147,52 @@ MSG_MEDIA_PREFIX = (
 # ══════════════════════════════════════════════════════════════════════════════
 
 OPTIONS_INQUIRY_TYPE = {
-    "1": "ENTRANCE_DOOR", "כניסה": "ENTRANCE_DOOR", "דלת כניסה": "ENTRANCE_DOOR",
+    # ── 1) Entrance door — דלת כניסה ──────────────────────────────────────────
+    "1": "ENTRANCE_DOOR",
+    "כניסה": "ENTRANCE_DOOR", "דלת כניסה": "ENTRANCE_DOOR", "דלתות כניסה": "ENTRANCE_DOOR",
+    "דלת כניסה מעוצבת": "ENTRANCE_DOOR",
     "דלת חוץ": "ENTRANCE_DOOR", "דלת חיצונית": "ENTRANCE_DOOR", "חיצונית": "ENTRANCE_DOOR",
-    "2": "INTERIOR_DOORS", "פנים": "INTERIOR_DOORS",
-    "דלת פנים": "INTERIOR_DOORS", "דלתות פנים": "INTERIOR_DOORS",
+    "דלת ראשית": "ENTRANCE_DOOR", "ראשית": "ENTRANCE_DOOR",
+    "דלת לבית": "ENTRANCE_DOOR", "כניסה לבית": "ENTRANCE_DOOR",
+    "כניסה לדירה": "ENTRANCE_DOOR", "כניסה לבניין": "ENTRANCE_DOOR",
+    "פלדלת": "ENTRANCE_DOOR", "דלת פלדלת": "ENTRANCE_DOOR",
+    "דלת פלדה": "ENTRANCE_DOOR", "פלדה": "ENTRANCE_DOOR", "דלת ברזל": "ENTRANCE_DOOR",
+    "דלת ביטחון": "ENTRANCE_DOOR", "דלת בטחון": "ENTRANCE_DOOR",
+    "דלת ממוגנת": "ENTRANCE_DOOR", "דלת מגן": "ENTRANCE_DOOR", "דלת חסם": "ENTRANCE_DOOR",
+    "רב בריח": "ENTRANCE_DOOR", "רב-בריח": "ENTRANCE_DOOR",
+    # entrance model/series names
+    "נפחות": "ENTRANCE_DOOR", "פנורמי": "ENTRANCE_DOOR", "יווני": "ENTRANCE_DOOR",
+    "מרקורי": "ENTRANCE_DOOR", "עדן": "ENTRANCE_DOOR", "עדן פליז": "ENTRANCE_DOOR",
+    "סביליה": "ENTRANCE_DOOR", "אומנויות": "ENTRANCE_DOOR",
+
+    # ── 2) Interior doors — דלתות פנים ────────────────────────────────────────
+    "2": "INTERIOR_DOORS",
+    "פנים": "INTERIOR_DOORS", "דלת פנים": "INTERIOR_DOORS", "דלתות פנים": "INTERIOR_DOORS",
+    "דלת פנימית": "INTERIOR_DOORS", "דלתות פנימיות": "INTERIOR_DOORS",
     "פולימר": "INTERIOR_DOORS", "דלת פולימר": "INTERIOR_DOORS",
     "דלתות פולימר": "INTERIOR_DOORS", "דלתות פנים פולימר": "INTERIOR_DOORS",
-    "3": "MAMAD_DOOR", "ממד": "MAMAD_DOOR", "ממ\"ד": "MAMAD_DOOR",
+    "דלת חדר": "INTERIOR_DOORS", "דלתות חדרים": "INTERIOR_DOORS",
+    "דלת חדר שינה": "INTERIOR_DOORS", "דלת שינה": "INTERIOR_DOORS",
+    "דלת הזזה": "INTERIOR_DOORS", "דלתות הזזה": "INTERIOR_DOORS",
+    "דלת כיס": "INTERIOR_DOORS", "דלת נגררת": "INTERIOR_DOORS",
+    "דלת אסם": "INTERIOR_DOORS", "אסם": "INTERIOR_DOORS",
+    "דלת מקלחת": "INTERIOR_DOORS", "דלת למקלחת": "INTERIOR_DOORS",
+    "דלת אמבטיה": "INTERIOR_DOORS", "דלת שירותים": "INTERIOR_DOORS",
+    "hdf": "INTERIOR_DOORS", "דלת hdf": "INTERIOR_DOORS",
+    "חריצים": "INTERIOR_DOORS", "4 חריצים": "INTERIOR_DOORS",
+    "פסים": "INTERIOR_DOORS", "קרוס": "INTERIOR_DOORS", "מרובעים": "INTERIOR_DOORS",
+
+    # ── 3) Mamad — דלת ממ"ד ───────────────────────────────────────────────────
+    "3": "MAMAD_DOOR",
+    "ממד": "MAMAD_DOOR", "ממ\"ד": "MAMAD_DOOR",
     "דלת ממד": "MAMAD_DOOR", "דלת ממ\"ד": "MAMAD_DOOR",
+    "מרחב מוגן": "MAMAD_DOOR", "דלת מרחב מוגן": "MAMAD_DOOR",
+    "חדר ביטחון": "MAMAD_DOOR", "חדר בטחון": "MAMAD_DOOR",
+    "פיקוד העורף": "MAMAD_DOOR", "דלת פיקוד העורף": "MAMAD_DOOR",
+
+    # ── 4) Other — אחר (incl. repair/fault, routed to free-text) ──────────────
     "4": "OTHER", "אחר": "OTHER",
+    "תיקון": "OTHER", "תקלה": "OTHER", "פריצה": "OTHER", "שירות": "OTHER",
 }
 
 OPTIONS_ENTRANCE_FRAME = {
