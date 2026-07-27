@@ -2594,7 +2594,7 @@ async function send(){
   addMsg(text,'user');
 
   const typing=document.createElement('div');
-  typing.className='typing';typing.textContent='נטלי מקלידה...';
+  typing.className='typing';typing.textContent='מקליד תשובה...';
   chat.appendChild(typing);scrollDown();
 
   try{
