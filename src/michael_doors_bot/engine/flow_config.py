@@ -148,6 +148,7 @@ MSG_MEDIA_PREFIX = (
 
 OPTIONS_INQUIRY_TYPE = {
     "1": "ENTRANCE_DOOR", "כניסה": "ENTRANCE_DOOR", "דלת כניסה": "ENTRANCE_DOOR",
+    "דלת חוץ": "ENTRANCE_DOOR", "דלת חיצונית": "ENTRANCE_DOOR", "חיצונית": "ENTRANCE_DOOR",
     "2": "INTERIOR_DOORS", "פנים": "INTERIOR_DOORS",
     "דלת פנים": "INTERIOR_DOORS", "דלתות פנים": "INTERIOR_DOORS",
     "פולימר": "INTERIOR_DOORS", "דלת פולימר": "INTERIOR_DOORS",
