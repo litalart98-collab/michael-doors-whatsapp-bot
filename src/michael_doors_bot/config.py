@@ -42,6 +42,15 @@ GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
 #                  customer's reply, then stays silent for a human to continue.
 BOT_ENGINE: str = os.getenv("BOT_ENGINE", "claude").strip().lower()
 
+# Key-message engine only: when true (default), the bot NEVER engages a number
+# that Michael already had a manual WhatsApp conversation with (the chat history
+# contains a message he sent by hand). It responds only to brand-new contacts
+# with no such past, leaving existing relationships entirely to the human.
+# Set KEYMSG_SKIP_KNOWN_CONTACTS=false to make the bot answer every new inbound.
+KEYMSG_SKIP_KNOWN_CONTACTS: bool = (
+    os.getenv("KEYMSG_SKIP_KNOWN_CONTACTS", "true").strip().lower() == "true"
+)
+
 # Secret token appended as ?token=... in the webhook URL registered with Green-API.
 # STRONGLY RECOMMENDED in production — without it, any external party who discovers
 # the URL can inject fake messages and burn Claude API budget.
