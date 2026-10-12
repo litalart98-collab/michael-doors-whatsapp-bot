@@ -51,6 +51,8 @@ from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
 from .providers.supabase_store import upsert_lead, save_followup, load_all_conversations
 from .providers import airtable_store
+from .engine import key_message
+from .engine import flow_machine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,6 +291,13 @@ async def _handle_non_text(sender: str, msg_type: str = "") -> None:
 
     Other types (sticker, document, location …): ignored silently.
     """
+    # Key-message engine: route media through the same minimal flow.
+    if config.BOT_ENGINE == "keymessage":
+        if sender in _human_takeover or not _is_individual_chat(sender):
+            return
+        await _key_message_turn(sender, "", is_media=True)
+        return
+
     _followup_reset(sender)
 
     # Audio / voice note → silently ignore (reset timer, no reply)
@@ -1794,6 +1803,141 @@ async def _handle_owner_command(sender: str, text: str) -> None:
     )
 
 
+async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool) -> None:
+    """Airtable sync for the key-message flow. Never raises.
+
+    Maps the minimal key-message data to the customer's single Airtable table:
+      טלפון     ← WhatsApp number
+      נושא פנייה ← the customer's free-text reply (city + how many doors)
+      תאריך פנייה ← first contact
+      סטטוס     ← collecting (first message) → waiting (after the reply)
+
+    First message  → CREATE (status collecting).
+    After reply    → COMPLETE (status waiting, topic filled from the reply).
+    """
+    if not airtable_store.enabled():
+        return
+    try:
+        reply = lead.get("lead_reply") or ""
+        # Detect the door type from the customer's free-text reply so it appears
+        # both as a clean "סוג שירות" value and inside "נושא פנייה".
+        door_type = flow_machine.inquiry_type_label(reply)
+        # Put the door type in "נושא פנייה" too, but avoid duplicating it when the
+        # customer already wrote the same label in their reply.
+        if door_type and reply and door_type not in reply:
+            topic = f"{door_type} | {reply}"
+        else:
+            topic = reply or door_type
+        values = {
+            "phone":      _format_il_phone(lead.get("phone") or sender),
+            "service":    door_type,   # → "סוג שירות" (empty values are dropped)
+            "topic":      topic,       # → "נושא פנייה" (door type + the raw reply)
+            "created_at": _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
+        }
+        record_id = lead.get("airtable_record_id")
+        completed = lead.get("airtable_completed")
+        # Returning lead whose previous inquiry was completed → open a fresh record.
+        if record_id and completed:
+            record_id = None
+        # Recover an active record after a restart wiped the local mapping.
+        if not record_id:
+            record_id = await airtable_store.find_active_lead_by_phone(values["phone"])
+
+        if not record_id:
+            values["status"] = airtable_store.STATUS_COLLECTING
+            record_id = await airtable_store.create_lead(values)
+            if not record_id:
+                return
+            lead["airtable_record_id"] = record_id
+            lead["airtable_completed"] = False
+            logger.info("[KEYMSG:AIRTABLE] Lead created | sender=%s | record=%s", sender, record_id)
+            if action != "complete":
+                return  # created on the first message; nothing more to do yet
+
+        if action == "complete":
+            ok = await airtable_store.complete_lead(record_id, values)
+            if ok:
+                lead["airtable_record_id"] = record_id
+                lead["airtable_completed"] = True
+                logger.info("[KEYMSG:AIRTABLE] Lead completed | sender=%s | record=%s", sender, record_id)
+        else:
+            await airtable_store.update_lead(record_id, values)
+            lead["airtable_record_id"] = record_id
+            logger.info("[KEYMSG:AIRTABLE] Lead updated | sender=%s | record=%s", sender, record_id)
+    except Exception as exc:
+        logger.warning("[KEYMSG:AIRTABLE] sync failed (non-fatal) | sender=%s | %s", sender, exc)
+
+
+async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> None:
+    """Minimal deterministic key-message flow over Green API. Never raises.
+
+    Sends the opening key message on the first inbound, then a handoff message on
+    the reply, then silences the bot (human takeover). Airtable sync is added in
+    the next step, per the agreed sequence.
+    """
+    is_test = config.TEST_MODE
+    now = datetime.utcnow().isoformat()
+    try:
+        leads = _load_leads(is_test)
+        lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
+
+        # Reconstruct the pure flow state from the persisted lead.
+        bot_enabled = lead.get("km_bot_enabled", True)
+        state = {
+            "currentStep": lead.get("km_step", key_message.START),
+            "botEnabled": bot_enabled,
+            "conversationMode": "WAITING_FOR_AGENT" if not bot_enabled else "BOT_COLLECTING",
+            "collectedData": {"lead_reply": lead["lead_reply"]} if lead.get("lead_reply") else {},
+            "handoffReason": lead.get("handoffReason"),
+        }
+
+        result = key_message.process(state, text, is_media=is_media)
+        ns = result["state"]
+
+        # Record inbound + persist flow state.
+        lead.setdefault("messages", []).append(
+            {"from": "customer", "text": "[media]" if is_media else text, "time": now}
+        )
+        lead["km_step"] = ns["currentStep"]
+        lead["km_bot_enabled"] = ns["botEnabled"]
+        if ns["collectedData"].get("lead_reply"):
+            lead["lead_reply"] = ns["collectedData"]["lead_reply"]
+        if ns.get("handoffReason"):
+            lead["handoffReason"] = ns["handoffReason"]
+        lead["lastMessage"] = now
+        leads[sender] = lead
+        _save_leads(leads, is_test)
+
+        # Send the reply (this flow produces exactly one message per turn).
+        for reply in result["replies"]:
+            try:
+                await green.send_message(sender, reply)
+                lead.setdefault("messages", []).append(
+                    {"from": "bot", "text": reply, "time": datetime.utcnow().isoformat()}
+                )
+                logger.info("[KEYMSG:SEND] sender=%s | %s", sender, reply[:40])
+            except Exception as send_err:
+                _record_error("send_fail", sender, str(send_err))
+                logger.error("[KEYMSG:SEND_FAIL] sender=%s | %s", sender, send_err)
+                _queue_send_retry(sender, reply)
+        _save_leads(leads, is_test)
+
+        # Airtable sync: create on the first message, complete after the reply.
+        km_action = result["intents"].get("airtable")
+        if km_action:
+            await _km_airtable_sync(sender, lead, km_action, is_test)
+            leads[sender] = lead
+            _save_leads(leads, is_test)
+
+        # On handoff → silence the bot so the human rep continues uninterrupted.
+        if result["intents"]["terminal"] and _is_individual_chat(sender):
+            _takeover_activate(sender)
+            logger.info("[KEYMSG:HANDOFF] Bot silenced, human takes over | sender=%s", sender)
+    except Exception as exc:
+        _record_error("unhandled", sender, f"keymsg: {exc}")
+        logger.error("[KEYMSG:UNHANDLED] sender=%s | %s", sender, exc)
+
+
 async def _process_message(sender: str, text: str) -> None:
     # ── Owner personal phone → admin commands only ────────────────────────────
     if config.OWNER_PHONE and sender == config.OWNER_PHONE:
@@ -1838,6 +1982,14 @@ async def _process_message(sender: str, text: str) -> None:
                     return
 
             logger.info("[BOT:RECV] sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
+
+            # ── Key-message engine ────────────────────────────────────────────
+            # Minimal deterministic auto-responder (BOT_ENGINE=keymessage).
+            # Runs AFTER all the safety guards above (human-takeover, blocklist,
+            # rate-limit, group/test-mode) and bypasses the Claude conversation.
+            if config.BOT_ENGINE == "keymessage":
+                await _key_message_turn(sender, text)
+                return
 
             # Customer replied — reset follow-up timer
             _followup_reset(sender)
@@ -2594,7 +2746,7 @@ async function send(){
   addMsg(text,'user');
 
   const typing=document.createElement('div');
-  typing.className='typing';typing.textContent='נטלי מקלידה...';
+  typing.className='typing';typing.textContent='מקליד תשובה...';
   chat.appendChild(typing);scrollDown();
 
   try{
