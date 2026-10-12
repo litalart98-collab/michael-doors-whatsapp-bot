@@ -3066,6 +3066,88 @@ def _check_admin(admin: str) -> Optional[JSONResponse]:
     return None
 
 
+@app.get("/green-status", response_class=JSONResponse)
+async def green_status(admin: str = Query(default="")):
+    """Diagnostic: confirm the bot's Green API token works and report the instance
+    authorization state (does NOT expose the token)."""
+    if (denied := _check_admin(admin)):
+        return denied
+    state = await green.get_state()
+    return {
+        "ok": bool(state),
+        "token_valid": bool(state),   # empty state ⇒ token rejected / network error
+        "state": state or "(unknown — token rejected or network error)",
+        "connected": state == "authorized",
+        "needs_qr": state in ("notAuthorized", "starting"),
+        "instance_id": config.GREEN_API_INSTANCE_ID,
+        "api_url": config.GREEN_API_URL,
+    }
+
+
+@app.get("/green-qr", response_class=HTMLResponse)
+async def green_qr(admin: str = Query(default="")):
+    """Serve the WhatsApp pairing QR directly from the bot (bypasses the Green API
+    console). Uses the bot's own token, so success here proves the production token
+    works. Auto-refreshes every 15s because a QR expires after ~20s.
+
+    Protected by ADMIN_SECRET when set (anyone who scans a live QR could link their
+    own WhatsApp to this instance, so keep the URL private)."""
+    if config.ADMIN_SECRET and admin != config.ADMIN_SECRET:
+        return HTMLResponse("<h2>403 — הוסף ?admin=הסוד_שלך לכתובת</h2>", status_code=403)
+
+    state = await green.get_state()
+    refresh = '<meta http-equiv="refresh" content="15">'
+    style = (
+        "<style>body{font-family:Arial,sans-serif;background:#e5ddd5;text-align:center;"
+        "padding:24px 16px;direction:rtl}h1{color:#075e54;font-size:20px}"
+        ".card{background:#fff;max-width:420px;margin:16px auto;padding:20px;border-radius:14px;"
+        "box-shadow:0 2px 8px rgba(0,0,0,.15)}img{width:280px;max-width:80vw;height:auto}"
+        ".ok{color:#1b5e20;font-size:18px;font-weight:600}.err{color:#b71c1c;font-weight:600}"
+        ".muted{color:#666;font-size:13px;margin-top:10px;line-height:1.6}code{background:#f0f0f0;padding:2px 5px;border-radius:4px}</style>"
+    )
+
+    if not state:
+        body = (
+            "<div class='card'><p class='err'>❌ הטוקן של Green API נדחה (או תקלת רשת)</p>"
+            "<p class='muted'>המשתנה <code>GREEN_API_TOKEN</code> ב-Render כנראה שגוי/ישן. "
+            "זו בדיוק הסיבה ל-401 ב-console. צריך טוקן תקין — פני אליי ונעדכן אותו.</p></div>"
+        )
+        return HTMLResponse(f"<!doctype html><html dir='rtl' lang='he'><head><meta charset='utf-8'>"
+                            f"<meta name='viewport' content='width=device-width,initial-scale=1'>{style}</head>"
+                            f"<body><h1>🚪 חיבור וואטסאפ — מיכאל דלתות</h1>{body}</body></html>")
+
+    if state == "authorized":
+        body = ("<div class='card'><p class='ok'>✅ המספר כבר מחובר!</p>"
+                "<p class='muted'>הבוט מחובר לוואטסאפ ומוכן לעבודה. אין צורך לסרוק QR.</p></div>")
+        return HTMLResponse(f"<!doctype html><html dir='rtl' lang='he'><head><meta charset='utf-8'>"
+                            f"<meta name='viewport' content='width=device-width,initial-scale=1'>{style}</head>"
+                            f"<body><h1>🚪 חיבור וואטסאפ — מיכאל דלתות</h1>{body}</body></html>")
+
+    qr = await green.get_qr()
+    if qr.get("type") == "qrCode" and qr.get("message"):
+        img = qr["message"]
+        src = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+        body = (
+            f"<div class='card'><img src='{src}' alt='QR'>"
+            "<p class='muted'>בטלפון של מיכאל: <b>WhatsApp Business</b> ← הגדרות ← "
+            "<b>מכשירים מקושרים</b> ← <b>קישור מכשיר</b> ← וסרקו את הקוד.<br>"
+            "⏱️ הקוד מתרענן כל 15 שניות אוטומטית — פשוט סרקו את מה שמופיע.</p></div>"
+        )
+    elif qr.get("type") == "alreadyLogged":
+        body = "<div class='card'><p class='ok'>✅ המספר כבר מחובר!</p></div>"
+        refresh = ""
+    else:
+        body = (f"<div class='card'><p class='err'>לא התקבל QR</p>"
+                f"<p class='muted'>מצב: <code>{state}</code> · תגובה: <code>{qr.get('type')}</code><br>"
+                f"{qr.get('message','')[:200]}</p></div>")
+    return HTMLResponse(
+        f"<!doctype html><html dir='rtl' lang='he'><head><meta charset='utf-8'>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'>{refresh}{style}</head>"
+        f"<body><h1>🚪 חיבור וואטסאפ — מיכאל דלתות</h1>"
+        f"<p class='muted'>מצב נוכחי: <code>{state}</code></p>{body}</body></html>"
+    )
+
+
 @app.get("/diag", response_class=JSONResponse)
 async def diag(admin: str = Query(default="")):
     """Lightweight diagnostics endpoint — runtime state, error counts, recent errors."""

@@ -120,6 +120,35 @@ class GreenAPIClient:
             logger.warning("[GREEN-API] getSettings failed: %s", exc)
             return {}
 
+    async def get_state(self) -> str:
+        """Return the instance authorization state, or '' on failure.
+        Values: 'notAuthorized' | 'authorized' | 'starting' | 'yellowCard' | 'blocked'.
+        Also doubles as a token check — an invalid token raises (caught → '')."""
+        url = f"{self._base}/getStateInstance/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                return (r.json() or {}).get("stateInstance", "")
+        except Exception as exc:
+            logger.warning("[GREEN-API] getStateInstance failed: %s", exc)
+            return ""
+
+    async def get_qr(self) -> dict:
+        """Return the pairing QR. {type: 'qrCode'|'alreadyLogged'|'error', message: ...}.
+        For type 'qrCode', message is a base64-encoded PNG. Returns a synthetic
+        error dict (never raises) so the caller can display the reason."""
+        url = f"{self._base}/qr/{self._token}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    data = r.json() if r.content else {}
+                    return data if isinstance(data, dict) else {"type": "error", "message": str(data)}
+                return {"type": "error", "message": f"HTTP {r.status_code}: {r.text[:200]}"}
+        except Exception as exc:
+            return {"type": "error", "message": str(exc)[:200]}
+
     async def get_chat_history(self, chat_id: str, count: int = 15) -> list[dict]:
         """Return recent messages for a chat. Each message has:
           type: 'outgoing'/'incoming'
