@@ -623,6 +623,58 @@ def _queue_send_retry(chat_id: str, message: str) -> None:
     logger.warning("[BOT:SEND_QUEUED] Message queued for retry in %ds | chat_id=%s", _SEND_RETRY_DELAY, chat_id)
 
 
+# ── Proactive (form-lead) send rate limiter ──────────────────────────────────
+# Protects the WhatsApp number from bans. Sends over the hourly cap or inside the
+# min-spacing window are queued and drained at a safe pace by _proactive_drain_loop.
+_PROACTIVE_WINDOW         = 3600   # seconds (1 hour) for the hourly cap
+_PROACTIVE_DRAIN_INTERVAL = 10     # seconds between drain checks
+_PROACTIVE_MAX_ATTEMPTS   = 5
+_proactive_send_times: list[float] = []   # timestamps of recent proactive sends
+_proactive_queue: list[dict] = []         # {chat_id, message, attempts} waiting to send
+
+
+def _proactive_can_send_now() -> bool:
+    """True if a proactive send is allowed right now (under the hourly cap AND
+    past the min spacing since the last proactive send)."""
+    now = time.time()
+    _proactive_send_times[:] = [t for t in _proactive_send_times if now - t < _PROACTIVE_WINDOW]
+    if len(_proactive_send_times) >= config.FORM_MAX_PER_HOUR:
+        return False
+    if _proactive_send_times and (now - max(_proactive_send_times)) < config.FORM_MIN_SPACING_SEC:
+        return False
+    return True
+
+
+def _proactive_record_send() -> None:
+    _proactive_send_times.append(time.time())
+
+
+async def _proactive_drain_loop() -> None:
+    """Send queued (rate-limited) proactive messages at a safe pace."""
+    while True:
+        await asyncio.sleep(_PROACTIVE_DRAIN_INTERVAL)
+        try:
+            if not _proactive_queue or not _proactive_can_send_now():
+                continue
+            entry = _proactive_queue.pop(0)
+            try:
+                await green.send_message(entry["chat_id"], entry["message"])
+                _proactive_record_send()
+                logger.info("[FORM_LEAD:QUEUED_SENT] paced send | chat_id=%s | remaining=%d",
+                            entry["chat_id"], len(_proactive_queue))
+            except Exception as exc:
+                entry["attempts"] = entry.get("attempts", 0) + 1
+                if entry["attempts"] <= _PROACTIVE_MAX_ATTEMPTS:
+                    _proactive_queue.append(entry)   # requeue for a later pass
+                else:
+                    logger.critical("[FORM_LEAD:QUEUED_DROPPED] send kept failing — giving up | chat_id=%s",
+                                    entry["chat_id"])
+                logger.warning("[FORM_LEAD:QUEUED_SEND_FAIL] attempt=%d | chat_id=%s | %s",
+                               entry["attempts"], entry["chat_id"], exc)
+        except Exception as exc:
+            logger.warning("[FORM_LEAD:DRAIN_ERR] %s", exc)
+
+
 # ── Google Sheets retry queue (Fix 3) ─────────────────────────────────────────
 # append_lead now raises on failure. Failed sends are queued here and retried
 # up to 3 times with 5-minute delays before being permanently abandoned.
@@ -2438,8 +2490,11 @@ async def _lifespan(app: FastAPI):
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     # Follow-up reminders disabled — bot does not send "still here?" messages.
     # _followup_task = asyncio.create_task(_supervised("followup_loop", _followup_loop))
+    # Paces out rate-limited proactive form-lead sends (ban protection).
+    _proactive_task = asyncio.create_task(_supervised("proactive_drain", _proactive_drain_loop))
     yield
     _poll_task.cancel()
+    _proactive_task.cancel()
     # if _followup_task: _followup_task.cancel()
     logger.info("=== BOT SHUTTING DOWN ===")
 
@@ -3247,15 +3302,26 @@ async def form_lead(request: Request, token: str = Query(default="")):
 
         if not duplicate:
             msg = _form_lead_message(name)
-            try:
-                await green.send_message(sender, msg)
+            did_send = False
+            # Rate-limit proactive sends to protect the number from bans.
+            if _proactive_can_send_now():
+                try:
+                    await green.send_message(sender, msg)
+                    _proactive_record_send()
+                    did_send = True
+                except Exception as send_err:
+                    _record_error("send_fail", sender, f"form_lead: {send_err}")
+                    logger.error("[FORM_LEAD:SEND_FAIL] sender=%s | %s", sender, send_err)
+            if did_send:
                 sent = True
                 lead.setdefault("messages", []).append({"from": "bot", "text": msg, "time": now})
                 logger.info("[FORM_LEAD:SEND] sender=%s | name=%s", sender, name[:20])
-            except Exception as send_err:
-                _record_error("send_fail", sender, f"form_lead: {send_err}")
-                logger.error("[FORM_LEAD:SEND_FAIL] sender=%s | %s", sender, send_err)
-                _queue_send_retry(sender, msg)
+            else:
+                # Over the rate limit (or a send error) → queue for paced sending,
+                # so the lead is never dropped. The Airtable row is still created.
+                _proactive_queue.append({"chat_id": sender, "message": msg, "attempts": 0})
+                logger.info("[FORM_LEAD:QUEUED] queued for paced send | sender=%s | queue=%d",
+                            sender, len(_proactive_queue))
 
             lead["form_sent"] = True
             lead["form_sent_at"] = now
@@ -3303,6 +3369,7 @@ async def form_lead(request: Request, token: str = Query(default="")):
     return JSONResponse({
         "ok": True,
         "sent": sent,
+        "queued": (not sent and not duplicate),   # rate-limited → will send soon
         "duplicate": duplicate,
         "airtable_id": airtable_id,
         "phone": sender,
