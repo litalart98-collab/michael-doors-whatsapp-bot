@@ -3248,31 +3248,10 @@ async def form_lead_options():
     return Response(status_code=204, headers=_FORM_CORS_HEADERS)
 
 
-@app.post("/form-lead")
-async def form_lead(request: Request, token: str = Query(default="")):
-    """Proactive outreach for website-form leads.
-
-    The site form (Lovable) POSTs the lead here; the bot sends ONE WhatsApp
-    message to the lead and writes a row to the SAME Airtable table, then hands
-    any reply to the human (no bot interference). Secured by FORM_SECRET (falls
-    back to WEBHOOK_SECRET) via ?token=… or the X-Form-Token header.
-
-    Accepted JSON (all optional except phone): name/full_name, phone, city,
-    door_type/service, quantity, note/message.
-
-    NOTE: proactive sends require a PAID Green API plan and carry WhatsApp-ban
-    risk; the lead opted in by submitting the form, which is the safest case.
-    """
-    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
-    hdr_token = request.headers.get("X-Form-Token", "")
-    if secret and token != secret and hdr_token != secret:
-        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403, headers=_FORM_CORS_HEADERS)
-
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400, headers=_FORM_CORS_HEADERS)
-
+async def _process_form_lead(data: dict) -> tuple:
+    """Core of the website-form flow: send the proactive opener (rate-limited)
+    and create the Airtable row. Returns (result_dict, http_status). Shared by
+    POST /form-lead (the live path) and GET /form-test (browser diagnosis)."""
     name      = str(data.get("name") or data.get("full_name") or "").strip()
     phone_raw = str(data.get("phone") or data.get("telephone") or data.get("tel") or "").strip()
     door_type = str(data.get("door_type") or data.get("doorType") or data.get("service") or "").strip()
@@ -3281,16 +3260,16 @@ async def form_lead(request: Request, token: str = Query(default="")):
     note      = str(data.get("note") or data.get("message") or "").strip()
 
     if not phone_raw:
-        return JSONResponse({"ok": False, "error": "missing phone"}, status_code=400, headers=_FORM_CORS_HEADERS)
-
+        return {"ok": False, "error": "missing phone"}, 400
     sender = _normalize_to_chat_id(phone_raw)
     if not sender or not _is_individual_chat(sender):
-        return JSONResponse({"ok": False, "error": "invalid phone"}, status_code=400, headers=_FORM_CORS_HEADERS)
+        return {"ok": False, "error": "invalid phone"}, 400
 
     is_test = config.TEST_MODE
     now = datetime.utcnow().isoformat()
     sent = False
     airtable_id = None
+    airtable_error = None
     duplicate = False
     try:
         leads = _load_leads(is_test)
@@ -3362,18 +3341,68 @@ async def form_lead(request: Request, token: str = Query(default="")):
                 lead["airtable_completed"] = False
                 leads[sender] = lead
                 _save_leads(leads, is_test)
+            else:
+                airtable_error = "create_lead returned no id (check /test-airtable)"
+        elif not airtable_store.enabled():
+            airtable_error = "airtable not configured (AIRTABLE_TOKEN missing)"
     except Exception as exc:
         logger.error("[FORM_LEAD:UNHANDLED] sender=%s | %s", sender, exc)
-        return JSONResponse({"ok": False, "error": "server error"}, status_code=500, headers=_FORM_CORS_HEADERS)
+        return {"ok": False, "error": f"server error: {exc}"}, 500
 
-    return JSONResponse({
+    return {
         "ok": True,
         "sent": sent,
         "queued": (not sent and not duplicate),   # rate-limited → will send soon
         "duplicate": duplicate,
+        "airtable_enabled": airtable_store.enabled(),
         "airtable_id": airtable_id,
+        "airtable_error": airtable_error,
         "phone": sender,
-    }, headers=_FORM_CORS_HEADERS)
+    }, 200
+
+
+@app.post("/form-lead")
+async def form_lead(request: Request, token: str = Query(default="")):
+    """Proactive outreach for website-form leads (the live path the site calls).
+
+    The site form (Lovable) POSTs the lead here; the bot sends ONE WhatsApp
+    message and writes a row to the SAME Airtable table, then hands any reply to
+    the human. Secured by FORM_SECRET (falls back to WEBHOOK_SECRET) via ?token=…
+    or the X-Form-Token header. Accepted JSON (phone required): name/full_name,
+    phone, city, door_type/service, quantity, note/message.
+    """
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    hdr_token = request.headers.get("X-Form-Token", "")
+    if secret and token != secret and hdr_token != secret:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403, headers=_FORM_CORS_HEADERS)
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400, headers=_FORM_CORS_HEADERS)
+    result, status = await _process_form_lead(data)
+    return JSONResponse(result, status_code=status, headers=_FORM_CORS_HEADERS)
+
+
+@app.get("/form-test", response_class=JSONResponse)
+async def form_test(token: str = Query(default=""), admin: str = Query(default=""),
+                    phone: str = Query(default=""), name: str = Query(default=""),
+                    door_type: str = Query(default=""), quantity: str = Query(default=""),
+                    city: str = Query(default="")):
+    """Browser diagnostic for the form → bot → Airtable path (bypasses the site).
+    Open e.g.:  /form-test?token=FORM_SECRET&phone=0501234567&name=בדיקה
+    Auth: ?token=FORM_SECRET  (or ?admin=ADMIN_SECRET). Proves the bot endpoint
+    and Airtable work independently of the website — if a row appears here, the
+    problem is the Lovable wiring, not the bot."""
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    ok_token = bool(secret) and token == secret
+    ok_admin = bool(config.ADMIN_SECRET) and admin == config.ADMIN_SECRET
+    if secret and not ok_token and not ok_admin:
+        return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
+    if not phone:
+        return JSONResponse({"ok": False, "error": "add ?phone=05XXXXXXXX (and optionally &name=...)"}, status_code=400)
+    data = {"phone": phone, "name": name, "door_type": door_type, "quantity": quantity, "city": city}
+    result, status = await _process_form_lead(data)
+    return JSONResponse(result, status_code=status)
 
 
 @app.get("/diag", response_class=JSONResponse)
