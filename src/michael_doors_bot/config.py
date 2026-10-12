@@ -15,12 +15,19 @@ if _missing:
     )
     sys.exit(1)
 
-GREEN_API_INSTANCE_ID: str = os.environ["GREEN_API_INSTANCE_ID"]
-GREEN_API_TOKEN: str       = os.environ["GREEN_API_TOKEN"]
+# .strip() every credential: pasting into a hosting dashboard often appends a
+# trailing newline/space, and an unstripped value silently breaks every request
+# (wrong URL host, or a token the API rejects as invalid).
+GREEN_API_INSTANCE_ID: str = os.environ["GREEN_API_INSTANCE_ID"].strip()
+GREEN_API_TOKEN: str       = os.environ["GREEN_API_TOKEN"].strip()
 
-# URL derived automatically from instance ID (e.g. 7107593885 → https://7107.api.greenapi.com)
+# URL derived automatically from instance ID (e.g. 7107593885 → https://7107.api.greenapi.com).
+# A trailing slash or stray whitespace in an explicit GREEN_API_URL is also removed.
 _instance_prefix = GREEN_API_INSTANCE_ID[:4] if len(GREEN_API_INSTANCE_ID) >= 4 else GREEN_API_INSTANCE_ID
-GREEN_API_URL: str = os.getenv("GREEN_API_URL", f"https://{_instance_prefix}.api.greenapi.com")
+GREEN_API_URL: str = (
+    os.getenv("GREEN_API_URL", "").strip().rstrip("/")
+    or f"https://{_instance_prefix}.api.greenapi.com"
+)
 
 ANTHROPIC_API_KEY: str = os.environ["ANTHROPIC_API_KEY"]
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
