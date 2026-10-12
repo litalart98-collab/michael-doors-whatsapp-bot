@@ -2984,6 +2984,12 @@ async def test_airtable(admin: str = Query(default=""), table: str = Query(defau
     t0 = time.time()
     res = await airtable_store.selftest_create(test_values, target_table)
     res["target_table"] = "test" if target_table else "production"
+    # Diagnostics for the token value (length only — never the token itself).
+    # A valid Airtable PAT is ~82 chars and contains a "." — a much shorter length
+    # or a missing dot means it was copied incompletely.
+    res["token_length"] = len(airtable_store._TOKEN)
+    res["token_has_dot"] = "." in airtable_store._TOKEN
+    res["token_prefix_ok"] = airtable_store._TOKEN.startswith("pat")
     res["elapsed_s"] = round(time.time() - t0, 2)
     res["columns_expected"] = list(airtable_store.FIELD_MAP.values())
     if res.get("ok"):
