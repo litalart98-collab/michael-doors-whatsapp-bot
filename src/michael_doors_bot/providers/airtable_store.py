@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 import httpx
@@ -67,8 +68,8 @@ FIELD_MAP: dict[str, str] = {
     "city":       "עיר",
     "phone":      "טלפון",
     "service":    "סוג השירות",  # Multiple Select — values are sent as an array
-    "topic":      "נושא פניה",   # detailed description of what the customer wants
-    "created_at": "תאריך פניה",
+    "topic":      "נושא פנייה",   # best-guess spelling; self-heal drops it if wrong
+    "created_at": "תאריך פנייה",
     "status":     "סטטוס",
 }
 
@@ -183,61 +184,30 @@ async def find_active_lead_by_phone(phone: str, table_id: Optional[str] = None) 
 
 async def create_lead(values: dict, table_id: Optional[str] = None) -> Optional[str]:
     """Create a new inquiry record. Returns the new record id, or None on failure.
-
-    `values` uses internal keys (see FIELD_MAP). The caller is expected to set at
-    least phone, created_at and status.
-    """
+    Self-heals around unknown column names (see _send_healing)."""
     if not enabled():
         return None
-    fields = _clean_fields(values)
-    if not fields:
-        return None
-    payload = {"fields": fields, "typecast": True}
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.post(_table_url(table_id), headers=_headers(), json=payload)
-        if r.status_code // 100 != 2:
-            logger.warning(
-                "[AIRTABLE] create_lead non-2xx | status=%d | body=%s",
-                r.status_code, r.text[:300],
-            )
-            return None
-        return r.json().get("id")
-    except Exception as exc:
-        logger.warning("[AIRTABLE] create_lead failed: %s", exc)
-        return None
+    res = await _send_healing("POST", _table_url(table_id), values)
+    if res["dropped"]:
+        logger.warning("[AIRTABLE] create skipped unknown columns: %s", res["dropped"])
+    if not res["ok"]:
+        logger.warning("[AIRTABLE] create_lead failed | status=%s | %s", res["status"], res["error"])
+    return res["id"] if res["ok"] else None
 
 
 async def update_lead(record_id: str, values: dict, table_id: Optional[str] = None) -> bool:
-    """PATCH an existing record with the (non-empty) values. Returns success."""
+    """PATCH an existing record with the (non-empty) values. Returns success.
+    Self-heals around unknown column names."""
     if not enabled() or not record_id:
         return False
-    fields = _clean_fields(values)
-    if not fields:
-        return False
-    payload = {"fields": fields, "typecast": True}
-    url = f"{_table_url(table_id)}/{record_id}"
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.patch(url, headers=_headers(), json=payload)
-        if r.status_code // 100 != 2:
-            logger.warning(
-                "[AIRTABLE] update_lead non-2xx | id=%s | status=%d | body=%s",
-                record_id, r.status_code, r.text[:300],
-            )
-            return False
-        return True
-    except Exception as exc:
-        logger.warning("[AIRTABLE] update_lead failed | id=%s | %s", record_id, exc)
-        return False
+    res = await _send_healing("PATCH", f"{_table_url(table_id)}/{record_id}", values)
+    if res["dropped"]:
+        logger.warning("[AIRTABLE] update skipped unknown columns: %s", res["dropped"])
+    return res["ok"]
 
 
 async def complete_lead(record_id: str, values: dict, table_id: Optional[str] = None) -> bool:
-    """Mark a record complete: status → STATUS_WAITING plus any final values.
-
-    The caller passes completed_at / summary inside `values`; this helper just
-    forces the status so completion always sets it correctly.
-    """
+    """Mark a record complete: status → STATUS_WAITING plus any final values."""
     if not enabled() or not record_id:
         return False
     final = dict(values)
@@ -245,15 +215,71 @@ async def complete_lead(record_id: str, values: dict, table_id: Optional[str] = 
     return await update_lead(record_id, final, table_id)
 
 
-async def selftest_create(values: dict, table_id: Optional[str] = None) -> dict:
-    """Diagnostic create used by the /test-airtable endpoint.
+# Extracts the offending column from an Airtable 422 "Unknown field name: "X"".
+_UNKNOWN_FIELD_RE = re.compile(r'Unknown field name:\s*\\?"([^"\\]+)')
 
-    Unlike create_lead (which swallows errors and returns None), this returns the
-    HTTP status and response body so a misconfiguration — wrong column name, bad
-    token, wrong base/table — is visible to the operator. Returns a dict:
-        {"ok": bool, "status": int|None, "id": str|None, "error": str|None,
-         "missing_env": [..]}
-    """
+
+async def _send_healing(method: str, url: str, values: dict) -> dict:
+    """Map values→columns and POST/PATCH with typecast. On a 422 UNKNOWN_FIELD_NAME,
+    drop the offending column and retry — so a column-name mismatch never fails the
+    whole write; the record is saved with the columns that DO exist.
+    Returns {ok, status, id, error, dropped}."""
+    fields = _clean_fields(values)
+    dropped: list[str] = []
+    if not fields:
+        return {"ok": False, "status": None, "id": None, "error": "no fields", "dropped": dropped}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            for _ in range(8):
+                r = await client.request(
+                    method, url, headers=_headers(),
+                    json={"fields": fields, "typecast": True},
+                )
+                if r.status_code // 100 == 2:
+                    try:
+                        rid = r.json().get("id")
+                    except Exception:
+                        rid = None
+                    return {"ok": True, "status": r.status_code, "id": rid,
+                            "error": None, "dropped": dropped}
+                body = r.text
+                if r.status_code == 422 and "UNKNOWN_FIELD_NAME" in body:
+                    m = _UNKNOWN_FIELD_RE.search(body)
+                    if m and m.group(1).strip() in fields:
+                        bad = m.group(1).strip()
+                        del fields[bad]
+                        dropped.append(bad)
+                        if fields:
+                            continue
+                return {"ok": False, "status": r.status_code, "id": None,
+                        "error": body[:400], "dropped": dropped}
+    except Exception as exc:
+        return {"ok": False, "status": None, "id": None, "error": str(exc)[:400], "dropped": dropped}
+    return {"ok": False, "status": None, "id": None, "error": "too many unknown fields", "dropped": dropped}
+
+
+async def list_record_fields(table_id: Optional[str] = None) -> list:
+    """Best-effort: return field names seen across up to 50 records (columns that
+    are empty in every record won't appear). Diagnostics only."""
+    if not enabled():
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.get(_table_url(table_id), headers=_headers(),
+                                  params={"maxRecords": "50"})
+        if r.status_code // 100 != 2:
+            return []
+        names: set = set()
+        for rec in r.json().get("records", []):
+            names.update((rec.get("fields") or {}).keys())
+        return sorted(names)
+    except Exception:
+        return []
+
+
+async def selftest_create(values: dict, table_id: Optional[str] = None) -> dict:
+    """Diagnostic create used by /test-airtable. Returns detailed status (including
+    any self-healed/dropped column names) without exposing the token."""
     missing = [name for name, val in (
         ("AIRTABLE_TOKEN", _TOKEN), ("AIRTABLE_BASE_ID", _BASE_ID),
         ("AIRTABLE_TABLE_ID", _TABLE_ID),
@@ -261,18 +287,13 @@ async def selftest_create(values: dict, table_id: Optional[str] = None) -> dict:
     if missing:
         return {"ok": False, "status": None, "id": None,
                 "error": "missing env vars", "missing_env": missing}
-    payload = {"fields": _clean_fields(values), "typecast": True}
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.post(_table_url(table_id), headers=_headers(), json=payload)
-        ok = r.status_code // 100 == 2
-        return {
-            "ok": ok,
-            "status": r.status_code,
-            "id": (r.json().get("id") if ok else None),
-            "error": (None if ok else r.text[:400]),
-            "missing_env": [],
-        }
-    except Exception as exc:
-        return {"ok": False, "status": None, "id": None,
-                "error": str(exc)[:400], "missing_env": []}
+    res = await _send_healing("POST", _table_url(table_id), values)
+    return {
+        "ok": res["ok"],
+        "status": res["status"],
+        "id": res["id"],
+        "error": res["error"],
+        "missing_env": [],
+        "dropped_columns": res["dropped"],
+    }
+

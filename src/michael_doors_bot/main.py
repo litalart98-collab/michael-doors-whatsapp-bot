@@ -2990,6 +2990,8 @@ async def test_airtable(admin: str = Query(default=""), table: str = Query(defau
     res["token_length"] = len(airtable_store._TOKEN)
     res["token_has_dot"] = "." in airtable_store._TOKEN
     res["token_prefix_ok"] = airtable_store._TOKEN.startswith("pat")
+    # Real column names present in the table (best-effort) — helps align the code.
+    res["actual_field_names"] = await airtable_store.list_record_fields(target_table)
     res["elapsed_s"] = round(time.time() - t0, 2)
     res["columns_expected"] = list(airtable_store.FIELD_MAP.values())
     if res.get("ok"):
