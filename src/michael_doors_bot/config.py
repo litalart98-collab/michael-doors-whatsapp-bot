@@ -68,6 +68,13 @@ WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 # WEBHOOK_SECRET when unset so the feature still has some protection.
 FORM_SECRET: str = os.getenv("FORM_SECRET", "").strip()
 
+# Rate limiting for PROACTIVE form-lead sends — protects the WhatsApp number
+# from bans, especially while it is still "warming up". Leads over the limit are
+# QUEUED and sent later at a safe pace (never dropped — the Airtable row is always
+# created). Tune via env as the number matures.
+FORM_MAX_PER_HOUR:    int = int(os.getenv("FORM_MAX_PER_HOUR", "30") or "30")
+FORM_MIN_SPACING_SEC: int = int(os.getenv("FORM_MIN_SPACING_SEC", "20") or "20")
+
 # Persistent data directory — REQUIRED for production to survive Render restarts.
 # Set to a Render Persistent Disk mount path (e.g. /data).
 # Defaults to the project root which is EPHEMERAL on Render's service filesystem.
