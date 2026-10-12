@@ -92,6 +92,16 @@ def _utc_iso_to_il(utc_iso: str) -> str:
         return utc_iso
 
 
+def _il_date_display(utc_iso: str = "") -> str:
+    """Human-readable Israel date/time (DD/MM/YYYY HH:MM) for text columns like
+    "תאריך פניה". Falls back to the ISO string on any parse issue."""
+    il = _utc_iso_to_il(utc_iso or datetime.utcnow().isoformat())
+    try:
+        return datetime.fromisoformat(il).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return il
+
+
 _ROOT     = Path(__file__).parent.parent.parent
 # DATA_DIR can be set to a Render Persistent Disk mount (e.g. /data) so runtime
 # data files survive service restarts.  Falls back to project root.
@@ -1832,7 +1842,7 @@ async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool)
             "phone":      _format_il_phone(lead.get("phone") or sender),
             "service":    door_type,   # → "סוג שירות" (empty values are dropped)
             "topic":      topic,       # → "נושא פנייה" (door type + the raw reply)
-            "created_at": _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
+            "created_at": _il_date_display(lead.get("firstContact")),
         }
         record_id = lead.get("airtable_record_id")
         completed = lead.get("airtable_completed")
@@ -2961,7 +2971,7 @@ async def test_airtable(admin: str = Query(default=""), table: str = Query(defau
         "phone":      "000-0000000",
         "service":    "בדיקה",
         "topic":      "שורת טסט — אפשר למחוק",
-        "created_at": _utc_iso_to_il(datetime.utcnow().isoformat()),
+        "created_at": _il_date_display(),
         "status":     airtable_store.STATUS_COLLECTING,
     }
     t0 = time.time()

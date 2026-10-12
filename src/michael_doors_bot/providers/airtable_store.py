@@ -52,18 +52,23 @@ STATUS_WAITING    = "ממתין לנציג"          # details confirmed — wai
 # here only. Internal keys are stable; Airtable column names are the values.
 #
 # These MUST match the customer's actual Airtable columns character-for-character
-# (including spaces) — Airtable rejects the whole request on an unknown column
-# name. The current mapping targets the customer's 7-column table:
-#     שם לקוח · עיר · טלפון · סוג שירות · נושא פנייה · תאריך פנייה · סטטוס
+# (including spaces, and the single/double yud of פניה) — Airtable rejects the
+# whole request on an unknown column name. Verified against the live table:
+#   שם לקוח (text) · עיר (text) · טלפון (phone) · סוג השירות (MULTIPLE select) ·
+#   נושא פניה (text) · תאריך פניה (text) · סטטוס (single select)
 FIELD_MAP: dict[str, str] = {
     "full_name":  "שם לקוח",
     "city":       "עיר",
     "phone":      "טלפון",
-    "service":    "סוג שירות",   # short category: דלתות כניסה / פנים / ממ"ד / ...
-    "topic":      "נושא פנייה",  # detailed description of what the customer wants
-    "created_at": "תאריך פנייה",
+    "service":    "סוג השירות",  # Multiple Select — values are sent as an array
+    "topic":      "נושא פניה",   # detailed description of what the customer wants
+    "created_at": "תאריך פניה",
     "status":     "סטטוס",
 }
+
+# Internal keys whose Airtable column is a Multiple-Select field: the API needs an
+# array of option names, not a plain string. typecast creates missing options.
+_MULTI_SELECT_FIELDS = {"service"}
 
 
 def enabled() -> bool:
@@ -106,6 +111,13 @@ def _clean_fields(values: dict) -> dict:
             continue
         if isinstance(value, str) and not value.strip():
             continue
+        # Multiple-Select columns need an array of option names. Split a combined
+        # "A | B" string into separate options; a single value becomes a 1-element list.
+        if key in _MULTI_SELECT_FIELDS and isinstance(value, str):
+            opts = [v.strip() for v in value.split("|") if v.strip()]
+            if not opts:
+                continue
+            value = opts
         fields[column] = value
     return fields
 
