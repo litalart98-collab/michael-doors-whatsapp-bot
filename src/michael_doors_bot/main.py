@@ -2950,8 +2950,15 @@ async def test_airtable(admin: str = Query(default=""), table: str = Query(defau
     if not airtable_store.enabled():
         return JSONResponse(
             {"ok": False,
-             "error": "Airtable not configured — set AIRTABLE_TOKEN, "
-                      "AIRTABLE_BASE_ID and AIRTABLE_TABLE_ID in Render."},
+             "error": "Airtable not configured — one of the 3 variables is empty.",
+             "AIRTABLE_TOKEN_set":    bool(airtable_store._TOKEN),
+             "AIRTABLE_BASE_ID_set":  bool(airtable_store._BASE_ID),
+             "AIRTABLE_TABLE_ID_set": bool(airtable_store._TABLE_ID),
+             "base_id_value":  airtable_store._BASE_ID or "(empty)",
+             "table_id_value": airtable_store._TABLE_ID or "(empty)",
+             "token_length":   len(airtable_store._TOKEN),
+             "hint": "The 'false' one is the empty/misnamed variable in Render.",
+             },
             status_code=400,
         )
 
