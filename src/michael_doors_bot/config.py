@@ -35,6 +35,13 @@ TEST_PHONE: str = (_raw_phone + "@c.us") if _raw_phone and not _raw_phone.endswi
 
 GOOGLE_SHEETS_WEBHOOK_URL: str = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
 
+# Which conversation engine handles inbound messages:
+#   "claude"     — the existing AI conversation engine (default; unchanged).
+#   "keymessage" — the minimal deterministic key-message auto-responder:
+#                  sends one opening message, then a handoff message on the
+#                  customer's reply, then stays silent for a human to continue.
+BOT_ENGINE: str = os.getenv("BOT_ENGINE", "claude").strip().lower()
+
 # Secret token appended as ?token=... in the webhook URL registered with Green-API.
 # STRONGLY RECOMMENDED in production — without it, any external party who discovers
 # the URL can inject fake messages and burn Claude API budget.

@@ -51,6 +51,7 @@ from .providers.greenapi import GreenAPIClient
 from .providers.google_sheets import append_lead
 from .providers.supabase_store import upsert_lead, save_followup, load_all_conversations
 from .providers import airtable_store
+from .engine import key_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,6 +290,13 @@ async def _handle_non_text(sender: str, msg_type: str = "") -> None:
 
     Other types (sticker, document, location …): ignored silently.
     """
+    # Key-message engine: route media through the same minimal flow.
+    if config.BOT_ENGINE == "keymessage":
+        if sender in _human_takeover or not _is_individual_chat(sender):
+            return
+        await _key_message_turn(sender, "", is_media=True)
+        return
+
     _followup_reset(sender)
 
     # Audio / voice note → silently ignore (reset timer, no reply)
@@ -1794,6 +1802,71 @@ async def _handle_owner_command(sender: str, text: str) -> None:
     )
 
 
+async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> None:
+    """Minimal deterministic key-message flow over Green API. Never raises.
+
+    Sends the opening key message on the first inbound, then a handoff message on
+    the reply, then silences the bot (human takeover). Airtable sync is added in
+    the next step, per the agreed sequence.
+    """
+    is_test = config.TEST_MODE
+    now = datetime.utcnow().isoformat()
+    try:
+        leads = _load_leads(is_test)
+        lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
+
+        # Reconstruct the pure flow state from the persisted lead.
+        bot_enabled = lead.get("km_bot_enabled", True)
+        state = {
+            "currentStep": lead.get("km_step", key_message.START),
+            "botEnabled": bot_enabled,
+            "conversationMode": "WAITING_FOR_AGENT" if not bot_enabled else "BOT_COLLECTING",
+            "collectedData": {"lead_reply": lead["lead_reply"]} if lead.get("lead_reply") else {},
+            "handoffReason": lead.get("handoffReason"),
+        }
+
+        result = key_message.process(state, text, is_media=is_media)
+        ns = result["state"]
+
+        # Record inbound + persist flow state.
+        lead.setdefault("messages", []).append(
+            {"from": "customer", "text": "[media]" if is_media else text, "time": now}
+        )
+        lead["km_step"] = ns["currentStep"]
+        lead["km_bot_enabled"] = ns["botEnabled"]
+        if ns["collectedData"].get("lead_reply"):
+            lead["lead_reply"] = ns["collectedData"]["lead_reply"]
+        if ns.get("handoffReason"):
+            lead["handoffReason"] = ns["handoffReason"]
+        lead["lastMessage"] = now
+        leads[sender] = lead
+        _save_leads(leads, is_test)
+
+        # Send the reply (this flow produces exactly one message per turn).
+        for reply in result["replies"]:
+            try:
+                await green.send_message(sender, reply)
+                lead.setdefault("messages", []).append(
+                    {"from": "bot", "text": reply, "time": datetime.utcnow().isoformat()}
+                )
+                logger.info("[KEYMSG:SEND] sender=%s | %s", sender, reply[:40])
+            except Exception as send_err:
+                _record_error("send_fail", sender, str(send_err))
+                logger.error("[KEYMSG:SEND_FAIL] sender=%s | %s", sender, send_err)
+                _queue_send_retry(sender, reply)
+        _save_leads(leads, is_test)
+
+        # NEXT STEP: Airtable sync hook (result["intents"]["airtable"]).
+
+        # On handoff → silence the bot so the human rep continues uninterrupted.
+        if result["intents"]["terminal"] and _is_individual_chat(sender):
+            _takeover_activate(sender)
+            logger.info("[KEYMSG:HANDOFF] Bot silenced, human takes over | sender=%s", sender)
+    except Exception as exc:
+        _record_error("unhandled", sender, f"keymsg: {exc}")
+        logger.error("[KEYMSG:UNHANDLED] sender=%s | %s", sender, exc)
+
+
 async def _process_message(sender: str, text: str) -> None:
     # ── Owner personal phone → admin commands only ────────────────────────────
     if config.OWNER_PHONE and sender == config.OWNER_PHONE:
@@ -1838,6 +1911,14 @@ async def _process_message(sender: str, text: str) -> None:
                     return
 
             logger.info("[BOT:RECV] sender=%s | chars=%d | text=%s", sender, len(text), text[:60])
+
+            # ── Key-message engine ────────────────────────────────────────────
+            # Minimal deterministic auto-responder (BOT_ENGINE=keymessage).
+            # Runs AFTER all the safety guards above (human-takeover, blocklist,
+            # rate-limit, group/test-mode) and bypasses the Claude conversation.
+            if config.BOT_ENGINE == "keymessage":
+                await _key_message_turn(sender, text)
+                return
 
             # Customer replied — reset follow-up timer
             _followup_reset(sender)
