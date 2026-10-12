@@ -3176,14 +3176,15 @@ _FORM_CORS_HEADERS = {
 }
 
 
-def _form_lead_message(name: str, door_type: str) -> str:
-    """The approved proactive message for a website-form lead."""
+def _form_lead_message(name: str) -> str:
+    """Proactive opener for a website-form lead: greet by name and ask — in a
+    single message — the one qualifying question whose answer fills the Airtable
+    row (door type / quantity / city)."""
     greeting = f"שלום {name} 👋" if name else "שלום 👋"
-    interest = f"\nראינו שאתה מתעניין ב{door_type}." if door_type else ""
     return (
-        f"{greeting} תודה שהשארת פרטים באתר של דלתות מיכאל!"
-        f"{interest}\n"
-        "נשמח לחזור אליך עם כל הפרטים — מתי נוח לך שנתקשר?"
+        f"{greeting} תודה שהשארת פרטים באתר של דלתות מיכאל!\n"
+        "כדי שנחזור אליך עם הצעה מדויקת, נשמח לדעת:\n"
+        "איזה סוג דלת מעניין אותך (דלת כניסה / דלת פנים / ממ\"ד / אחר), כמה דלתות, ומאיפה אתה?"
     )
 
 
@@ -3245,7 +3246,7 @@ async def form_lead(request: Request, token: str = Query(default="")):
         door_label = flow_machine.inquiry_type_label(door_type) or door_type
 
         if not duplicate:
-            msg = _form_lead_message(name, door_label)
+            msg = _form_lead_message(name)
             try:
                 await green.send_message(sender, msg)
                 sent = True
@@ -3261,18 +3262,18 @@ async def form_lead(request: Request, token: str = Query(default="")):
             lead["source"] = "website_form"
             if name:
                 lead["full_name"] = name
-            # Details already collected via the form → hand any reply to the human.
-            lead["km_step"] = key_message.DONE
-            lead["km_bot_enabled"] = False
-            lead["handoffReason"] = "form_lead"
+            # We ASKED the qualifying question — now wait for the lead's one reply,
+            # which the normal key-message flow captures and writes to Airtable,
+            # then hands off to the human. (Do NOT take over yet.)
+            lead["km_step"] = key_message.AWAITING_REPLY
+            lead["km_bot_enabled"] = True
 
         leads[sender] = lead
         _save_leads(leads, is_test)
 
-        # A form lead's reply goes straight to Michael — no bot interference.
-        _takeover_activate(sender)
-
-        # Write the lead to the SAME Airtable table (status: waiting for a rep).
+        # Create the Airtable row now (status: collecting) with whatever the form
+        # gave us. When the lead replies, the key-message flow COMPLETES this same
+        # row — door type / quantity / city from their answer, status → waiting.
         if airtable_store.enabled() and not duplicate:
             parts = [p for p in [
                 door_label,
@@ -3287,12 +3288,12 @@ async def form_lead(request: Request, token: str = Query(default="")):
                 "service":    door_label,
                 "topic":      " | ".join(parts),
                 "created_at": _il_date_display(now),
-                "status":     airtable_store.STATUS_WAITING,
+                "status":     airtable_store.STATUS_COLLECTING,
             }
             airtable_id = await airtable_store.create_lead(values)
             if airtable_id:
                 lead["airtable_record_id"] = airtable_id
-                lead["airtable_completed"] = True
+                lead["airtable_completed"] = False
                 leads[sender] = lead
                 _save_leads(leads, is_test)
     except Exception as exc:
