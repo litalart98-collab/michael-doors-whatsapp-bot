@@ -77,6 +77,30 @@ FIELD_MAP: dict[str, str] = {
 # array of option names, not a plain string. typecast creates missing options.
 _MULTI_SELECT_FIELDS = {"service"}
 
+# Accepted column-name VARIANTS per internal key, tried in order until one matches
+# the real column (handles single/double yud, trailing/leading space, optional ה).
+# The writer auto-adapts to whichever variant the table actually uses, so the code
+# never needs the exact spelling. The first entry should match FIELD_MAP.
+FIELD_ALIASES: dict[str, list[str]] = {
+    "topic": [
+        "נושא פנייה", "נושא פניה",
+        "נושא פנייה ", "נושא פניה ",
+        " נושא פנייה", " נושא פניה",
+        "נושא הפנייה", "נושא הפניה",
+    ],
+    "created_at": [
+        "תאריך פנייה", "תאריך פניה",
+        "תאריך פנייה ", "תאריך פניה ",
+        " תאריך פנייה", " תאריך פניה",
+        "תאריך הפנייה", "תאריך הפניה",
+    ],
+}
+
+
+def _alias_list(key: str) -> list:
+    """All accepted column names for an internal key (its FIELD_MAP value first)."""
+    return FIELD_ALIASES.get(key) or [FIELD_MAP[key]]
+
 
 def enabled() -> bool:
     """True only when all three credentials are present."""
@@ -100,19 +124,21 @@ def _table_url(table_id: Optional[str] = None) -> str:
     return f"{_API_ROOT}/{_BASE_ID}/{table_id or _TABLE_ID}"
 
 
-def _clean_fields(values: dict) -> dict:
-    """Map internal keys → Airtable columns and drop empty / None values.
+def _clean_pairs(values: dict) -> list:
+    """Normalise raw values → a list of (internal_key, value) pairs, dropping
+    empty / None values. Column-name mapping is deferred to the writer so it can
+    try alias variants per key.
 
     Rules:
       • Unknown internal keys are ignored (defensive).
       • None is dropped.
       • Empty / whitespace-only strings are dropped (never blank out a value).
+      • Multiple-Select values are split on "|" into an array of option names.
       • Everything else (numbers, non-empty strings, bools) passes through.
     """
-    fields: dict = {}
+    pairs: list = []
     for key, value in values.items():
-        column = FIELD_MAP.get(key)
-        if not column:
+        if key not in FIELD_MAP:
             continue
         if value is None:
             continue
@@ -125,8 +151,13 @@ def _clean_fields(values: dict) -> dict:
             if not opts:
                 continue
             value = opts
-        fields[column] = value
-    return fields
+        pairs.append((key, value))
+    return pairs
+
+
+def _clean_fields(values: dict) -> dict:
+    """Map internal keys → Airtable columns (first/default alias) and drop empties."""
+    return {FIELD_MAP[key]: value for key, value in _clean_pairs(values)}
 
 
 def preview_fields(values: dict) -> dict:
@@ -219,18 +250,44 @@ async def complete_lead(record_id: str, values: dict, table_id: Optional[str] = 
 _UNKNOWN_FIELD_RE = re.compile(r'Unknown field name:\s*\\?"([^"\\]+)')
 
 
+def _build_fields(pairs: list, alias_idx: dict, dropped_keys: set) -> dict:
+    """Map (key, value) pairs → Airtable columns using each key's CURRENT alias
+    index, skipping keys that have been dropped (all aliases exhausted)."""
+    fields: dict = {}
+    for key, value in pairs:
+        if key in dropped_keys:
+            continue
+        aliases = _alias_list(key)
+        idx = alias_idx.get(key, 0)
+        if idx >= len(aliases):
+            continue
+        fields[aliases[idx]] = value
+    return fields
+
+
 async def _send_healing(method: str, url: str, values: dict) -> dict:
     """Map values→columns and POST/PATCH with typecast. On a 422 UNKNOWN_FIELD_NAME,
-    drop the offending column and retry — so a column-name mismatch never fails the
-    whole write; the record is saved with the columns that DO exist.
+    AUTO-ADAPT to the table's real column name: retry the SAME value under the next
+    spelling variant for that field (single/double yud, trailing space, optional ה)
+    until one matches. Only when every variant for a field is rejected is that one
+    field dropped — a column-name mismatch never fails the whole write; the record
+    is saved with the columns that DO exist.
     Returns {ok, status, id, error, dropped}."""
-    fields = _clean_fields(values)
-    dropped: list[str] = []
-    if not fields:
-        return {"ok": False, "status": None, "id": None, "error": "no fields", "dropped": dropped}
+    pairs = _clean_pairs(values)
+    if not pairs:
+        return {"ok": False, "status": None, "id": None, "error": "no fields", "dropped": []}
+
+    alias_idx: dict = {}      # internal key → index into its alias list
+    dropped_keys: set = set() # keys whose every alias Airtable rejected
+    dropped_cols: list = []   # the actual column names we gave up on (for reporting)
+
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            for _ in range(8):
+            for _ in range(40):
+                fields = _build_fields(pairs, alias_idx, dropped_keys)
+                if not fields:
+                    return {"ok": False, "status": None, "id": None,
+                            "error": "no mappable fields", "dropped": dropped_cols}
                 r = await client.request(
                     method, url, headers=_headers(),
                     json={"fields": fields, "typecast": True},
@@ -241,21 +298,32 @@ async def _send_healing(method: str, url: str, values: dict) -> dict:
                     except Exception:
                         rid = None
                     return {"ok": True, "status": r.status_code, "id": rid,
-                            "error": None, "dropped": dropped}
+                            "error": None, "dropped": dropped_cols}
                 body = r.text
                 if r.status_code == 422 and "UNKNOWN_FIELD_NAME" in body:
                     m = _UNKNOWN_FIELD_RE.search(body)
-                    if m and m.group(1).strip() in fields:
-                        bad = m.group(1).strip()
-                        del fields[bad]
-                        dropped.append(bad)
-                        if fields:
-                            continue
+                    # Do NOT strip — a trailing/leading space can be part of the
+                    # real column name (that's exactly what we're matching against).
+                    bad = m.group(1) if m else None
+                    # Reverse-map the rejected column back to its internal key.
+                    bad_key = next(
+                        (k for k, _v in pairs
+                         if k not in dropped_keys
+                         and _alias_list(k)[alias_idx.get(k, 0):alias_idx.get(k, 0) + 1] == [bad]),
+                        None,
+                    )
+                    if bad_key is not None:
+                        # Try the NEXT spelling variant for this field; if none left, drop it.
+                        alias_idx[bad_key] = alias_idx.get(bad_key, 0) + 1
+                        if alias_idx[bad_key] >= len(_alias_list(bad_key)):
+                            dropped_keys.add(bad_key)
+                            dropped_cols.append(bad)
+                        continue
                 return {"ok": False, "status": r.status_code, "id": None,
-                        "error": body[:400], "dropped": dropped}
+                        "error": body[:400], "dropped": dropped_cols}
     except Exception as exc:
-        return {"ok": False, "status": None, "id": None, "error": str(exc)[:400], "dropped": dropped}
-    return {"ok": False, "status": None, "id": None, "error": "too many unknown fields", "dropped": dropped}
+        return {"ok": False, "status": None, "id": None, "error": str(exc)[:400], "dropped": dropped_cols}
+    return {"ok": False, "status": None, "id": None, "error": "too many unknown fields", "dropped": dropped_cols}
 
 
 async def list_record_fields(table_id: Optional[str] = None) -> list:
