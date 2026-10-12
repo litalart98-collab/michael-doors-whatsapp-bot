@@ -29,10 +29,16 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# ── Credentials (env only) ────────────────────────────────────────────────────
+# ── Credentials ───────────────────────────────────────────────────────────────
+# The base/table ids are NOT secret (they appear in the Airtable URL), so they
+# default to the customer's known values — the operator only has to set the
+# secret AIRTABLE_TOKEN in Render. An env var still overrides the default.
+_DEFAULT_BASE_ID  = "appguh7VFfypJmyba"   # "ניהול לידים" base
+_DEFAULT_TABLE_ID = "tblfxdYQidDkoG94R"   # Table 1
+
 _TOKEN         = os.getenv("AIRTABLE_TOKEN", "").strip()
-_BASE_ID       = os.getenv("AIRTABLE_BASE_ID", "").strip()
-_TABLE_ID      = os.getenv("AIRTABLE_TABLE_ID", "").strip()
+_BASE_ID       = os.getenv("AIRTABLE_BASE_ID", "").strip() or _DEFAULT_BASE_ID
+_TABLE_ID      = os.getenv("AIRTABLE_TABLE_ID", "").strip() or _DEFAULT_TABLE_ID
 # Optional separate table for the browser test simulator (/test-ui). When set,
 # test conversations are written here instead of the customer's real table, so
 # the production table stays clean. Falls back to empty (test writes disabled).
