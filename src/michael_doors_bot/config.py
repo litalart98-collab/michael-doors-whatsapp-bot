@@ -63,6 +63,11 @@ KEYMSG_SKIP_KNOWN_CONTACTS: bool = (
 # the URL can inject fake messages and burn Claude API budget.
 WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 
+# Secret guarding the website-form → /form-lead endpoint (proactive outreach to
+# leads who submitted the site form). Keep it private. Falls back to
+# WEBHOOK_SECRET when unset so the feature still has some protection.
+FORM_SECRET: str = os.getenv("FORM_SECRET", "").strip()
+
 # Persistent data directory — REQUIRED for production to survive Render restarts.
 # Set to a Render Persistent Disk mount path (e.g. /data).
 # Defaults to the project root which is EPHEMERAL on Render's service filesystem.

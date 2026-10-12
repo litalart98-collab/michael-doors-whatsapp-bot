@@ -3168,6 +3168,146 @@ async def green_qr(admin: str = Query(default="")):
     )
 
 
+# ── Website form → proactive WhatsApp outreach ───────────────────────────────
+_FORM_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Form-Token",
+}
+
+
+def _form_lead_message(name: str, door_type: str) -> str:
+    """The approved proactive message for a website-form lead."""
+    greeting = f"שלום {name} 👋" if name else "שלום 👋"
+    interest = f"\nראינו שאתה מתעניין ב{door_type}." if door_type else ""
+    return (
+        f"{greeting} תודה שהשארת פרטים באתר של דלתות מיכאל!"
+        f"{interest}\n"
+        "נשמח לחזור אליך עם כל הפרטים — מתי נוח לך שנתקשר?"
+    )
+
+
+@app.options("/form-lead")
+async def form_lead_options():
+    return Response(status_code=204, headers=_FORM_CORS_HEADERS)
+
+
+@app.post("/form-lead")
+async def form_lead(request: Request, token: str = Query(default="")):
+    """Proactive outreach for website-form leads.
+
+    The site form (Lovable) POSTs the lead here; the bot sends ONE WhatsApp
+    message to the lead and writes a row to the SAME Airtable table, then hands
+    any reply to the human (no bot interference). Secured by FORM_SECRET (falls
+    back to WEBHOOK_SECRET) via ?token=… or the X-Form-Token header.
+
+    Accepted JSON (all optional except phone): name/full_name, phone, city,
+    door_type/service, quantity, note/message.
+
+    NOTE: proactive sends require a PAID Green API plan and carry WhatsApp-ban
+    risk; the lead opted in by submitting the form, which is the safest case.
+    """
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    hdr_token = request.headers.get("X-Form-Token", "")
+    if secret and token != secret and hdr_token != secret:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403, headers=_FORM_CORS_HEADERS)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400, headers=_FORM_CORS_HEADERS)
+
+    name      = str(data.get("name") or data.get("full_name") or "").strip()
+    phone_raw = str(data.get("phone") or data.get("telephone") or data.get("tel") or "").strip()
+    door_type = str(data.get("door_type") or data.get("doorType") or data.get("service") or "").strip()
+    quantity  = str(data.get("quantity") or data.get("amount") or data.get("qty") or "").strip()
+    city      = str(data.get("city") or "").strip()
+    note      = str(data.get("note") or data.get("message") or "").strip()
+
+    if not phone_raw:
+        return JSONResponse({"ok": False, "error": "missing phone"}, status_code=400, headers=_FORM_CORS_HEADERS)
+
+    sender = _normalize_to_chat_id(phone_raw)
+    if not sender or not _is_individual_chat(sender):
+        return JSONResponse({"ok": False, "error": "invalid phone"}, status_code=400, headers=_FORM_CORS_HEADERS)
+
+    is_test = config.TEST_MODE
+    now = datetime.utcnow().isoformat()
+    sent = False
+    airtable_id = None
+    duplicate = False
+    try:
+        leads = _load_leads(is_test)
+        lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
+        duplicate = bool(lead.get("form_sent"))
+
+        # Clean door-type label (detects synonyms like "פלדלת" → "דלת כניסה").
+        door_label = flow_machine.inquiry_type_label(door_type) or door_type
+
+        if not duplicate:
+            msg = _form_lead_message(name, door_label)
+            try:
+                await green.send_message(sender, msg)
+                sent = True
+                lead.setdefault("messages", []).append({"from": "bot", "text": msg, "time": now})
+                logger.info("[FORM_LEAD:SEND] sender=%s | name=%s", sender, name[:20])
+            except Exception as send_err:
+                _record_error("send_fail", sender, f"form_lead: {send_err}")
+                logger.error("[FORM_LEAD:SEND_FAIL] sender=%s | %s", sender, send_err)
+                _queue_send_retry(sender, msg)
+
+            lead["form_sent"] = True
+            lead["form_sent_at"] = now
+            lead["source"] = "website_form"
+            if name:
+                lead["full_name"] = name
+            # Details already collected via the form → hand any reply to the human.
+            lead["km_step"] = key_message.DONE
+            lead["km_bot_enabled"] = False
+            lead["handoffReason"] = "form_lead"
+
+        leads[sender] = lead
+        _save_leads(leads, is_test)
+
+        # A form lead's reply goes straight to Michael — no bot interference.
+        _takeover_activate(sender)
+
+        # Write the lead to the SAME Airtable table (status: waiting for a rep).
+        if airtable_store.enabled() and not duplicate:
+            parts = [p for p in [
+                door_label,
+                (f"{quantity} דלתות" if quantity else ""),
+                (note or ""),
+                "מהאתר",
+            ] if p]
+            values = {
+                "full_name":  name,
+                "phone":      _format_il_phone(sender),
+                "city":       city,
+                "service":    door_label,
+                "topic":      " | ".join(parts),
+                "created_at": _il_date_display(now),
+                "status":     airtable_store.STATUS_WAITING,
+            }
+            airtable_id = await airtable_store.create_lead(values)
+            if airtable_id:
+                lead["airtable_record_id"] = airtable_id
+                lead["airtable_completed"] = True
+                leads[sender] = lead
+                _save_leads(leads, is_test)
+    except Exception as exc:
+        logger.error("[FORM_LEAD:UNHANDLED] sender=%s | %s", sender, exc)
+        return JSONResponse({"ok": False, "error": "server error"}, status_code=500, headers=_FORM_CORS_HEADERS)
+
+    return JSONResponse({
+        "ok": True,
+        "sent": sent,
+        "duplicate": duplicate,
+        "airtable_id": airtable_id,
+        "phone": sender,
+    }, headers=_FORM_CORS_HEADERS)
+
+
 @app.get("/diag", response_class=JSONResponse)
 async def diag(admin: str = Query(default="")):
     """Lightweight diagnostics endpoint — runtime state, error counts, recent errors."""
