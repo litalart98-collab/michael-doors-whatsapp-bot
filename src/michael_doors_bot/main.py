@@ -3072,15 +3072,35 @@ async def green_status(admin: str = Query(default="")):
     authorization state (does NOT expose the token)."""
     if (denied := _check_admin(admin)):
         return denied
-    state = await green.get_state()
+    dbg = await green.get_state_debug()
+    state = dbg.get("state") or ""
+    # Classify the failure so we stop guessing: 401 ⇒ bad token, connect/timeout ⇒
+    # network/DNS (wrong host or Render can't reach Green API), else ⇒ see body.
+    hs = dbg.get("http_status")
+    if state:
+        diagnosis = "ok"
+    elif hs == 401:
+        diagnosis = "BAD_TOKEN (401) — GREEN_API_TOKEN is wrong for this instance"
+    elif hs == 403:
+        diagnosis = "FORBIDDEN (403) — instance/account not active or blocked"
+    elif hs is None:
+        diagnosis = "NETWORK — cannot reach Green API host (wrong api_url or outage)"
+    else:
+        diagnosis = f"UNEXPECTED (HTTP {hs}) — see body"
     return {
         "ok": bool(state),
-        "token_valid": bool(state),   # empty state ⇒ token rejected / network error
-        "state": state or "(unknown — token rejected or network error)",
+        "token_valid": bool(state),
+        "state": state or "(not available)",
+        "diagnosis": diagnosis,
+        "http_status": hs,
+        "green_error": dbg.get("error"),
+        "green_body": dbg.get("body"),
         "connected": state == "authorized",
         "needs_qr": state in ("notAuthorized", "starting"),
         "instance_id": config.GREEN_API_INSTANCE_ID,
+        "token_length": len(config.GREEN_API_TOKEN),
         "api_url": config.GREEN_API_URL,
+        "request_url": dbg.get("url"),
     }
 
 

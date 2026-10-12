@@ -134,6 +134,37 @@ class GreenAPIClient:
             logger.warning("[GREEN-API] getStateInstance failed: %s", exc)
             return ""
 
+    async def get_state_debug(self) -> dict:
+        """Like get_state but returns the raw outcome for diagnosis — the exact
+        HTTP status code and a short body/error snippet — so a 401 (bad token)
+        can be told apart from a timeout/DNS error (network) or anything else.
+        Never raises. Does NOT include the token in the output."""
+        url = f"{self._base}/getStateInstance/{self._token}"
+        safe_url = f"{self._base}/getStateInstance/***"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(url)
+            state = ""
+            try:
+                state = (r.json() or {}).get("stateInstance", "")
+            except Exception:
+                pass
+            return {
+                "http_status": r.status_code,
+                "state": state,
+                "body": r.text[:200],
+                "error": None,
+                "url": safe_url,
+            }
+        except Exception as exc:
+            return {
+                "http_status": None,
+                "state": "",
+                "body": None,
+                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "url": safe_url,
+            }
+
     async def get_qr(self) -> dict:
         """Return the pairing QR. {type: 'qrCode'|'alreadyLogged'|'error', message: ...}.
         For type 'qrCode', message is a base64-encoded PNG. Returns a synthetic
