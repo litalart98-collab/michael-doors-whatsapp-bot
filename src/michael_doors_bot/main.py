@@ -2618,6 +2618,202 @@ async def test_chat(request: Request):
     return JSONResponse({"ok": True, "airtable": airtable_preview, **result})
 
 
+@app.post("/test-key-send")
+async def test_key_send(request: Request):
+    """Run ONE turn of the REAL key-message flow (BOT_ENGINE=keymessage) WITHOUT a
+    connected WhatsApp number and WITHOUT sending anything over Green API.
+
+    It executes the real deterministic flow (key_message.process) and the real
+    Airtable sync, so you can verify the full pipeline from the browser:
+      turn 1 → the key message  + a row is CREATED in Airtable (status collecting)
+      turn 2 → the handoff msg   + the row is COMPLETED (topic filled, status waiting)
+
+    State is kept in an ISOLATED test lead store (never the production leads.json).
+    Airtable rows ARE written to the real table so you can see them — they are
+    plainly test rows you can delete. Send {"write_airtable": false} to skip writes.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    sender         = (data.get("sender") or "test_key_1").strip()
+    if not sender.endswith("@c.us"):
+        sender = re.sub(r"[^a-zA-Z0-9_]", "_", sender) + "@c.us"
+    message        = (data.get("message") or "").strip()
+    reset          = bool(data.get("reset", False))
+    write_airtable = bool(data.get("write_airtable", True))
+
+    is_test = True  # always use the isolated test lead store
+    now = datetime.utcnow().isoformat()
+
+    leads = _load_leads(is_test)
+    if reset:
+        leads.pop(sender, None)
+        _save_leads(leads, is_test)
+        return JSONResponse({"ok": True, "reset": True, "sender": sender})
+
+    if not message:
+        return JSONResponse({"ok": False, "error": "empty message"}, status_code=400)
+
+    lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
+
+    # Reconstruct the pure flow state from the persisted test lead (same as live).
+    bot_enabled = lead.get("km_bot_enabled", True)
+    state = {
+        "currentStep": lead.get("km_step", key_message.START),
+        "botEnabled": bot_enabled,
+        "conversationMode": "WAITING_FOR_AGENT" if not bot_enabled else "BOT_COLLECTING",
+        "collectedData": {"lead_reply": lead["lead_reply"]} if lead.get("lead_reply") else {},
+        "handoffReason": lead.get("handoffReason"),
+    }
+
+    result = key_message.process(state, message)
+    ns = result["state"]
+
+    lead["km_step"] = ns["currentStep"]
+    lead["km_bot_enabled"] = ns["botEnabled"]
+    if ns["collectedData"].get("lead_reply"):
+        lead["lead_reply"] = ns["collectedData"]["lead_reply"]
+    if ns.get("handoffReason"):
+        lead["handoffReason"] = ns["handoffReason"]
+    lead["lastMessage"] = now
+    leads[sender] = lead
+    _save_leads(leads, is_test)
+
+    # Dry-run preview of exactly what this turn maps to Airtable columns.
+    reply_text = lead.get("lead_reply") or ""
+    door_type = flow_machine.inquiry_type_label(reply_text)
+    if door_type and reply_text and door_type not in reply_text:
+        topic = f"{door_type} | {reply_text}"
+    else:
+        topic = reply_text or door_type
+    preview_values = {
+        "phone":      _format_il_phone(lead.get("phone") or sender),
+        "service":    door_type,
+        "topic":      topic,
+        "created_at": _il_date_display(lead.get("firstContact")),
+    }
+
+    km_action = result["intents"].get("airtable")
+    airtable_info: dict = {
+        "action": km_action,
+        "enabled": airtable_store.enabled(),
+        "preview": airtable_store.preview_fields(preview_values),
+        "written": False,
+    }
+    if km_action and write_airtable and airtable_store.enabled():
+        await _km_airtable_sync(sender, lead, km_action, is_test)
+        leads[sender] = lead
+        _save_leads(leads, is_test)
+        airtable_info["written"] = True
+        airtable_info["record_id"] = lead.get("airtable_record_id")
+        airtable_info["completed"] = bool(lead.get("airtable_completed"))
+
+    return JSONResponse({
+        "ok": True,
+        "sender": sender,
+        "step": ns["currentStep"],
+        "bot_enabled": ns["botEnabled"],
+        "replies": result["replies"],
+        "terminal": bool(result["intents"]["terminal"]),
+        "airtable": airtable_info,
+    })
+
+
+@app.get("/test-key", response_class=HTMLResponse)
+async def test_key_ui():
+    """Mobile-friendly browser tester for the key-message flow — no WhatsApp needed."""
+    return HTMLResponse(_TEST_KEY_HTML)
+
+
+_TEST_KEY_HTML = """<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>בדיקת בוט המפתח — דלתות מיכאל</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#e5ddd5;height:100vh;display:flex;flex-direction:column}
+#header{background:#075e54;color:#fff;padding:12px 16px;flex-shrink:0}
+#header h1{font-size:16px;font-weight:600}
+#header p{font-size:12px;opacity:.85;margin-top:3px}
+#bar{background:#0a6b5f;color:#d0ede9;padding:6px 16px;font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#bar input{padding:4px 8px;border-radius:4px;border:none;font-size:13px;width:120px;direction:ltr}
+#bar button{background:#128c7e;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:12px}
+#chat{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;max-width:80%}
+.row.me{align-self:flex-start}
+.row.bot{align-self:flex-end}
+.bubble{padding:9px 13px;border-radius:9px;font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.me .bubble{background:#dcf8c6;border-bottom-left-radius:2px}
+.bot .bubble{background:#fff;border-bottom-right-radius:2px}
+.sys{align-self:center;background:rgba(255,255,255,.75);color:#444;font-size:12px;padding:5px 12px;border-radius:12px;text-align:center;white-space:pre-wrap;direction:rtl}
+.sys.ok{background:#c8e6c9;color:#1b5e20}
+.sys.err{background:#ffcdd2;color:#b71c1c}
+#input-area{background:#f0f0f0;padding:9px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+#msg{flex:1;padding:11px 14px;border-radius:20px;border:none;font-size:15px;font-family:inherit;resize:none;max-height:120px;outline:none;direction:rtl}
+#send{background:#075e54;color:#fff;border:none;border-radius:50%;width:46px;height:46px;font-size:21px;flex-shrink:0}
+#send:disabled{background:#aaa}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>🚪 בדיקת "בוט המפתח" — דלתות מיכאל</h1>
+  <p>סימולציה מלאה בלי וואטסאפ. כל שיחה כותבת שורה אמיתית ל-Airtable (אפשר למחוק).</p>
+</div>
+<div id="bar">
+  <span>מספר לקוח לבדיקה:</span>
+  <input id="sender" value="test_1" placeholder="שם/מספר">
+  <button id="reset">🔄 שיחה חדשה</button>
+  <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="writeAt" checked> כתוב ל-Airtable</label>
+</div>
+<div id="chat"></div>
+<div id="input-area">
+  <textarea id="msg" rows="1" placeholder="כתוב הודעה כמו לקוח..."></textarea>
+  <button id="send">➤</button>
+</div>
+<script>
+const chat=document.getElementById('chat'),msg=document.getElementById('msg'),
+      send=document.getElementById('send'),senderEl=document.getElementById('sender'),
+      resetBtn=document.getElementById('reset'),writeAt=document.getElementById('writeAt');
+function down(){chat.scrollTop=chat.scrollHeight;}
+function bubble(text,side){const r=document.createElement('div');r.className='row '+side;
+  const b=document.createElement('div');b.className='bubble';b.textContent=text;r.appendChild(b);chat.appendChild(r);down();}
+function sys(text,cls){const d=document.createElement('div');d.className='sys '+(cls||'');d.textContent=text;chat.appendChild(d);down();}
+async function post(body){const r=await fetch('/test-key-send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json();}
+async function doSend(){
+  const text=msg.value.trim(); if(!text) return;
+  send.disabled=true; bubble(text,'me'); msg.value='';
+  try{
+    const res=await post({sender:senderEl.value.trim()||'test_1',message:text,write_airtable:writeAt.checked});
+    if(!res.ok){sys('שגיאה: '+(res.error||'לא ידוע'),'err');}
+    else{
+      (res.replies||[]).forEach(t=>bubble(t,'bot'));
+      const a=res.airtable||{};
+      if(a.written){
+        const act=a.completed?'עודכנה והושלמה':'נוצרה';
+        sys('✅ שורה '+act+' ב-Airtable\\nטלפון: '+(a.preview&&a.preview['טלפון']||'')+(a.record_id?('\\nמזהה: '+a.record_id):''),'ok');
+      }else if(a.action&&!a.enabled){sys('⚠️ Airtable לא מחובר (בדוק AIRTABLE_TOKEN)','err');}
+      if(res.terminal) sys('🤝 הבוט השתתק — מכאן נציג אנושי ממשיך. (שלח "שיחה חדשה" לבדיקה נוספת)');
+    }
+  }catch(e){sys('שגיאת רשת: '+e,'err');}
+  send.disabled=false; msg.focus();
+}
+async function doReset(){
+  try{await post({sender:senderEl.value.trim()||'test_1',reset:true});}catch(e){}
+  chat.innerHTML=''; sys('שיחה חדשה. כתוב הודעה ראשונה כדי לקבל את הודעת המפתח.');
+}
+send.addEventListener('click',doSend);
+msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}});
+resetBtn.addEventListener('click',doReset);
+sys('ברוכה הבאה לבדיקה 👋 כתבי הודעה ראשונה (כאילו את לקוח) כדי לקבל את הודעת המפתח.');
+</script>
+</body>
+</html>"""
+
+
 @app.get("/test-ui", response_class=HTMLResponse)
 async def test_ui():
     """Browser-based chat tester — open http://localhost:3000/test-ui"""
