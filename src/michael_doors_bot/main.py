@@ -1878,18 +1878,62 @@ async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool)
         logger.warning("[KEYMSG:AIRTABLE] sync failed (non-fatal) | sender=%s | %s", sender, exc)
 
 
+def _has_prior_human_chat(history: list) -> bool:
+    """True if Michael already conducted a manual conversation with this contact.
+
+    The signal is a manual OUTGOING message in the WhatsApp history — a message
+    the owner typed and sent by hand (type='outgoing' and NOT sendByApi). Bot/API
+    sends have sendByApi=True and are ignored, so this only trips on a genuine
+    human conversation the owner already had with the number.
+    """
+    for m in history or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("type") == "outgoing" and not m.get("sendByApi", False):
+            return True
+    return False
+
+
 async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> None:
     """Minimal deterministic key-message flow over Green API. Never raises.
 
     Sends the opening key message on the first inbound, then a handoff message on
     the reply, then silences the bot (human takeover). Airtable sync is added in
     the next step, per the agreed sequence.
+
+    Numbers Michael already has a manual conversation with are never engaged
+    (see _has_prior_human_chat / KEYMSG_SKIP_KNOWN_CONTACTS): the bot responds
+    only to brand-new contacts with no prior human chat.
     """
     is_test = config.TEST_MODE
     now = datetime.utcnow().isoformat()
     try:
         leads = _load_leads(is_test)
-        lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
+        existing = leads.get(sender)
+        lead = existing or {"phone": sender, "firstContact": now, "messages": []}
+
+        # Already classified as a pre-existing human conversation → stay silent.
+        if lead.get("km_skip"):
+            logger.info("[KEYMSG:SKIP_KNOWN] Known human contact — ignored | sender=%s", sender)
+            return
+
+        # First time we EVER see this number: if Michael already had a manual
+        # conversation with it, never engage — leave it entirely to the human.
+        if existing is None and config.KEYMSG_SKIP_KNOWN_CONTACTS and not is_test:
+            try:
+                history = await green.get_chat_history(sender, count=25)
+            except Exception as hist_err:
+                history = []
+                logger.warning("[KEYMSG] chat-history check failed (engaging) | sender=%s | %s",
+                               sender, hist_err)
+            if _has_prior_human_chat(history):
+                lead["km_skip"] = True
+                lead["km_bot_enabled"] = False
+                lead["lastMessage"] = now
+                leads[sender] = lead
+                _save_leads(leads, is_test)
+                logger.info("[KEYMSG:SKIP_KNOWN] Prior human chat found — bot stays silent | sender=%s", sender)
+                return
 
         # Reconstruct the pure flow state from the persisted lead.
         bot_enabled = lead.get("km_bot_enabled", True)
