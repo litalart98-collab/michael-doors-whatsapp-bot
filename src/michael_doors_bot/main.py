@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import config
 from .engine.simple_router import (
@@ -2999,7 +2999,14 @@ async def test_airtable(admin: str = Query(default=""), table: str = Query(defau
         res["note"] = ("נכשל. אם ה-status הוא 422, בדוק/י ששמות העמודות ב-Airtable "
                        "זהים בדיוק לרשימה ב-columns_expected (רווחים כלולים).")
     status_code = 200 if res.get("ok") else 500
-    return JSONResponse(res, status_code=status_code)
+    # Force ASCII escaping so Hebrew field names in the (Airtable) error render as
+    # \uXXXX and stay readable regardless of the browser charset.
+    import json as _json
+    return Response(
+        content=_json.dumps(res, ensure_ascii=True),
+        media_type="application/json",
+        status_code=status_code,
+    )
 
 
 @app.get("/test-ai", response_class=JSONResponse)
