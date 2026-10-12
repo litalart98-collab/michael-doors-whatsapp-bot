@@ -1802,6 +1802,60 @@ async def _handle_owner_command(sender: str, text: str) -> None:
     )
 
 
+async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool) -> None:
+    """Airtable sync for the key-message flow. Never raises.
+
+    Maps the minimal key-message data to the customer's single Airtable table:
+      טלפון     ← WhatsApp number
+      נושא פנייה ← the customer's free-text reply (city + how many doors)
+      תאריך פנייה ← first contact
+      סטטוס     ← collecting (first message) → waiting (after the reply)
+
+    First message  → CREATE (status collecting).
+    After reply    → COMPLETE (status waiting, topic filled from the reply).
+    """
+    if not airtable_store.enabled():
+        return
+    try:
+        values = {
+            "phone":      _format_il_phone(lead.get("phone") or sender),
+            "topic":      lead.get("lead_reply") or "",
+            "created_at": _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
+        }
+        record_id = lead.get("airtable_record_id")
+        completed = lead.get("airtable_completed")
+        # Returning lead whose previous inquiry was completed → open a fresh record.
+        if record_id and completed:
+            record_id = None
+        # Recover an active record after a restart wiped the local mapping.
+        if not record_id:
+            record_id = await airtable_store.find_active_lead_by_phone(values["phone"])
+
+        if not record_id:
+            values["status"] = airtable_store.STATUS_COLLECTING
+            record_id = await airtable_store.create_lead(values)
+            if not record_id:
+                return
+            lead["airtable_record_id"] = record_id
+            lead["airtable_completed"] = False
+            logger.info("[KEYMSG:AIRTABLE] Lead created | sender=%s | record=%s", sender, record_id)
+            if action != "complete":
+                return  # created on the first message; nothing more to do yet
+
+        if action == "complete":
+            ok = await airtable_store.complete_lead(record_id, values)
+            if ok:
+                lead["airtable_record_id"] = record_id
+                lead["airtable_completed"] = True
+                logger.info("[KEYMSG:AIRTABLE] Lead completed | sender=%s | record=%s", sender, record_id)
+        else:
+            await airtable_store.update_lead(record_id, values)
+            lead["airtable_record_id"] = record_id
+            logger.info("[KEYMSG:AIRTABLE] Lead updated | sender=%s | record=%s", sender, record_id)
+    except Exception as exc:
+        logger.warning("[KEYMSG:AIRTABLE] sync failed (non-fatal) | sender=%s | %s", sender, exc)
+
+
 async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> None:
     """Minimal deterministic key-message flow over Green API. Never raises.
 
@@ -1856,7 +1910,12 @@ async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> N
                 _queue_send_retry(sender, reply)
         _save_leads(leads, is_test)
 
-        # NEXT STEP: Airtable sync hook (result["intents"]["airtable"]).
+        # Airtable sync: create on the first message, complete after the reply.
+        km_action = result["intents"].get("airtable")
+        if km_action:
+            await _km_airtable_sync(sender, lead, km_action, is_test)
+            leads[sender] = lead
+            _save_leads(leads, is_test)
 
         # On handoff → silence the bot so the human rep continues uninterrupted.
         if result["intents"]["terminal"] and _is_individual_chat(sender):
