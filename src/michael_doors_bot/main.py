@@ -2408,6 +2408,8 @@ async def health():
     uptime_s = int(time.time() - _bot_start_time) if _bot_start_time else 0
     return {
         "status": "ok",
+        "bot_engine": config.BOT_ENGINE,
+        "airtable_enabled": airtable_store.enabled(),
         "uptime_seconds": uptime_s,
         "active_conversations": len(_conv_history),
         "active_followups": sum(1 for s in _followup.values() if not s.get("closed")),
