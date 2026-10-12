@@ -66,6 +66,38 @@ def is_price_question(text: str) -> bool:
     return any(alias and alias in n for alias in _PRICE_ALIASES)
 
 
+# Door-type keywords for FREE-TEXT detection (used by the key-message flow, where
+# the answer is a sentence, not a single menu choice). Built from the inquiry
+# synonym table; digit-only keys and the generic "אחר" catch-all are excluded,
+# and longer keywords are tried first so "דלת כניסה" wins over "כניסה".
+_TYPE_KEYWORDS = sorted(
+    (
+        (normalize(k), v)
+        for k, v in C.OPTIONS_INQUIRY_TYPE.items()
+        if not normalize(k).isdigit() and normalize(k) not in ("אחר",) and len(normalize(k)) >= 3
+    ),
+    key=lambda kv: -len(kv[0]),
+)
+
+
+def detect_inquiry_type(text: str) -> Optional[str]:
+    """Scan free text for a door-type keyword and return its canonical value, or
+    None. Deterministic substring match against the synonym table — no AI."""
+    n = normalize(text)
+    if not n:
+        return None
+    for kw, val in _TYPE_KEYWORDS:
+        if kw in n:
+            return val
+    return None
+
+
+def inquiry_type_label(text: str) -> str:
+    """Hebrew label of the door type detected in free text, or '' if none."""
+    val = detect_inquiry_type(text)
+    return C.LABELS_INQUIRY_TYPE.get(val, "") if val else ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Field validation / normalization (contact details)
 # ══════════════════════════════════════════════════════════════════════════════

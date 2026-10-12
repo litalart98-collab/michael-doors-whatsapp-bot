@@ -52,6 +52,7 @@ from .providers.google_sheets import append_lead
 from .providers.supabase_store import upsert_lead, save_followup, load_all_conversations
 from .providers import airtable_store
 from .engine import key_message
+from .engine import flow_machine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1817,9 +1818,20 @@ async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool)
     if not airtable_store.enabled():
         return
     try:
+        reply = lead.get("lead_reply") or ""
+        # Detect the door type from the customer's free-text reply so it appears
+        # both as a clean "סוג שירות" value and inside "נושא פנייה".
+        door_type = flow_machine.inquiry_type_label(reply)
+        # Put the door type in "נושא פנייה" too, but avoid duplicating it when the
+        # customer already wrote the same label in their reply.
+        if door_type and reply and door_type not in reply:
+            topic = f"{door_type} | {reply}"
+        else:
+            topic = reply or door_type
         values = {
             "phone":      _format_il_phone(lead.get("phone") or sender),
-            "topic":      lead.get("lead_reply") or "",
+            "service":    door_type,   # → "סוג שירות" (empty values are dropped)
+            "topic":      topic,       # → "נושא פנייה" (door type + the raw reply)
             "created_at": _utc_iso_to_il(lead.get("firstContact") or datetime.utcnow().isoformat()),
         }
         record_id = lead.get("airtable_record_id")
