@@ -3278,7 +3278,8 @@ def _form_lead_message(name: str, door_type: str = "", door_key: Optional[str] =
         if door_key == "ENTRANCE_DOOR":
             detail = "• האם אתם מעוניינים בדלת חלקה או מעוצבת?"
         elif door_key == "INTERIOR_DOORS":
-            detail = "• בכמה דלתות אתם מעוניינים?"
+            detail = ("• בכמה דלתות אתם מעוניינים?\n"
+                      "• האם מדובר בדלתות חלקות או מעוצבות?")
         else:
             detail = "• כמות דלתות מוערכת?"
         return (
