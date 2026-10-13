@@ -3162,11 +3162,19 @@ async def green_status(admin: str = Query(default="")):
         diagnosis = "NETWORK — cannot reach Green API host (wrong api_url or outage)"
     else:
         diagnosis = f"UNEXPECTED (HTTP {hs}) — see body"
+    # Report the notification settings — incomingWebhook MUST be "yes" for the bot
+    # to receive customer replies.
+    settings = await green.get_settings() if state else {}
+    incoming = settings.get("incomingWebhook", "(unknown)")
     return {
         "ok": bool(state),
         "token_valid": bool(state),
         "state": state or "(not available)",
         "diagnosis": diagnosis,
+        "incoming_webhook": incoming,
+        "incoming_ok": incoming == "yes",
+        "outgoing_webhook": settings.get("outgoingWebhook", "(unknown)"),
+        "webhook_url_set": bool(settings.get("webhookUrl")),
         "http_status": hs,
         "green_error": dbg.get("error"),
         "green_body": dbg.get("body"),
