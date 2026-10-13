@@ -3481,6 +3481,52 @@ async def form_last(token: str = Query(default=""), admin: str = Query(default="
                          "payloads": list(reversed(_last_form_payloads))})
 
 
+@app.get("/lead-status", response_class=JSONResponse)
+async def lead_status(token: str = Query(default=""), admin: str = Query(default=""),
+                      phone: str = Query(default="")):
+    """Show why the bot would or wouldn't respond to a given number: whether it is
+    excluded, under human-takeover, a known-contact skip, and its key-message
+    state. Protected by FORM_SECRET (?token=) or ADMIN_SECRET (?admin=)."""
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    ok_token = bool(secret) and token == secret
+    ok_admin = bool(config.ADMIN_SECRET) and admin == config.ADMIN_SECRET
+    if secret and not ok_token and not ok_admin:
+        return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
+    if not phone:
+        return JSONResponse({"ok": False, "error": "add ?phone=05XXXXXXXX"}, status_code=400)
+    sender = _normalize_to_chat_id(phone)
+    lead = (_load_leads(False).get(sender) or {})
+    excluded = sender in config.BOT_EXCLUDE_PHONES
+    in_takeover = sender in _human_takeover
+    km_skip = bool(lead.get("km_skip"))
+    # Explain, in order, the first reason the bot would stay silent on an inbound.
+    if excluded:
+        would_respond, why = False, "number is in BOT_EXCLUDE_PHONES"
+    elif in_takeover:
+        would_respond, why = False, "number is under human-takeover (reply goes to Michael)"
+    elif km_skip:
+        would_respond, why = False, "number flagged as a known human contact (km_skip)"
+    elif lead.get("km_step") == key_message.DONE or lead.get("km_bot_enabled") is False:
+        would_respond, why = False, "flow already finished for this number (DONE / bot disabled)"
+    else:
+        would_respond, why = True, "bot would process an inbound reply"
+    return JSONResponse({
+        "ok": True,
+        "phone": sender,
+        "would_respond_to_inbound": would_respond,
+        "why": why,
+        "excluded": excluded,
+        "in_takeover": in_takeover,
+        "km_skip": km_skip,
+        "lead_exists": bool(lead),
+        "km_step": lead.get("km_step"),
+        "km_bot_enabled": lead.get("km_bot_enabled"),
+        "source": lead.get("source"),
+        "airtable_record_id": lead.get("airtable_record_id"),
+        "airtable_completed": lead.get("airtable_completed"),
+    })
+
+
 @app.get("/form-test", response_class=JSONResponse)
 async def form_test(token: str = Query(default=""), admin: str = Query(default=""),
                     phone: str = Query(default=""), name: str = Query(default=""),
