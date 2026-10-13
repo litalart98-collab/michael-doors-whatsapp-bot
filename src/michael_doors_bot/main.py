@@ -3231,11 +3231,18 @@ _FORM_CORS_HEADERS = {
 }
 
 
-def _form_lead_message(name: str) -> str:
-    """Proactive opener for a website-form lead: greet by name and ask — in a
-    single message — the one qualifying question whose answer fills the Airtable
-    row (door type / quantity / city)."""
+def _form_lead_message(name: str, door_type: str = "") -> str:
+    """Proactive opener for a website-form lead. Greets by name and, when the form
+    already told us the door type, ACKNOWLEDGES that interest and asks only for the
+    remaining details; otherwise asks the full qualifying question. Either way a
+    single message collects what fills the Airtable row."""
     greeting = f"שלום {name} 👋" if name else "שלום 👋"
+    if door_type:
+        return (
+            f"{greeting} תודה שהשארת פרטים באתר של דלתות מיכאל!\n"
+            f"ראינו שאתה מתעניין ב{door_type} 🙂 כדי שנחזור אליך עם הצעה מדויקת —\n"
+            "כמה דלתות אתה צריך, ומאיזו עיר אתה?"
+        )
     return (
         f"{greeting} תודה שהשארת פרטים באתר של דלתות מיכאל!\n"
         "כדי שנחזור אליך עם הצעה מדויקת, נשמח לדעת:\n"
@@ -3315,7 +3322,7 @@ async def _process_form_lead(data: dict) -> tuple:
         door_label = flow_machine.inquiry_type_label(door_type) or door_type
 
         if not duplicate:
-            msg = _form_lead_message(name)
+            msg = _form_lead_message(name, door_label)
             did_send = False
             # Rate-limit proactive sends to protect the number from bans.
             if _proactive_can_send_now():
