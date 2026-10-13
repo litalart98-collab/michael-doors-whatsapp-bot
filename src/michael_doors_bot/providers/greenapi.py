@@ -91,6 +91,11 @@ class GreenAPIClient:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={
+                    # Clear any configured push webhook URL so notifications go to
+                    # the queue and the bot's poll loop (receiveNotification) pulls
+                    # them — robust, no dependency on an external URL/token matching.
+                    "webhookUrl": "",
+                    "webhookUrlToken": "",
                     "incomingWebhook": "yes",
                     "outgoingWebhook": "yes",
                     "outgoingAPIMessageWebhook": "no",
