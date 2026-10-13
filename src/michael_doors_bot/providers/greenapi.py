@@ -74,29 +74,30 @@ class GreenAPIClient:
 
     async def enable_outgoing_webhook(self) -> bool:
         """
-        Enable outgoingMessageReceived webhook in Green API settings.
-        This is required for the human-takeover feature: when the business owner
-        manually sends a message from WhatsApp Web / connected device, Green API
-        fires outgoingMessageReceived so the bot knows to step back.
+        Ensure the instance delivers the notifications the bot depends on.
 
-        Green API setSettings docs:
-          outgoingWebhook            — "yes"/"no" for manually sent messages
-          outgoingAPIMessageWebhook  — "yes"/"no" for API-sent messages (bot)
-        We enable the first and disable the second to avoid the bot triggering
-        its own takeover when it sends replies.
+        Green API setSettings:
+          incomingWebhook            — "yes" for INCOMING customer messages
+                                       (WITHOUT this the bot never receives replies)
+          outgoingWebhook            — "yes" for messages the owner sends MANUALLY
+                                       (drives the human-takeover feature)
+          outgoingAPIMessageWebhook  — "no" for the bot's own API sends (so the bot
+                                       doesn't trigger its own takeover)
 
-        Called once at startup.  Safe to call repeatedly — idempotent.
+        Called at startup. Safe to call repeatedly — idempotent. This is what makes
+        a freshly-created instance work without manually toggling settings.
         """
         url = f"{self._base}/setSettings/{self._token}"
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={
+                    "incomingWebhook": "yes",
                     "outgoingWebhook": "yes",
                     "outgoingAPIMessageWebhook": "no",
                 })
                 data = r.json() if r.content else {}
                 if r.status_code == 200 and data.get("saveSettings"):
-                    logger.info("[GREEN-API] outgoingWebhook=yes saved — human-takeover ready")
+                    logger.info("[GREEN-API] incomingWebhook=yes + outgoingWebhook=yes saved")
                     return True
                 else:
                     logger.warning(
