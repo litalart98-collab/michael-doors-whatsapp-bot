@@ -711,6 +711,19 @@ def _save_leads(leads: dict, is_test: bool) -> None:
         logger.error("Failed to save leads: %s", e)
 
 
+def _lead_in_active_flow(sender: str) -> bool:
+    """True if the bot is mid key-message flow with this sender — it already sent
+    an opener and is awaiting the one reply. Such a reply MUST be processed even
+    if the sender is a pre-existing / pre-boot contact, because the BOT started
+    this exchange (e.g. a proactive website-form lead who has prior history with
+    the owner)."""
+    try:
+        lead = _load_leads(config.TEST_MODE).get(sender) or {}
+    except Exception:
+        return False
+    return bool(lead.get("km_bot_enabled")) and lead.get("km_step") == key_message.AWAITING_REPLY
+
+
 async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None:
     """Generate a summary and attach it to the lead record. Runs at most once per conversation."""
     if sender in _summary_attached:
@@ -2369,16 +2382,16 @@ async def _poll_loop() -> None:
                     or ""
                 )
                 msg_timestamp = body.get("timestamp", 0)
-                if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+                if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _lead_in_active_flow(sender):
                     if sender:
                         _pre_boot_senders.add(sender)
                     logger.info(
                         "[BOT:SKIP_OLD] Poll pre-boot message — sender blocked | id=%s | sender=%s",
                         msg_id, sender,
                     )
-                elif sender in _pre_boot_senders:
+                elif sender in _pre_boot_senders and not _lead_in_active_flow(sender):
                     logger.info("[BOT:SKIP_PREBOOT] Poll blocked sender | sender=%s", sender)
-                elif sender in _pre_existing_contacts:
+                elif sender in _pre_existing_contacts and not _lead_in_active_flow(sender):
                     logger.info("[BOT:SKIP_PREEXISTING] Poll pre-bot human contact | sender=%s", sender)
                 elif sender and msg_id and _is_duplicate(msg_id):
                     logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
@@ -2608,7 +2621,7 @@ async def webhook(request: Request, token: str = Query(default="")):
     # ── Pre-boot sender block ─────────────────────────────────────────────────
     # Layer 1: timestamp filter — message predates bot startup → mark sender
     msg_timestamp = body.get("timestamp", 0)
-    if msg_timestamp and int(msg_timestamp) < int(_bot_start_time):
+    if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _lead_in_active_flow(sender):
         if sender:
             _pre_boot_senders.add(sender)
         logger.info(
@@ -2619,13 +2632,14 @@ async def webhook(request: Request, token: str = Query(default="")):
         return JSONResponse({"ok": True})
 
     # Layer 2: sender already known to have pre-boot history → block all their messages
-    if sender in _pre_boot_senders:
+    if sender in _pre_boot_senders and not _lead_in_active_flow(sender):
         logger.info("[BOT:SKIP_PREBOOT] Blocked sender has pre-boot history | sender=%s", sender)
         return JSONResponse({"ok": True})
 
     # Pre-existing contacts — human conversations before bot was connected.
     # Never respond to these; the bot was not part of their conversation history.
-    if sender in _pre_existing_contacts:
+    # EXCEPTION: a proactive lead the bot itself opened (awaiting their reply).
+    if sender in _pre_existing_contacts and not _lead_in_active_flow(sender):
         logger.info("[BOT:SKIP_PREEXISTING] Pre-bot human contact — staying silent | sender=%s", sender)
         return JSONResponse({"ok": True})
 
