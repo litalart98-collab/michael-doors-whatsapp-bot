@@ -3271,16 +3271,15 @@ def _form_lead_message(name: str, door_type: str = "", door_key: Optional[str] =
     greeting = f"היי {name}," if name else "שלום 👋"
     opening = f"{greeting} תודה שהשארתם פרטים באתר של דלתות מיכאל!"
     closing = "אפשר פשוט להשיב להודעה הזו ונחזור אליכם בהקדם! 🙂"
-    if door_type:
-        # The form already told us the door type → acknowledge it, and tailor the
-        # follow-up question to the type: entrance → finish/design; interior →
-        # how many (usually more than one); otherwise estimated quantity.
+    # Acknowledge the interest only for a concrete door type; anything else
+    # (unrecognised / "other") falls through to the general question — no "אחר".
+    if door_key in ("ENTRANCE_DOOR", "INTERIOR_DOORS", "MAMAD_DOOR"):
         if door_key == "ENTRANCE_DOOR":
             detail = "• האם אתם מעוניינים בדלת חלקה או מעוצבת?"
         elif door_key == "INTERIOR_DOORS":
             detail = ("• בכמה דלתות אתם מעוניינים?\n"
                       "• האם מדובר בדלתות חלקות או מעוצבות?")
-        else:
+        else:  # MAMAD_DOOR
             detail = "• כמות דלתות מוערכת?"
         return (
             f"{opening}\n"
