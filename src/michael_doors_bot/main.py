@@ -3387,9 +3387,10 @@ async def form_lead(request: Request, token: str = Query(default="")):
 async def form_test(token: str = Query(default=""), admin: str = Query(default=""),
                     phone: str = Query(default=""), name: str = Query(default=""),
                     door_type: str = Query(default=""), quantity: str = Query(default=""),
-                    city: str = Query(default="")):
+                    city: str = Query(default=""), reset: str = Query(default="")):
     """Browser diagnostic for the form → bot → Airtable path (bypasses the site).
     Open e.g.:  /form-test?token=FORM_SECRET&phone=0501234567&name=בדיקה
+    Add &reset=1 to clear a previous test for that phone so it runs fresh again.
     Auth: ?token=FORM_SECRET  (or ?admin=ADMIN_SECRET). Proves the bot endpoint
     and Airtable work independently of the website — if a row appears here, the
     problem is the Lovable wiring, not the bot."""
@@ -3400,6 +3401,15 @@ async def form_test(token: str = Query(default=""), admin: str = Query(default="
         return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
     if not phone:
         return JSONResponse({"ok": False, "error": "add ?phone=05XXXXXXXX (and optionally &name=...)"}, status_code=400)
+    # Optional: clear a prior test for this phone so it is not treated as a duplicate.
+    if reset and reset not in ("0", "false", "no"):
+        sender = _normalize_to_chat_id(phone)
+        for _tst in (False, True):
+            _lds = _load_leads(_tst)
+            if _lds.pop(sender, None) is not None:
+                _save_leads(_lds, _tst)
+        _human_takeover.discard(sender)
+        _takeover_save()
     data = {"phone": phone, "name": name, "door_type": door_type, "quantity": quantity, "city": city}
     result, status = await _process_form_lead(data)
     return JSONResponse(result, status_code=status)
