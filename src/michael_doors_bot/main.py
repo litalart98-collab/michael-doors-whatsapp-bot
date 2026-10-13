@@ -1963,6 +1963,12 @@ async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> N
     (see _has_prior_human_chat / KEYMSG_SKIP_KNOWN_CONTACTS): the bot responds
     only to brand-new contacts with no prior human chat.
     """
+    # Permanent exclude list — the bot never engages these numbers (owner/helper's
+    # own number, numbers that must always go straight to a human).
+    if sender in config.BOT_EXCLUDE_PHONES:
+        logger.info("[KEYMSG:EXCLUDED] number on BOT_EXCLUDE_PHONES — bot stays silent | sender=%s", sender)
+        return
+
     is_test = config.TEST_MODE
     now = datetime.utcnow().isoformat()
     try:
