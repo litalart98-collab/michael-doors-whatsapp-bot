@@ -3248,16 +3248,51 @@ async def form_lead_options():
     return Response(status_code=204, headers=_FORM_CORS_HEADERS)
 
 
+def _pick_field(data: dict, keys: list, contains: str = "") -> str:
+    """Pick the first non-empty value among the given keys (case-insensitive),
+    then, if still empty and `contains` is given, any key whose name contains it."""
+    lower = {str(k).lower(): v for k, v in data.items()}
+    for k in keys:
+        v = lower.get(k.lower())
+        if v not in (None, "", []):
+            return str(v).strip()
+    if contains:
+        for k, v in data.items():
+            kl = str(k).lower()
+            if contains in kl and "user" not in kl and "file" not in kl and v not in (None, "", []):
+                return str(v).strip()
+    return ""
+
+
 async def _process_form_lead(data: dict) -> tuple:
     """Core of the website-form flow: send the proactive opener (rate-limited)
     and create the Airtable row. Returns (result_dict, http_status). Shared by
-    POST /form-lead (the live path) and GET /form-test (browser diagnosis)."""
-    name      = str(data.get("name") or data.get("full_name") or "").strip()
-    phone_raw = str(data.get("phone") or data.get("telephone") or data.get("tel") or "").strip()
-    door_type = str(data.get("door_type") or data.get("doorType") or data.get("service") or "").strip()
-    quantity  = str(data.get("quantity") or data.get("amount") or data.get("qty") or "").strip()
-    city      = str(data.get("city") or "").strip()
-    note      = str(data.get("note") or data.get("message") or "").strip()
+    POST /form-lead (the live path) and GET /form-test (browser diagnosis).
+
+    Field names are matched flexibly (any casing + common aliases) so the site
+    form can send e.g. name/fullName/customerName without extra mapping."""
+    if not isinstance(data, dict):
+        data = {}
+    received_keys = sorted(str(k) for k in data.keys())
+    logger.info("[FORM_LEAD:RECV] keys=%s", received_keys)
+
+    name = _pick_field(data, [
+        "name", "full_name", "fullName", "fullname", "customerName", "customer_name",
+        "clientName", "client_name", "firstName", "first_name", "contactName",
+        "contact_name", "שם", "שם מלא", "שם_מלא",
+    ], contains="name")
+    phone_raw = _pick_field(data, [
+        "phone", "telephone", "tel", "phoneNumber", "phone_number", "mobile",
+        "whatsapp", "טלפון", "נייד",
+    ], contains="phone")
+    door_type = _pick_field(data, [
+        "door_type", "doorType", "service", "doortype", "type", "סוג", "סוג דלת",
+    ])
+    quantity = _pick_field(data, [
+        "quantity", "amount", "qty", "count", "כמות",
+    ])
+    city = _pick_field(data, ["city", "town", "location", "עיר"])
+    note = _pick_field(data, ["note", "message", "notes", "comment", "הערה", "הודעה"])
 
     if not phone_raw:
         return {"ok": False, "error": "missing phone"}, 400
@@ -3358,6 +3393,8 @@ async def _process_form_lead(data: dict) -> tuple:
         "airtable_id": airtable_id,
         "airtable_error": airtable_error,
         "phone": sender,
+        "parsed_name": name,          # what we extracted — empty means the form's
+        "received_keys": received_keys,  # name field used an unexpected key (see here)
     }, 200
 
 
