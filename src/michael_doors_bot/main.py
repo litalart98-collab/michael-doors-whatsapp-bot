@@ -1946,6 +1946,12 @@ def _has_prior_human_chat(history: list) -> bool:
     return False
 
 
+# Final handoff message for PROACTIVE (website-form) leads — distinct wording
+# from the inbound key-message handoff. Sent once, after the lead replies, then
+# the bot goes silent on that track (human takes over).
+FORM_HANDOFF_MESSAGE = "מעולה! הפנייה מועברת לטיפול אנושי, ניצור איתכם קשר בהקדם."
+
+
 async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> None:
     """Minimal deterministic key-message flow over Green API. Never raises.
 
@@ -1957,6 +1963,12 @@ async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> N
     (see _has_prior_human_chat / KEYMSG_SKIP_KNOWN_CONTACTS): the bot responds
     only to brand-new contacts with no prior human chat.
     """
+    # Permanent exclude list — the bot never engages these numbers (owner/helper's
+    # own number, numbers that must always go straight to a human).
+    if sender in config.BOT_EXCLUDE_PHONES:
+        logger.info("[KEYMSG:EXCLUDED] number on BOT_EXCLUDE_PHONES — bot stays silent | sender=%s", sender)
+        return
+
     is_test = config.TEST_MODE
     now = datetime.utcnow().isoformat()
     try:
@@ -1999,6 +2011,11 @@ async def _key_message_turn(sender: str, text: str, is_media: bool = False) -> N
 
         result = key_message.process(state, text, is_media=is_media)
         ns = result["state"]
+
+        # Proactive (website-form) leads get their own final handoff wording on
+        # the closing turn; after it the bot stays silent on this track.
+        if result["intents"].get("terminal") and lead.get("source") == "website_form":
+            result["replies"] = [FORM_HANDOFF_MESSAGE]
 
         # Record inbound + persist flow state.
         lead.setdefault("messages", []).append(

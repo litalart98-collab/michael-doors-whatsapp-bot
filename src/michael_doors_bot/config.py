@@ -114,6 +114,12 @@ def _parse_bypass_phones(raw: str) -> set[str]:
 
 HOURS_BYPASS_PHONES: set[str] = _parse_bypass_phones(os.getenv("HOURS_BYPASS_PHONES", ""))
 
+# Comma-separated phone numbers the bot NEVER engages on inbound — it stays fully
+# silent when these numbers message the business (same effect as a number Michael
+# already has a manual history with). For the owner's/helper's own number and any
+# contact that must never get an automated reply. Format: "0524674204,972501112233".
+BOT_EXCLUDE_PHONES: set[str] = _parse_bypass_phones(os.getenv("BOT_EXCLUDE_PHONES", ""))
+
 # ── Production safety checks ──────────────────────────────────────────────────
 _PROD_WARNINGS: list[str] = []
 if not TEST_MODE:
