@@ -2495,14 +2495,17 @@ async def _lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("[BOOT] Could not fetch pre-existing contacts: %s — no contacts blocked", exc)
 
-    # ── Enable outgoing webhook for human-takeover feature ────────────────────
-    # Green API must fire outgoingMessageReceived when owner sends manually.
-    # outgoingAPIMessageWebhook is disabled so bot API sends don't trigger takeover.
+    # ── Ensure Green API delivers the notifications the bot needs ──────────────
+    # ALWAYS enable incomingWebhook (customer messages) + outgoingWebhook (owner
+    # manual sends → takeover). Without incomingWebhook=yes the bot never receives
+    # replies — the #1 symptom on a freshly-created instance. Runs regardless of
+    # OWNER_PHONE so a new instance self-configures.
+    ok = await green.enable_outgoing_webhook()
+    logger.info("[BOOT] Green API webhooks ensured (incoming+outgoing)=%s", ok)
     if config.OWNER_PHONE:
-        await green.enable_outgoing_webhook()
         logger.info("[BOOT] Human-takeover ready | OWNER_PHONE=%s", config.OWNER_PHONE)
     else:
-        logger.info("[BOOT] OWNER_PHONE not set — human-takeover disabled")
+        logger.info("[BOOT] OWNER_PHONE not set — admin commands disabled")
 
     _poll_task    = asyncio.create_task(_supervised("poll_loop",    _poll_loop))
     # Follow-up reminders disabled — bot does not send "still here?" messages.
