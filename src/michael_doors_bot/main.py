@@ -3230,6 +3230,10 @@ _FORM_CORS_HEADERS = {
     "Access-Control-Allow-Headers": "Content-Type, X-Form-Token",
 }
 
+# Last few payloads received by /form-lead — lets /form-last show exactly what
+# field names the website form sends, so a missing mapping is obvious.
+_last_form_payloads: list = []
+
 
 def _form_lead_message(name: str, door_type: str = "") -> str:
     """Proactive opener for a website-form lead. Greets by name and, when the form
@@ -3280,8 +3284,27 @@ async def _process_form_lead(data: dict) -> tuple:
     form can send e.g. name/fullName/customerName without extra mapping."""
     if not isinstance(data, dict):
         data = {}
+    # Some form tools wrap the real fields under one key — unwrap a common wrapper.
+    for _wrapper in ("data", "record", "body", "form", "fields", "payload", "values", "input", "formData"):
+        _inner = data.get(_wrapper)
+        if isinstance(_inner, dict) and _inner:
+            _merged = dict(_inner)
+            for _k, _v in data.items():
+                if _k != _wrapper:
+                    _merged.setdefault(_k, _v)
+            data = _merged
+            break
     received_keys = sorted(str(k) for k in data.keys())
     logger.info("[FORM_LEAD:RECV] keys=%s", received_keys)
+    try:
+        _last_form_payloads.append({
+            "at": datetime.utcnow().isoformat(),
+            "keys": received_keys,
+            "data": {str(k): str(v)[:80] for k, v in data.items()},
+        })
+        del _last_form_payloads[:-5]
+    except Exception:
+        pass
 
     name = _pick_field(data, [
         "name", "full_name", "fullName", "fullname", "customerName", "customer_name",
@@ -3425,6 +3448,20 @@ async def form_lead(request: Request, token: str = Query(default="")):
         return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400, headers=_FORM_CORS_HEADERS)
     result, status = await _process_form_lead(data)
     return JSONResponse(result, status_code=status, headers=_FORM_CORS_HEADERS)
+
+
+@app.get("/form-last", response_class=JSONResponse)
+async def form_last(token: str = Query(default=""), admin: str = Query(default="")):
+    """Show the last few payloads /form-lead received — reveals exactly what field
+    names the website form (Lovable) sends, so a missing mapping is obvious.
+    Protected by FORM_SECRET (?token=) or ADMIN_SECRET (?admin=)."""
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    ok_token = bool(secret) and token == secret
+    ok_admin = bool(config.ADMIN_SECRET) and admin == config.ADMIN_SECRET
+    if secret and not ok_token and not ok_admin:
+        return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
+    return JSONResponse({"ok": True, "count": len(_last_form_payloads),
+                         "payloads": list(reversed(_last_form_payloads))})
 
 
 @app.get("/form-test", response_class=JSONResponse)
