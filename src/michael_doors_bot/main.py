@@ -3569,6 +3569,34 @@ async def lead_status(token: str = Query(default=""), admin: str = Query(default
     })
 
 
+@app.get("/form-reset", response_class=JSONResponse)
+async def form_reset(token: str = Query(default=""), admin: str = Query(default=""),
+                     phone: str = Query(default="")):
+    """Clear a phone's lead + takeover (no message sent) so the proactive form flow
+    runs fresh again. Use between real website-form submissions when testing every
+    inquiry type on the same number. Token/admin protected."""
+    secret = config.FORM_SECRET or config.WEBHOOK_SECRET
+    ok_token = bool(secret) and token == secret
+    ok_admin = bool(config.ADMIN_SECRET) and admin == config.ADMIN_SECRET
+    if secret and not ok_token and not ok_admin:
+        return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
+    if not phone:
+        return JSONResponse({"ok": False, "error": "add ?phone=05XXXXXXXX"}, status_code=400)
+    sender = _normalize_to_chat_id(phone)
+    cleared = False
+    for _tst in (False, True):
+        lds = _load_leads(_tst)
+        if lds.pop(sender, None) is not None:
+            _save_leads(lds, _tst)
+            cleared = True
+    if sender in _human_takeover:
+        _human_takeover.discard(sender)
+        _takeover_save()
+    _pre_boot_senders.discard(sender)
+    return JSONResponse({"ok": True, "phone": sender, "cleared": cleared,
+                         "note": "מאופס — אפשר למלא שוב את הטופס עם המספר הזה"})
+
+
 @app.get("/form-test", response_class=JSONResponse)
 async def form_test(token: str = Query(default=""), admin: str = Query(default=""),
                     phone: str = Query(default=""), name: str = Query(default=""),
