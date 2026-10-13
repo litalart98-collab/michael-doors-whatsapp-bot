@@ -3263,22 +3263,39 @@ _FORM_CORS_HEADERS = {
 _last_form_payloads: list = []
 
 
-def _form_lead_message(name: str, door_type: str = "") -> str:
+def _form_lead_message(name: str, door_type: str = "", door_key: Optional[str] = None) -> str:
     """Proactive opener for a website-form lead. Greets by name and, when the form
     already told us the door type, ACKNOWLEDGES that interest and asks only for the
     remaining details; otherwise asks the full qualifying question. Either way a
     single message collects what fills the Airtable row."""
-    greeting = f"שלום {name} 👋" if name else "שלום 👋"
+    greeting = f"היי {name}," if name else "שלום 👋"
+    opening = f"{greeting} תודה שהשארתם פרטים באתר של דלתות מיכאל!"
+    closing = "אפשר פשוט להשיב להודעה הזו ונחזור אליכם בהקדם! 🙂"
     if door_type:
+        # The form already told us the door type → acknowledge it, and tailor the
+        # follow-up question to the type: entrance → finish/design; interior →
+        # how many (usually more than one); otherwise estimated quantity.
+        if door_key == "ENTRANCE_DOOR":
+            detail = "• האם אתם מעוניינים בדלת חלקה או מעוצבת?"
+        elif door_key == "INTERIOR_DOORS":
+            detail = "• בכמה דלתות אתם מעוניינים?"
+        else:
+            detail = "• כמות דלתות מוערכת?"
         return (
-            f"{greeting} תודה שהשארתם פרטים באתר של דלתות מיכאל!\n"
-            f"ראינו שאתם מתעניינים ב{door_type} 🙂 כדי שנחזור אליכם עם הצעה מדויקת —\n"
-            "כמה דלתות אתם צריכים, ומאיזו עיר אתם?"
+            f"{opening}\n"
+            f"ראינו שאתם מתעניינים ב{door_type} 🙂\n"
+            "כדי שנוכל לתת לכם את ההצעה הכי מדויקת, נשמח לדעת:\n"
+            "• באיזו עיר ההתקנה?\n"
+            f"{detail}\n"
+            f"{closing}"
         )
     return (
-        f"{greeting} תודה שהשארתם פרטים באתר של דלתות מיכאל!\n"
-        "כדי שנחזור אליכם עם הצעה מדויקת, נשמח לדעת:\n"
-        "איזה סוג דלת מעניין אתכם (דלת כניסה / דלת פנים / ממ\"ד / אחר), כמה דלתות, ומאיפה אתם?"
+        f"{opening}\n"
+        "כדי שנוכל לתת לכם את ההצעה הכי מדויקת, נשמח לדעת:\n"
+        "• באיזו עיר ההתקנה?\n"
+        "• מה סוג הדלתות? (פנים / כניסה / גם וגם)\n"
+        "• כמות דלתות מוערכת?\n"
+        f"{closing}"
     )
 
 
@@ -3373,7 +3390,7 @@ async def _process_form_lead(data: dict) -> tuple:
         door_label = flow_machine.inquiry_type_label(door_type) or door_type
 
         if not duplicate:
-            msg = _form_lead_message(name, door_label)
+            msg = _form_lead_message(name, door_label, flow_machine.detect_inquiry_type(door_type))
             did_send = False
             # Rate-limit proactive sends to protect the number from bans.
             if _proactive_can_send_now():
