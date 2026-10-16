@@ -1717,6 +1717,13 @@ def _schedule_debounced(sender: str, text: str) -> None:
     actual processing happens DEBOUNCE_WINDOW seconds after the *last* call for
     this sender, via a background asyncio Task.
     """
+    # The deterministic key-message flow answers immediately — skip the 2-minute
+    # owner-intercept debounce (that window exists only for the AI conversation
+    # engine). Without this, the closing message would arrive 2 minutes late.
+    if config.BOT_ENGINE == "keymessage":
+        asyncio.create_task(_process_message(sender, text))
+        return
+
     _pending_messages.setdefault(sender, []).append(text)
 
     # Cancel any outstanding timer — a new message resets the window
