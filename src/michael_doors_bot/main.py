@@ -3519,8 +3519,14 @@ async def form_last(token: str = Query(default=""), admin: str = Query(default="
     ok_admin = bool(config.ADMIN_SECRET) and admin == config.ADMIN_SECRET
     if secret and not ok_token and not ok_admin:
         return JSONResponse({"ok": False, "error": "forbidden — add ?token=<FORM_SECRET>"}, status_code=403)
-    return JSONResponse({"ok": True, "count": len(_last_form_payloads),
-                         "payloads": list(reversed(_last_form_payloads))})
+    return Response(
+        content=json.dumps(
+            {"ok": True, "count": len(_last_form_payloads),
+             "payloads": list(reversed(_last_form_payloads))},
+            ensure_ascii=False,
+        ),
+        media_type="application/json; charset=utf-8",
+    )
 
 
 @app.get("/lead-status", response_class=JSONResponse)
