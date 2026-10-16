@@ -3395,6 +3395,20 @@ async def _process_form_lead(data: dict) -> tuple:
     city = _pick_field(data, ["city", "town", "location", "עיר"])
     note = _pick_field(data, ["note", "message", "notes", "comment", "הערה", "הודעה"])
 
+    # The "דברו איתנו" form packs the real door type + city inside the free-text
+    # message, e.g. "עיר: נתניה | תחומי עניין: דלתות כניסה". If the subject field
+    # isn't itself a door type, recover them from the message.
+    if not city and note:
+        _m = re.search(r"עיר\s*[:：]\s*([^|,\n]+)", note)
+        if _m:
+            city = _m.group(1).strip()
+    if note and not flow_machine.detect_inquiry_type(door_type):
+        _interest = re.search(r"(?:תחומי עניין|עניין|סוג)\s*[:：]\s*([^|,\n]+)", note)
+        if _interest and flow_machine.detect_inquiry_type(_interest.group(1)):
+            door_type = _interest.group(1).strip()
+        elif flow_machine.detect_inquiry_type(note):
+            door_type = note
+
     if not phone_raw:
         return {"ok": False, "error": "missing phone"}, 400
     sender = _normalize_to_chat_id(phone_raw)
