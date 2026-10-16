@@ -724,6 +724,13 @@ def _lead_in_active_flow(sender: str) -> bool:
     return bool(lead.get("km_bot_enabled")) and lead.get("km_step") == key_message.AWAITING_REPLY
 
 
+def _bypass_blocks(sender: str) -> bool:
+    """Always process this sender's inbound, ignoring the pre-existing / pre-boot /
+    human-takeover guards: a configured TEST number, or a lead mid proactive flow
+    (the bot opened the exchange and awaits the one reply)."""
+    return sender in config.BOT_TEST_PHONES or _lead_in_active_flow(sender)
+
+
 async def _attach_summary(sender: str, close_reason: str, is_test: bool) -> None:
     """Generate a summary and attach it to the lead record. Runs at most once per conversation."""
     if sender in _summary_attached:
@@ -2393,16 +2400,16 @@ async def _poll_loop() -> None:
                     or ""
                 )
                 msg_timestamp = body.get("timestamp", 0)
-                if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _lead_in_active_flow(sender):
+                if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _bypass_blocks(sender):
                     if sender:
                         _pre_boot_senders.add(sender)
                     logger.info(
                         "[BOT:SKIP_OLD] Poll pre-boot message — sender blocked | id=%s | sender=%s",
                         msg_id, sender,
                     )
-                elif sender in _pre_boot_senders and not _lead_in_active_flow(sender):
+                elif sender in _pre_boot_senders and not _bypass_blocks(sender):
                     logger.info("[BOT:SKIP_PREBOOT] Poll blocked sender | sender=%s", sender)
-                elif sender in _pre_existing_contacts and not _lead_in_active_flow(sender):
+                elif sender in _pre_existing_contacts and not _bypass_blocks(sender):
                     logger.info("[BOT:SKIP_PREEXISTING] Poll pre-bot human contact | sender=%s", sender)
                 elif sender and msg_id and _is_duplicate(msg_id):
                     logger.info("[BOT:DEDUP] Poll duplicate skipped | id=%s | sender=%s", msg_id, sender)
@@ -2418,7 +2425,7 @@ async def _poll_loop() -> None:
                         # Emoji-only = acknowledgment ("👌", "😊" etc.) — reset timer, no reply.
                         _followup_reset(sender)
                         logger.info("[BOT:EMOJI_ACK] Emoji-only msg, timer reset | sender=%s", sender)
-                    elif sender in _human_takeover:
+                    elif sender in _human_takeover and not _bypass_blocks(sender):
                         # Human-takeover gate (poll path) — same guard as webhook path.
                         logger.info(
                             "[BOT:TAKEOVER_GATE] Poll incoming dropped — owner in control | sender=%s | text=%s",
@@ -2632,7 +2639,7 @@ async def webhook(request: Request, token: str = Query(default="")):
     # ── Pre-boot sender block ─────────────────────────────────────────────────
     # Layer 1: timestamp filter — message predates bot startup → mark sender
     msg_timestamp = body.get("timestamp", 0)
-    if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _lead_in_active_flow(sender):
+    if msg_timestamp and int(msg_timestamp) < int(_bot_start_time) and not _bypass_blocks(sender):
         if sender:
             _pre_boot_senders.add(sender)
         logger.info(
@@ -2643,14 +2650,14 @@ async def webhook(request: Request, token: str = Query(default="")):
         return JSONResponse({"ok": True})
 
     # Layer 2: sender already known to have pre-boot history → block all their messages
-    if sender in _pre_boot_senders and not _lead_in_active_flow(sender):
+    if sender in _pre_boot_senders and not _bypass_blocks(sender):
         logger.info("[BOT:SKIP_PREBOOT] Blocked sender has pre-boot history | sender=%s", sender)
         return JSONResponse({"ok": True})
 
     # Pre-existing contacts — human conversations before bot was connected.
     # Never respond to these; the bot was not part of their conversation history.
     # EXCEPTION: a proactive lead the bot itself opened (awaiting their reply).
-    if sender in _pre_existing_contacts and not _lead_in_active_flow(sender):
+    if sender in _pre_existing_contacts and not _bypass_blocks(sender):
         logger.info("[BOT:SKIP_PREEXISTING] Pre-bot human contact — staying silent | sender=%s", sender)
         return JSONResponse({"ok": True})
 
@@ -2685,7 +2692,7 @@ async def webhook(request: Request, token: str = Query(default="")):
         # If the owner already sent a manual message to this customer (takeover
         # is active), drop the incoming message immediately — do NOT even buffer
         # it.  This is the primary guard; _flush_pending has a secondary check.
-        if sender in _human_takeover:
+        if sender in _human_takeover and not _bypass_blocks(sender):
             logger.info(
                 "[BOT:TAKEOVER_GATE] Webhook incoming dropped — owner in control | sender=%s | text=%s",
                 sender, text[:50],
@@ -3432,7 +3439,9 @@ async def _process_form_lead(data: dict) -> tuple:
     try:
         leads = _load_leads(is_test)
         lead = leads.get(sender) or {"phone": sender, "firstContact": now, "messages": []}
-        duplicate = bool(lead.get("form_sent"))
+        # A TEST number always re-runs the full flow (no dedup) so it can be
+        # tested repeatedly without clearing state.
+        duplicate = bool(lead.get("form_sent")) and sender not in config.BOT_TEST_PHONES
 
         # Clean door-type label (detects synonyms like "פלדלת" → "דלת כניסה").
         door_label = flow_machine.inquiry_type_label(door_type) or door_type
@@ -3440,11 +3449,14 @@ async def _process_form_lead(data: dict) -> tuple:
         if not duplicate:
             msg = _form_lead_message(name, door_label, flow_machine.detect_inquiry_type(door_type))
             did_send = False
-            # Rate-limit proactive sends to protect the number from bans.
-            if _proactive_can_send_now():
+            # Rate-limit proactive sends to protect the number from bans — but a
+            # TEST number sends immediately and isn't counted toward the cap.
+            _is_test_phone = sender in config.BOT_TEST_PHONES
+            if _is_test_phone or _proactive_can_send_now():
                 try:
                     await green.send_message(sender, msg)
-                    _proactive_record_send()
+                    if not _is_test_phone:
+                        _proactive_record_send()
                     did_send = True
                 except Exception as send_err:
                     _record_error("send_fail", sender, f"form_lead: {send_err}")
