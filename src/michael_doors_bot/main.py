@@ -3470,6 +3470,10 @@ async def _process_form_lead(data: dict) -> tuple:
             # then hands off to the human. (Do NOT take over yet.)
             lead["km_step"] = key_message.AWAITING_REPLY
             lead["km_bot_enabled"] = True
+            # Fresh bot-driven exchange → clear any stale human-takeover / pre-boot
+            # block on this number so the lead's reply is actually processed.
+            _takeover_release(sender)
+            _pre_boot_senders.discard(sender)
 
         leads[sender] = lead
         _save_leads(leads, is_test)
