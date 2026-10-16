@@ -120,6 +120,12 @@ HOURS_BYPASS_PHONES: set[str] = _parse_bypass_phones(os.getenv("HOURS_BYPASS_PHO
 # contact that must never get an automated reply. Format: "0524674204,972501112233".
 BOT_EXCLUDE_PHONES: set[str] = _parse_bypass_phones(os.getenv("BOT_EXCLUDE_PHONES", ""))
 
+# Comma-separated TEST numbers that always get the full bot flow, ignoring every
+# "don't engage" guard (pre-existing contact, pre-boot, human-takeover) and the
+# form dedup — so you can run the end-to-end test repeatedly without resets.
+# For development only; remove the number before relying on normal behavior.
+BOT_TEST_PHONES: set[str] = _parse_bypass_phones(os.getenv("BOT_TEST_PHONES", ""))
+
 # ── Production safety checks ──────────────────────────────────────────────────
 _PROD_WARNINGS: list[str] = []
 if not TEST_MODE:
