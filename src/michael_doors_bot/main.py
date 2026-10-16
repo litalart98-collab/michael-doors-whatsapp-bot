@@ -1903,7 +1903,18 @@ async def _km_airtable_sync(sender: str, lead: dict, action: str, is_test: bool)
             topic = f"{door_type} | {reply}"
         else:
             topic = reply or door_type
+        # Inbound leads have no name from a form → use the WhatsApp profile name so
+        # the Airtable "שם לקוח" column is still filled.
+        name = lead.get("full_name") or ""
+        if not name:
+            try:
+                name = (await green.get_contact_name(sender)) or ""
+                if name:
+                    lead["full_name"] = name
+            except Exception:
+                name = ""
         values = {
+            "full_name":  name,        # → "שם לקוח" (empty values are dropped)
             "phone":      _format_il_phone(lead.get("phone") or sender),
             "service":    door_type,   # → "סוג שירות" (empty values are dropped)
             "topic":      topic,       # → "נושא פנייה" (door type + the raw reply)
@@ -3389,6 +3400,14 @@ async def _process_form_lead(data: dict) -> tuple:
     sender = _normalize_to_chat_id(phone_raw)
     if not sender or not _is_individual_chat(sender):
         return {"ok": False, "error": "invalid phone"}, 400
+
+    # No name on the form → fall back to the WhatsApp profile name so the Airtable
+    # row (and the greeting) still has a name.
+    if not name:
+        try:
+            name = (await green.get_contact_name(sender)) or ""
+        except Exception:
+            name = ""
 
     is_test = config.TEST_MODE
     now = datetime.utcnow().isoformat()
