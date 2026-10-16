@@ -3375,7 +3375,8 @@ async def _process_form_lead(data: dict) -> tuple:
         "whatsapp", "טלפון", "נייד",
     ], contains="phone")
     door_type = _pick_field(data, [
-        "door_type", "doorType", "service", "doortype", "type", "סוג", "סוג דלת",
+        "door_type", "doorType", "service", "doortype", "type", "subject",
+        "סוג", "סוג דלת", "נושא", "נושא הפנייה", "נושא פנייה", "נושא הפניה", "נושא פניה",
     ])
     quantity = _pick_field(data, [
         "quantity", "amount", "qty", "count", "כמות",
